@@ -158,8 +158,15 @@ export type ListMessagesQuery = NonNullable<
   import('./api-schema').operations['list_messages']['parameters']['query']
 >
 
-export const listChannels = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal, query?: NonNullable<import('./api-schema').operations['list_channels']['parameters']['query']>) =>
-  call<components['schemas']['ChannelList']>(f, `${orgPath(organizationId)}/channels${querySuffix(query ?? {})}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
+export const CHANNEL_READ_ID_HEADER = 'x-fukulow-read-id'
+
+export const listChannels = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal, query?: NonNullable<import('./api-schema').operations['list_channels']['parameters']['query']>, readId?: string) =>
+  call<components['schemas']['ChannelList']>(
+    f,
+    `${orgPath(organizationId)}/channels${querySuffix(query ?? {})}`,
+    { cache: 'no-store', ...(signal ? { signal } : {}), ...(readId ? { headers: { [CHANNEL_READ_ID_HEADER]: readId } } : {}) },
+    true,
+  )
 
 export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
   call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)

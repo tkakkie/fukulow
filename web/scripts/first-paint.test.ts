@@ -67,18 +67,27 @@ function withProbeGlobals<T>(fn: (ctx: {
   g.MutationObserver = FakeMutationObserver
   g.PerformanceObserver = FakePerformanceObserver
   g.requestAnimationFrame = (cb: () => void) => { cb(); return 1 }
+  const restore = () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete g[k]
+      else g[k] = v
+    }
+  }
   try {
-    return fn({
+    const result = fn({
       doc,
       win,
       triggerMutation: () => { for (const cb of mutationCallbacks) cb() },
       mutationOptions,
     })
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete g[k]
-      else g[k] = v
+    if (result instanceof Promise) {
+      return result.finally(restore) as T
     }
+    restore()
+    return result
+  } catch (err) {
+    restore()
+    throw err
   }
 }
 
@@ -290,6 +299,13 @@ describe('first-paint measurement diagnostics (#954 R1)', () => {
       directoryStartMs: null,
       authorLookupStartMs: 190,
       apiCalls: [],
+      channelReads: {
+        valid: true,
+        invalidReasons: [],
+        reads: [],
+        countsByClass: { 'O5-only': 0, startup: 0, composite: 0, empty: 0, unknown: 0 },
+        countedReads: 0,
+      },
       timingChain: [],
     }
     const summary = summarizeCell('/', '/', 'throttled', 'cold', [baseRun])
@@ -351,5 +367,61 @@ describe('first-paint measurement diagnostics (#954 R1)', () => {
         checkoutSha,
       }),
     ).toBe(checkoutSha)
+  })
+
+  it('captures x-fukulow-read-id headers and pairs them one-to-one with fukulow:read:channels marks', async () => {
+    performance.clearMarks('fukulow:read:channels')
+    try {
+      await withProbeGlobals(({ win }) => (async () => {
+        installFirstPaintProbe({ expectedOrg: 'org-1', expectedChannel: 'ch-1' })
+        const fetchFn = win.fetch as typeof fetch
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-1', reasons: ['initial'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-1' } })
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-2', reasons: ['periodic'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels?history_generation=g1', { headers: { 'x-fukulow-read-id': 'ch-2' } })
+        // Archived channel list requests are excluded from startup Channel list classification.
+        await fetchFn('/api/v1/orgs/org-1/channels?archived=true')
+
+        const probe = win.__fp345 as Record<string, unknown>
+        Object.assign(probe, {
+          appMountMs: 100,
+          fcpMs: 90,
+          timelineVisibleMs: 200,
+          timelinePaintedMs: 210,
+          firstNamedRowMs: 220,
+          wsConnectStartMs: 110,
+          wsOpenMs: 120,
+          wsSubscribeSentMs: 125,
+          wsSubscribedMs: 140,
+        })
+        const page = {
+          waitForFunction: vi.fn(async () => undefined as never),
+          evaluate: vi.fn(async (fn: typeof extractRunMetricsInPage, arg: Parameters<typeof extractRunMetricsInPage>[0]) => {
+            return await fn(arg)
+          }),
+        }
+        const metrics = await collectRunMetrics(page as never, {
+          runNumber: 1,
+          expectedOrg: 'org-1',
+          expectedChannel: 'ch-1',
+          diagnosticTimeoutMs: 50,
+        })
+        expect(metrics.channelReads.valid).toBe(true)
+        expect(metrics.channelReads.countsByClass).toEqual({
+          'O5-only': 1,
+          startup: 1,
+          composite: 0,
+          empty: 0,
+          unknown: 0,
+        })
+        expect(metrics.channelReads.countedReads).toBe(1)
+        expect(metrics.channelReads.reads).toEqual([
+          { seq: 1, readId: 'ch-1', reasons: ['initial'], classification: 'startup', counted: true },
+          { seq: 2, readId: 'ch-2', reasons: ['periodic'], classification: 'O5-only', counted: false },
+        ])
+      })())
+    } finally {
+      performance.clearMarks('fukulow:read:channels')
+    }
   })
 })

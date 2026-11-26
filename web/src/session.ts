@@ -7,7 +7,7 @@ import * as api from './api'
 import { createChannelCreation } from './channel-creation'
 import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
-import { createChannels, type ChannelsApi } from './channels'
+import { createChannels, markChannelsRead, type ChannelsApi } from './channels'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import type { InitialTimeline } from './initial-timeline'
 import { createMoveChain, type MoveChainApi } from './move-chain'
@@ -28,7 +28,7 @@ export async function startInitialChannels(organizationId: string, accountSignal
   // Match the Channel list deadline while there is no session controller.
   const timeout = setTimeout(abort, 10_000)
   try {
-    return await api.listChannels(organizationId, undefined, request.signal)
+    return await api.listChannels(organizationId, undefined, request.signal, undefined, markChannelsRead(['initial']))
   } finally {
     clearTimeout(timeout)
     accountSignal.removeEventListener('abort', abort)
@@ -118,7 +118,7 @@ export function createSession(options: SessionOptions) {
   })
   const isDm = (id: string) => dms?.get().rows.some(row => row.identity.id === id) ?? false
   const source: ChannelsApi = options.channelsApi ?? {
-    listChannels: signal => api.listChannels(organizationId, undefined, signal, { history_generation: history?.get().historyGeneration }),
+    listChannels: (signal, readId) => api.listChannels(organizationId, undefined, signal, { history_generation: history?.get().historyGeneration }, readId),
     createChannel: body => api.createChannel(organizationId, body),
     listArchivedChannels: signal => api.listChannels(organizationId, undefined, signal, { archived: true, history_generation: history?.get().historyGeneration }),
     getChannel: (id, signal) => api.getChannel(organizationId, id, undefined, signal),
@@ -222,17 +222,17 @@ export function createSession(options: SessionOptions) {
   let watched: string | null = null
   const { listArchivedChannels, getChannel, updateChannel } = source
   let initialChannels = options.initialChannels
-  const readChannels = (signal?: AbortSignal) => options.channelsApi ? source.listChannels(signal) : unreadSource.listChannels(signal)
-  function listChannels(signal?: AbortSignal) {
+  const readChannels = (signal?: AbortSignal, readId?: string) => options.channelsApi ? source.listChannels(signal, readId) : unreadSource.listChannels(signal, readId)
+  function listChannels(signal?: AbortSignal, readId?: string) {
     const initial = initialChannels
     initialChannels = undefined
     return observe(initial ? initial.then(result => {
       if (signal?.aborted && result.ok) return { ok: false, kind: 'network' } as const
       const generation = sync.get().historyGeneration
       // An unversioned startup response cannot supersede a generation learned while it was in flight.
-      if (result.ok && generation !== undefined && result.data.history_generation !== generation) return readChannels(signal)
+      if (result.ok && generation !== undefined && result.data.history_generation !== generation) return readChannels(signal, markChannelsRead(['reconcile']))
       return result
-    }) : readChannels(signal))
+    }) : readChannels(signal, readId))
   }
   const hasUnread = (row: api.Channel): row is api.UnreadChannel => 'as_of_seq' in row && completeCountFields(row)
   const channels = createChannels(
@@ -277,6 +277,7 @@ export function createSession(options: SessionOptions) {
         return state.connected && state.connection !== null ? state.connection : null
       },
       coversUnread: rows => rows.every(row => !hasUnread(row) || unread.activityCoversListBaseline(row)),
+      hasInitialChannels: () => initialChannels !== undefined,
     },
   )
   const channelCreation = createChannelCreation(options.initialCanCreateChannels ?? false, channels.create)
