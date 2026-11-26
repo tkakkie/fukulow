@@ -120,7 +120,7 @@ export function createSession(options: SessionOptions) {
   const source: ChannelsApi = options.channelsApi ?? {
     listChannels: (signal, readId) => api.listChannels(organizationId, undefined, signal, { history_generation: history?.get().historyGeneration }, readId),
     createChannel: body => api.createChannel(organizationId, body),
-    listArchivedChannels: signal => api.listChannels(organizationId, undefined, signal, { archived: true, history_generation: history?.get().historyGeneration }),
+    listArchivedChannels: (signal, readId) => api.listChannels(organizationId, undefined, signal, { archived: true, history_generation: history?.get().historyGeneration }, readId),
     getChannel: (id, signal) => api.getChannel(organizationId, id, undefined, signal),
     updateChannel: (id, body) => api.updateChannel(organizationId, id, body),
   }
@@ -178,7 +178,7 @@ export function createSession(options: SessionOptions) {
       refreshDms: () => dms?.refresh(),
       isDm,
       unreadApi: {
-        listChannels: () => observe(unreadSource.listChannels()),
+        listChannels: (signal, readId) => observe(unreadSource.listChannels(signal, readId)),
         markRead: (scope, body) => observe(unreadSource.markRead(scope, body)),
         getTopicSummary: (channel, topic) => observe(options.unreadApi ? unreadSource.getTopicSummary(channel, topic) : topics.activitySummary(channel, topic, unread.get(channel).topics[topic]?.position ?? 0, unread.activityRequiredBase(channel))),
       },
@@ -239,7 +239,7 @@ export function createSession(options: SessionOptions) {
     {
       listChannels,
       createChannel: body => observe(source.createChannel(body)),
-      listArchivedChannels: listArchivedChannels && (signal => observe(listArchivedChannels(signal))),
+      listArchivedChannels: listArchivedChannels && ((signal, readId) => observe(listArchivedChannels(signal, readId))),
       getChannel: getChannel && ((id, signal) => observe(getChannel(id, signal))),
       updateChannel: updateChannel && (async (id, body) => {
         const result = await updateChannel(id, body)
