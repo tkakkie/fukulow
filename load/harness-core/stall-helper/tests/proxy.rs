@@ -79,7 +79,11 @@ fn native_proxy_reports_readbacks_pauses_upstream_then_drains() -> io::Result<()
         assert_eq!(number::<usize>(&connected, "socket")?, id);
         assert_eq!(number::<usize>(&connected, "before")?, before);
         assert_eq!(number::<usize>(&connected, "after")?, after);
-        let (upstream, _) = server.accept()?;
+        let (upstream, proxy_peer) = server.accept()?;
+        assert_eq!(
+            number::<u16>(&connected, "upstream_port")?,
+            proxy_peer.port()
+        );
         Ok((port, client, upstream))
     };
     let (port, mut client, mut upstream) = attach(0)?;

@@ -12,7 +12,7 @@ import { SetupAbort } from './revocation-holds-setup.ts';
 const slot = { kind: 'fault', cell: 'H512', duration: 'short', repeat: 1 } as const;
 const context = (output: string) => ({
   binary: join(output, 'server'), helperBinary: process.execPath, output, stall: STALL_DEFAULT,
-  active: {}, interrupted: () => false, setup: { kind: 'preflight' } as const, linuxPlacement: false,
+  active: {}, interrupted: () => false, setup: { kind: 'preflight', sendBuffer: preflightIdentity.sendBuffer } as const, linuxPlacement: false,
 });
 
 function withoutDocker(t: { after: (fn: () => void) => void }) {

@@ -15,7 +15,7 @@ import { startRssSampler } from './revocation-burst-rss.ts';
 import { emptyLog, readLogLine } from './revocation-holds-log.ts';
 import { BYSTANDERS, CELLS, DURATIONS, restoreAccount, runId, socketAccount, stallBody, targetSockets, TIMELINE, type PlannedRun, type Stall } from './revocation-holds-plan.ts';
 import { NativeStall } from './revocation-holds-native-stall.ts';
-import { requirePreflight, requireReadbacks, startStall, type Setup } from './revocation-holds-setup.ts';
+import { requirePreflight, requireReadbacks, requireSendBuffers, startStall, targetSendBuffers, type Setup } from './revocation-holds-setup.ts';
 import { postgresContainer, postgresPid, recordPlacement, serverPrefix } from './revocation-holds-placement.ts';
 import { messagesForSender } from './revocation-holds-preflight.ts';
 import { readTrace, watchTrace } from './revocation-holds-trace.ts';
@@ -85,7 +85,7 @@ type Context = {
 
 type CheckPlacement = ReturnType<typeof recordPlacement>;
 
-async function startServer(ctx: Context, dir: string, check: CheckPlacement) {
+async function startServer(ctx: Context, dir: string, check: CheckPlacement, sendBuffer: number | undefined) {
   const db = startDatabase(`fk592-h668-${randomUUID().slice(0, 8)}`, ctx.linuxPlacement ? postgresContainer() : undefined); ctx.active.db = db;
   await waitReady(db);
   check('postgres', () => postgresPid(db.name));
@@ -99,7 +99,7 @@ async function startServer(ctx: Context, dir: string, check: CheckPlacement) {
   const relayPort = await relay.listen();
   const appPort = 20000 + Math.floor(Math.random() * 20000);
   const setupToken = randomBytes(16).toString('hex');
-  const server = spawnMeasuredServer(ctx.binary, dir, appPort, setupToken, url('fukulow_app', db.appPassword, relayPort), ctx.overhead !== 'off', prefix);
+  const server = spawnMeasuredServer(ctx.binary, dir, appPort, setupToken, url('fukulow_app', db.appPassword, relayPort), ctx.overhead !== 'off', prefix, sendBuffer);
   ctx.active.server = server;
   const watcher = ctx.overhead && watchTrace(server.tracePath);
   if (watcher) ctx.active.stopWatchingTrace = watcher.stop;
@@ -238,8 +238,9 @@ async function findPass(relay: Relay) {
   return pass;
 }
 
-async function prepare(ctx: Context, run: PlannedRun, dir: string, expectedReadback: number | undefined, check: CheckPlacement) {
-  const started = await startServer(ctx, dir, check);
+async function prepare(ctx: Context, run: PlannedRun, dir: string, expected: ReturnType<typeof requirePreflight>, check: CheckPlacement) {
+  const sendBuffer = ctx.setup.kind === 'measured' ? ctx.setup.identity.sendBuffer : ctx.setup.sendBuffer;
+  const started = await startServer(ctx, dir, check, sendBuffer);
   const { db, relay, log, base } = started;
   const fixture = await seedFixture(db, base, started.setupToken, run, ctx.stall);
   const count = targetSockets(run.cell);
@@ -248,12 +249,15 @@ async function prepare(ctx: Context, run: PlannedRun, dir: string, expectedReadb
   const proxyPorts = await startStall(() => helper.listening());
   check('helper', () => helper.pid);
   const sockets = await openSockets(ctx, fixture, run, started.appPort, proxyPorts);
-  const stallReadbacks = await requireReadbacks(() => helper.readbacks(), count, expectedReadback);
+  const stallReadbacks = await requireReadbacks(() => helper.readbacks(), count, expected?.receiveBuffer);
   writeFileSync(resolve(dir, 'stall-readbacks.json'), JSON.stringify(stallReadbacks));
   for (let i = 0; !(sockets.targets.every(t => t.subscribed) && sockets.state.bystandersReady >= BYSTANDERS); i++) {
     if (i > 1200 || ctx.interrupted()) break; // floor 1 reports sockets that never became ready
     await sleep(100);
   }
+  const sendBuffers = targetSendBuffers(stallReadbacks, log.sendBuffers);
+  writeFileSync(resolve(dir, 'send-buffer-readbacks.json'), JSON.stringify({ requested: sendBuffer ?? null, targets: sendBuffers }));
+  const effectiveSendBuffer = sendBuffer === undefined ? undefined : requireSendBuffers(sendBuffers, expected?.sendBuffer);
   const calibrationErrors: string[] = [];
   const calibrate = () => calibrateClock(base, log.clock, log.clockWall).catch(error => { calibrationErrors.push((error as Error).message); return undefined; });
   const clockStart = await calibrate();
@@ -263,16 +267,16 @@ async function prepare(ctx: Context, run: PlannedRun, dir: string, expectedReadb
   ctx.active.sessions = [probes.session, control];
   ctx.active.stopProbes = () => { void probes.stop(); };
   const pass = await findPass(relay);
-  return { started, fixture, helper, helperStart, stallReadbacks, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass };
+  return { started, fixture, helper, helperStart, stallReadbacks, effectiveSendBuffer, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass };
 }
 
 export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(run)): Promise<HoldsRun> {
   const dir = resolve(ctx.output, attemptId); mkdirSync(dir);
-  const expectedReadback = requirePreflight(ctx.setup);
+  const expected = requirePreflight(ctx.setup);
   const check = recordPlacement(dir, ctx.linuxPlacement);
   check('client', () => process.pid);
-  const prepared = await prepare(ctx, run, dir, expectedReadback, check);
-  const { started, fixture, helper, helperStart, stallReadbacks, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass } = prepared;
+  const prepared = await prepare(ctx, run, dir, expected, check);
+  const { started, fixture, helper, helperStart, stallReadbacks, effectiveSendBuffer, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass } = prepared;
   const { relay, log } = started;
   const restoreIndex = restoreAccount(run.cell);
   const accounts: AccountMutations[] = fixture.targets.map(({ id }) => ({ memberId: id }));
@@ -332,7 +336,7 @@ export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(r
     setup: { bystanders: BYSTANDERS, bystandersReadyAtStall: stalled.bystandersReady, targetsReadyAtStall: stalled.targetsReady,
       calibrationErrors, stallPostFailures: stalled.failures, gateErrors, stallErrors },
     serverCloses: log.closes, wallOffsetBoundsMs,
-    revokedChannels: fixture.revoked, accounts, targets: sockets.targets, stallReadbacks, notices: sockets.notices,
+    revokedChannels: fixture.revoked, accounts, targets: sockets.targets, stallReadbacks, effectiveSendBuffer, notices: sockets.notices,
     bystanderNotices: sockets.state.bystanderNotices, bystanderCloses: sockets.state.bystanderCloses,
     sendTiming: offsetBoundsMs && { offsetBoundsMs, uncertaintyMs: runUncertaintyMs(offsetBoundsMs, log.sends), records: log.sends },
     samples: log.holds, statements: relay.statements, refused: relay.refused,
