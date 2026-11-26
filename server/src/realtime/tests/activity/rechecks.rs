@@ -1,100 +1,64 @@
 use super::*;
+use crate::{
+    auth::{
+        activity::ChannelChange,
+        activity::hook_decorator::{
+            ActivityHooks, BeforeRecheck, ChangeHooks, Decorator, RecheckHooks,
+        },
+    },
+    channels::activity::pause,
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
-    use crate::auth::{SubscriptionRecheck, SubscriptionScope, activity::*};
-    use crate::channels::activity::{Activity, pause};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    struct OrderedChanges {
-        activity: Activity,
-        started: Arc<AtomicBool>,
-    }
-    impl ActivityChanges for OrderedChanges {
-        fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
-            assert!(matches!(change, ChannelChange::Members { .. }));
-            self.started.store(true, Ordering::SeqCst);
-            self.activity.channel(pool, organization, change);
-        }
-        fn capture<'a>(
-            &'a self,
-            tx: &'a mut sqlx::PgConnection,
-            organization: Uuid,
-            target: Uuid,
-            scope: ChangeScope,
-        ) -> Capture<'a> {
-            Box::pin(async move {
-                Ok(Box::new(OrderedChange {
-                    inner: self
-                        .activity
-                        .capture(tx, organization, target, scope)
-                        .await?,
-                    started: self.started.clone(),
-                }) as Box<dyn ActivityChange>)
-            })
-        }
-        fn directory(&self, pool: PgPool, organization: Uuid, target: Uuid) {
-            self.activity.directory(pool, organization, target);
-        }
-    }
-    struct OrderedChange {
-        inner: Box<dyn ActivityChange>,
-        started: Arc<AtomicBool>,
-    }
-    impl ActivityChange for OrderedChange {
-        fn retire(&mut self) {
-            self.inner.retire();
-        }
-        fn committed(self: Box<Self>, pool: PgPool) {
-            self.started.store(true, Ordering::SeqCst);
-            self.inner.committed(pool);
-        }
-    }
-    struct OrderedRecheck {
-        access: crate::channels::AccessChanges,
-        started: Arc<AtomicBool>,
-        gate: Arc<Gate>,
-    }
-    impl SubscriptionRecheck for OrderedRecheck {
-        fn check<'a>(
-            &'a self,
-            pool: &'a PgPool,
-            scope: SubscriptionScope,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
-        {
-            Box::pin(async move {
-                // Force a publisher started before this recheck to expose its unproved
-                // query. A publisher started afterwards passes the already released gate.
-                if self.started.load(Ordering::SeqCst) {
-                    self.gate.entered().await;
-                }
-                let result = self.access.check(pool, scope).await;
-                assert!(result.is_ok(), "mutation recheck failed: {result:?}");
-                self.gate.release();
-                result
-            })
-        }
-        fn failed(&self, scope: SubscriptionScope) {
-            self.access.failed(scope);
-        }
-    }
-
     let started = Arc::new(AtomicBool::new(false));
     let gate = pause(f.organization, channel, phase);
+    let channel_started = started.clone();
+    let commit_started = started.clone();
+    f.state.session_changes.set_activity(Arc::new(Decorator {
+        inner: f.state.message_delivery.channel_access.activity.clone(),
+        hooks: ActivityHooks {
+            before_channel: Some(Box::new(move |change| {
+                assert!(matches!(change, ChannelChange::Members { .. }));
+                channel_started.store(true, Ordering::SeqCst);
+            })),
+            after_capture: Some(Box::new(move |_| {
+                let started = commit_started.clone();
+                Some(ChangeHooks {
+                    skip_retire: false,
+                    commit: Box::new(move |change, pool| {
+                        started.store(true, Ordering::SeqCst);
+                        change.committed(pool);
+                    }),
+                })
+            })),
+        },
+    }));
+    let recheck_gate = gate.clone();
     f.state
         .session_changes
-        .set_activity(Arc::new(OrderedChanges {
-            activity: f.state.message_delivery.channel_access.activity.clone(),
-            started: started.clone(),
-        }));
-    f.state
-        .session_changes
-        .set_subscription_recheck(Arc::new(OrderedRecheck {
-            access: f.state.message_delivery.channel_access.clone(),
-            started,
-            gate,
+        .set_subscription_recheck(Arc::new(Decorator {
+            inner: f.state.message_delivery.channel_access.clone(),
+            hooks: RecheckHooks {
+                before_recheck: Some(Box::new(move |_| {
+                    // Force a publisher started before this recheck to expose its unproved
+                    // query. A publisher started afterwards passes the already released gate.
+                    if started.load(Ordering::SeqCst) {
+                        let gate = recheck_gate.clone();
+                        BeforeRecheck::Wait(Box::pin(async move { gate.entered().await }))
+                    } else {
+                        BeforeRecheck::Run
+                    }
+                })),
+                after_recheck: Some(Box::new(move |result| {
+                    assert!(result.is_ok(), "mutation recheck failed: {result:?}");
+                    gate.release();
+                })),
+                ..RecheckHooks::default()
+            },
         }));
 }
 

@@ -7,12 +7,12 @@ use axum::{
     routing::post,
 };
 use serde_json::Value;
-use std::{
-    io::{self, Write},
-    sync::{Arc, Mutex},
-};
+use std::io;
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
+
+mod capture;
+pub(crate) use capture::Capture;
 
 #[test]
 fn revocation_hold_metrics_report_every_outcome() {
@@ -44,41 +44,6 @@ fn revocation_hold_metrics_report_every_outcome() {
             assert_eq!(fields[*field], index + 1, "{field}");
         }
     });
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
-impl Write for Capture {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = Self;
-    fn make_writer(&'a self) -> Self {
-        self.clone()
-    }
-}
-impl Capture {
-    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        subscriber(self.clone(), false)
-    }
-    pub(crate) fn measurement_subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        subscriber(self.clone(), true)
-    }
-    pub(crate) fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-    pub(crate) fn events(&self) -> Vec<Value> {
-        self.text()
-            .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
-            .collect()
-    }
 }
 
 #[test]

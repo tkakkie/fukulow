@@ -1,6 +1,9 @@
 use super::*;
 use std::{future::Future, pin::Pin, sync::Arc};
 
+#[cfg(test)]
+pub(crate) mod hook_decorator;
+
 pub type Capture<'a> =
     Pin<Box<dyn Future<Output = Result<Box<dyn ActivityChange>, sqlx::Error>> + Send + 'a>>;
 pub enum ChannelChange {
