@@ -2,6 +2,7 @@ import { mount, unmount } from 'svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from './api'
 import type { DisplayIdentity, lookupAuthors, listMembers, Member, MemberList, Result } from './api'
+import { watchAuthorScope } from './author-lookup-scope'
 import { FIRST_DISPLAY_AUTHORS_TIMEOUT_MS } from './authors'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter } from './channels.svelte'
@@ -75,6 +76,7 @@ function makeWorkspace(options: {
     baseUrl: () => '',
   }, rawSession.memberListAccess)
   rawSession.holdActivity('members', memberController.activityTarget)
+  const stopAuthorScope = watchAuthorScope(rawSession.channels, rawSession.sync, memberController.authors)
   const stopRefresh = watchMemberAccess(rawSession.channels, rawSession.sync, reason => {
     if (reason === 'access') memberController.activityTarget.invalidate('access')
     else void memberController.refreshIfActive()
@@ -120,12 +122,14 @@ function makeWorkspace(options: {
   })
   return {
     net,
+    rawSession,
     host,
     navigation,
     memberController,
     listMembersFn,
     lookupAuthorsFn,
     async cleanup() {
+      stopAuthorScope()
       stopRefresh()
       navigation.destroy()
       await unmount(instance)
@@ -188,6 +192,11 @@ describe('Deferred Member directory and first-display author resolution (#954 R1
       expect(lookupAuthorsFn.mock.calls[0][1].ids).toEqual(expect.arrayContaining(['alice', 'bob']))
       expect(w.host.querySelector('.timeline-list .timeline-list__item')).toBeNull()
       expect(listMembersFn).not.toHaveBeenCalled()
+
+      w.net.subscribed('c1', 3)
+      await settle()
+      expect(w.rawSession.sync.get().channels.c1.subscription?.confirmed).toBe(true)
+      expect(lookupAuthorsFn).toHaveBeenCalledTimes(1)
 
       // Resolve scoped authors: first display renders immediately with resolved active & deactivated labels.
       finishes.at(-1)!(ok({

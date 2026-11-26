@@ -1,6 +1,7 @@
 import type { ActivityTarget } from './activity'
 import { createSubscriber } from 'svelte/reactivity'
 import { createAuthOperations } from './auth-operations'
+import { watchAuthorScope } from './author-lookup-scope'
 import { createAccountSecurity } from './account-security'
 import { accountSecurityAdapter } from './account-security.svelte'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
@@ -30,6 +31,7 @@ import type { SearchSource } from './search-source'
 export type { AuthState } from './auth'
 type InitialSelection = Pick<SessionOptions, 'initialTimeline' | 'initialChannelHint'>
 export type SessionModel = {
+  watchAuthors?(authors: Parameters<typeof watchAuthorScope>[2]): () => void
   holdActivity?(key: string, target: ActivityTarget): unknown
   dms?: DmsAdapter
   navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
@@ -73,6 +75,7 @@ const defaults: AuthDeps = {
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
     return {
+      watchAuthors: authors => watchAuthorScope(session.channels, session.sync, authors),
       holdActivity: session.holdActivity,
       memberListAccess: session.memberListAccess,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
@@ -114,6 +117,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
   let session: SessionModel | null = null
   let stopMemberAvailability: (() => void) | undefined
   let stopMemberRefresh: (() => void) | undefined
+  let stopAuthorScope: (() => void) | undefined
   let members = $state<ReturnType<typeof membersAdapter> | null>(null)
   let security = $state<ReturnType<typeof accountSecurityAdapter> | null>(null)
   let changes = $state(0)
@@ -128,6 +132,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     startup?.close(); startup = undefined
     stopMemberAvailability?.(); stopMemberAvailability = undefined
     stopMemberRefresh?.(); stopMemberRefresh = undefined
+    stopAuthorScope?.(); stopAuthorScope = undefined
     session?.close(); session = null
     members?.close(); members = null
     clearMessageFormatCache()
@@ -193,7 +198,10 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       void session?.sync.markUnavailable()
     }, session.memberListAccess ?? (() => organization?.member.role ?? null)) ?? null
-    if (members) session.holdActivity?.('members', members.activityTarget)
+    if (members) {
+      stopAuthorScope = session.watchAuthors?.(members.authors)
+      session.holdActivity?.('members', members.activityTarget)
+    }
     stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
     if (session.sync.unavailable) members?.unavailable()
     const currentMembers = members

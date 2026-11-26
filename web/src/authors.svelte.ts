@@ -10,6 +10,9 @@ export function authorsAdapter(controller: ReturnType<typeof createAuthors>) {
     syncInitialDisplay: controller.syncInitialDisplay,
     mentionName: (...args: Parameters<typeof controller.mentionName>) => { subscribe(); return controller.mentionName(...args) },
     watch: controller.watch,
+    selectChannel: controller.selectChannel,
+    confirmInitialSubscription: controller.confirmInitialSubscription,
+    invalidate: controller.invalidate,
     retry: controller.retry,
   }
 }
