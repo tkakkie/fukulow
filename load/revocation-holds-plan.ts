@@ -91,21 +91,27 @@ export function planRuns(cells: readonly Cell[], durations: readonly Duration[],
   return runs;
 }
 
-/** Append up to three replacements per shape. Retry a setup abort once in the same slot. */
-export function replacementQueue(initial: PlannedRun[]) {
-  const runs = [...initial];
+/** Retry a setup abort in place, then stop the session if that retry also aborts. */
+export function setupQueue<T>(runs: T[], identify: (run: T) => string) {
   let setupAborts = 0;
   function* attempts() {
     for (const run of runs) {
       setupAborts = 0;
-      const id = runId(run);
+      const id = identify(run);
       yield { run, id };
       if (setupAborts === 1) yield { run, id: `${id}-setup-retry` };
       if (setupAborts === 2) return;
     }
   }
+  return { attempts, abort: () => ++setupAborts < 2 };
+}
+
+/** Append up to three replacements per shape. Setup aborts do not count as runs. */
+export function replacementQueue(initial: PlannedRun[]) {
+  const runs = [...initial];
+  const queue = setupQueue(runs, runId);
   const record = (run: PlannedRun, outcome: 'setup abort' | 'INVALID' | 'PASS' | 'FAIL' | 'CONTROL') => {
-    if (outcome === 'setup abort') return ++setupAborts < 2;
+    if (outcome === 'setup abort') return queue.abort();
     if (outcome === 'INVALID') {
       const key = shape(run);
       const scheduled = runs.filter(r => shape(r) === key).length;
@@ -113,7 +119,7 @@ export function replacementQueue(initial: PlannedRun[]) {
     }
     return true;
   };
-  return { attempts, record };
+  return { attempts: queue.attempts, record };
 }
 
 // A rehearsal reports counts only. A formal run is the registered 3 repeats with controls.

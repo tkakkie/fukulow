@@ -370,7 +370,7 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
             .take_watermark_events(&f.state.pool);
         let target = channel(&pool, f.organization, f.member, false).await;
         let mut socket = f.server.connect(&f.token).await;
-        let gate = confirmation.then(|| pause(target));
+        let gate = confirmation.then(|| hooks::register_replay(target));
         if let Some(gate) = &gate {
             subscribe(&mut socket, target, 0).await;
             gate.entered().await;

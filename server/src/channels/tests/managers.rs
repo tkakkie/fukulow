@@ -2,42 +2,17 @@ use super::management::{grant, mutation, snapshot};
 use super::role_changes::change;
 use super::*;
 use crate::test_support::TestPools;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
 
 mod concurrency;
 mod deactivation;
 mod denials;
 mod lifetime;
 
-#[derive(Default)]
-struct Observed {
-    access: super::super::access::AccessChanges,
-    calls: AtomicUsize,
-}
-
-impl auth::SubscriptionRecheck for Observed {
-    fn check<'a>(
-        &'a self,
-        pool: &'a PgPool,
-        scope: auth::SubscriptionScope,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
-    {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move { auth::SubscriptionRecheck::check(&self.access, pool, scope).await })
-    }
-    fn failed(&self, _: auth::SubscriptionScope) {
-        panic!("unexpected subscription failure");
-    }
-}
-
 struct Fixture {
     pools: TestPools,
     state: AppState,
     app: Router,
-    observed: Arc<Observed>,
+    observed: RecheckObservation,
     org: Uuid,
     creator: Uuid,
     token: String,
@@ -51,10 +26,7 @@ impl Fixture {
         let creator = Uuid::new_v4();
         let token = member(&pools.admin, org, creator, "member").await;
         let state = AppState::for_test(pools.app.clone()).await;
-        let observed = Arc::new(Observed::default());
-        state
-            .session_changes
-            .set_subscription_recheck(observed.clone());
+        let observed = RecheckObservation::install(&state.session_changes);
         let app = crate::app(state.clone());
         let c = create(&app, &token, "Member's private Channel", "private").await;
         assert_eq!(c["capabilities"]["can_manage_managers"]["allowed"], true);

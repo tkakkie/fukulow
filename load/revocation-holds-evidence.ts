@@ -18,7 +18,7 @@ export function stallMessagesAfterResume(target: TargetSocket) {
   return new Set(target.stallMessages.filter(message => message.at >= resumed).map(message => message.id)).size;
 }
 
-export function evidence(run: HoldsRun) {
+export function evidence(run: HoldsRun, stallMessages = STALL_MESSAGES) {
   const issues: { rule: string; message: string }[] = [];
   const add = (rule: string, message: string) => issues.push({ rule, message });
   const fail = (rule: string, condition: boolean, message: string) => { if (condition) add(rule, message); };
@@ -87,9 +87,10 @@ export function evidence(run: HoldsRun) {
       heldTotal += held;
       refusedTotal += refused;
       const at = admitted === '-' || !admitted?.trim() ? NaN : Number(admitted);
-      const marginMs = bounds ? run.times.resume - (at + bounds[1]) : NaN;
-      if (Number.isFinite(marginMs)) admissions.push({ member, registration: i + 1, marginMs });
-      fail('E4', held + refused !== n || !(Number(s2?.at) <= at && at <= Number(s3?.at)) || !(marginMs > 0),
+      const marginMs = bounds && !run.times.resumeUnobserved ? run.times.resume - (at + bounds[1]) : NaN;
+      const insidePass = Number(s2?.at) <= at && at <= Number(s3?.at);
+      if (insidePass && Number.isFinite(marginMs)) admissions.push({ member, registration: i + 1, marginMs });
+      fail('E4', held + refused !== n || !insidePass || !(marginMs > 0),
         `registration ${i + 1} did not hold or refuse every check before release`);
     }
   }
@@ -98,21 +99,28 @@ export function evidence(run: HoldsRun) {
     const capTotal = (run.metrics?.revocation_retired_registration_cap ?? NaN) + (run.metrics?.revocation_retired_global_cap ?? NaN);
     if (heldTotal < 1 || refusedTotal !== capTotal) add('E4', 'no holds or disposition refusals disagree with the cap counters');
   }
-  if (run.targets.length !== cell.accounts * SOCKETS_PER_ACCOUNT || run.targets.some(t => stallMessagesAfterResume(t) !== STALL_MESSAGES)) {
-    add('E6', `not every target received all ${STALL_MESSAGES} stall Messages after release`);
+  if (run.targets.length !== cell.accounts * SOCKETS_PER_ACCOUNT || run.targets.some(t => stallMessagesAfterResume(t) !== stallMessages)) {
+    add('E6', `not every target received all ${stallMessages} stall Messages after release`);
   }
 
-  const lagMs = run.times.resume - (run.times.pass + TIMELINE.resume);
+  const lagMs = run.times.resumeUnobserved ? undefined : (run.times.resumeBoundsMs?.[1] ?? run.times.resume) - (run.times.pass + TIMELINE.resume);
+  const lateResume = lagMs !== undefined && lagMs > 50;
+  if (lateResume) add('E7', `resume lag ${lagMs.toFixed(3)} ms exceeds 50 ms`);
+  const q2Reasons: string[] = [];
   const s4FinishAfterPassMs = s4 && bounds ? s4.finished + bounds[1] - run.times.pass : undefined;
   const completeAdmissions = members.size === cell.accounts && [...members].every(([member, registrations]) =>
     registrations === SOCKETS_PER_ACCOUNT && admissions.filter(a => a.member === member).length === registrations);
+  if (run.kind === 'fault') {
+    if (s4FinishAfterPassMs === undefined) q2Reasons.push('missing calibrated worker completion (S4)');
+    else if (s4FinishAfterPassMs > 50) q2Reasons.push('worker completion may be later than P + 50 ms');
+    if (!completeAdmissions || admissions.some(a => a.marginMs <= 0)) q2Reasons.push('a target admission is not provably before resume');
+  }
   return {
-    issues, admissions, held: heldTotal, refused: refusedTotal,
+    issues, snapshotRecords: queued.length, admissions, held: heldTotal, refused: refusedTotal,
     workerCompletionMarginMs: s1 && bounds ? run.times.resume - (s1.completed + bounds[1]) : undefined,
     s4SpanMs: s4 && s4.finished - s4.started, s1SpanMs: s1 && s1.completed - s1.started,
     s4FinishAfterPassMs,
-    q2AdmissionReview: run.kind === 'fault' && (s4FinishAfterPassMs === undefined || s4FinishAfterPassMs > 50 ||
-      !completeAdmissions || admissions.some(a => a.marginMs <= 0)),
-    e7ResumeLagMs: lagMs, q8Over50Ms: lagMs > 50,
+    q2AdmissionReview: q2Reasons.length > 0, q2Reasons,
+    e7ResumeLagMs: lagMs, q8Over50Ms: lateResume, stallErrors: run.setup.stallErrors,
   };
 }

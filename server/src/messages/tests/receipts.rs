@@ -2,6 +2,8 @@ use super::*;
 use crate::messages::receipts::{self, Kind, Operation, Outcome, Resolution};
 use sha2::Digest;
 
+mod purge;
+
 /// Independent encoder for the original-send receipt, so the SQL encoding is
 /// pinned by a second implementation.
 fn send_digest(

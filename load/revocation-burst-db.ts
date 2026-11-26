@@ -12,7 +12,7 @@ const quiet = (file: string, args: string[], input?: string) =>
 
 export type Database = { name: string; port: number; ownerPassword: string; appPassword: string };
 
-export function startDatabase(name: string): Database {
+export function startDatabase(name: string, launch = { options: [] as string[], command: ['postgres'] }): Database {
   if (!name.startsWith('fk592-')) throw new Error('fk592 containers only');
   const ownerPassword = randomBytes(18).toString('hex'), appPassword = randomBytes(18).toString('hex');
   const mount = (file: string, target: string) => ['-v', `${checkout}/deploy/${file}:${target}:ro`];
@@ -20,9 +20,14 @@ export function startDatabase(name: string): Database {
     '-e', 'POSTGRES_USER=fukulow', '-e', 'POSTGRES_DB=fukulow', '-e', `POSTGRES_PASSWORD=${ownerPassword}`, '-e', `POSTGRES_APP_PASSWORD=${appPassword}`,
     ...mount('init-db-roles.sh', '/docker-entrypoint-initdb.d/10-db-roles.sh'), ...mount('db-roles.sql', '/opt/fukulow/db-roles.sql'),
     ...mount('db-role-settings.sql', '/opt/fukulow/db-role-settings.sql'), ...mount('db-grants.sql', '/opt/fukulow/db-grants.sql'),
-    POSTGRES_IMAGE, 'postgres', '-c', 'max_connections=300']);
-  const port = Number(quiet('docker', ['port', name, '5432/tcp']).split('\n')[0].split(':').pop());
-  return { name, port, ownerPassword, appPassword };
+    ...launch.options, POSTGRES_IMAGE, ...launch.command, '-c', 'max_connections=300']);
+  try {
+    const port = Number(quiet('docker', ['port', name, '5432/tcp']).split('\n')[0].split(':').pop());
+    return { name, port, ownerPassword, appPassword };
+  } catch (error) {
+    removeDatabase(name);
+    throw error;
+  }
 }
 
 export async function waitReady(db: Database) {

@@ -1878,3 +1878,32 @@ Formal qualification: three runs, each once with no rerun, at harness `2b441bd9`
 - **Starting temperatures.** formal-1 started from a cold idle host: the cool-down gate read 18.4 °C and the host record read 18.8 °C. formal-2 and formal-3 started at 45–46 °C.
 - **Clean-up.** Every run left 0 containers.
 - **Evidence.** Result: [comment 7164817955](https://github.com/tkakkie/fukulow/issues/796#issuecomment-7164817955). Report SHA-256 `cb639ff1…`, kept on the host.
+
+## d3r Message search rehearsal (#689, 2026-11-23 JST, Mac)
+
+Superseded summary from `docs/measurements.md` (the formal PASS stays there), kept verbatim:
+
+> The 2026-11-23 JST **rehearsal** recorded 299,830,174 term rows, 28.5 GB `message_search_terms` table, 34.8 GB lookup index, 2.3 GB maintenance index, 1.69 TB backfill WAL and 67.5 GB `pg_basebackup` archive. [Rehearsal record](https://github.com/tkakkie/fukulow/issues/689#issuecomment-7089274722)
+
+## Raw-data notes (#515 slice 5, #519 A3)
+
+Removed from both sections of `docs/measurements.md` (covered by its header's raw-data line), kept verbatim:
+
+> Raw data not stored (R2 not set up). SHA-256 and retention end n/a.
+
+## Readiness connection setup (#1066, 2026-11-26, Ubuntu)
+
+Maintainer go 2026-11-26 (#1066). Decision rule fixed before any results: p99.9 under 50 ms both idle and under load -> option 3 (document the constraint); otherwise the maintainer chooses option 1 (`min_connections(1)`) or option 2.
+
+- **Harness.** PR #1079 at `b730f181`, detached worktree on the Ubuntu host in the #796 boot state (boost 0, performance profile, `fukulow796.slice`). Full-size rehearsal first (launcher exit 0, verdict option 3), then one recorded run (launcher exit 0).
+- **Path.** `measure_conn_setup` runs in the app container against `db:5432` on the Compose backend network with SCRAM-SHA-256 and the app startup parameters. It times `pool.acquire()` from a lazy pool verified empty before each sample, the path `database::ready` takes with no idle connection.
+- **Load.** The #351 light profile; 960/960 sends offered and accepted, every loaded sample inside the offered window.
+
+| State | Samples | p50 ms | p99 ms | p99.9 ms | Max ms | >= 200 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| idle | 1000 | 3.04 | 4.00 | 4.69 | 5.34 | 0 |
+| loaded | 1000 | 3.16 | 4.12 | 4.75 | 4.82 | 0 |
+
+- **Verdict.** Option 3: p99.9 about 4.7 ms in both states, about 40x under the 200 ms readiness bound.
+- **Limits.** One host, one recorded run, local Compose network; no production database exists yet. The VPS idle repeat waits for #431.
+- **Evidence.** [Result comment](https://github.com/tkakkie/fukulow/issues/1066#issuecomment-7203718181). Raw samples on the host: `idle.jsonl` SHA-256 `7a53dc641fa7c46d…`, `loaded.jsonl` `0005f8e0dbb4b52c…`.

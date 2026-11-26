@@ -15,7 +15,7 @@ SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN '${member.id}'::uu
 ${createLog(org, seed.ids)}
 ANALYZE;`);
 const seedMs = Date.now()-start;
-const counts = readFileSync('server/src/messages/unread.rs', 'utf8').match(/LIST_COUNTS_SQL: &str = r#"([\s\S]+?)"#;/)![1];
+const counts = readFileSync('server/src/messages/unread/counts.rs', 'utf8').match(/LIST_COUNTS_SQL: &str = r#"([\s\S]+?)"#;/)![1];
 const rows: unknown[] = [];
 if (settledOnly) sql('VACUUM(ANALYZE) messages;');
 const cases: [string, number][] = settledOnly ? [['vacuum_all_unread',0]] : [['all_unread',0],['100_tail',9900],['fully_read',10000]];

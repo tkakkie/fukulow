@@ -37,7 +37,7 @@ async function client(baseline = page(1, 51)) {
   let messages: Message[] = [], listener = () => {}
   const counts = createReplyCounts(c.sync, { replies: c.replies, topics: {
     countMessages: () => [messages], subscribe(fn) { listener = () => fn(new Set(['A'])); return () => { listener = () => {} } },
-  } }, { api: read, requestTimeoutMs: 5000, random: () => 0.5, onSessionEnded: c.onSessionEnded })
+  } }, { api: read, requestTimeoutMs: 5000, random: () => 0.5 })
   await flush()
   return { ...c, read, counts,
     project(next: Message[]) { messages = next; listener() },

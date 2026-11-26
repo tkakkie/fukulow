@@ -313,7 +313,7 @@ async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_contr
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let org = org(&pool).await;
     let foreign = org_fn(&pool).await;
     let (_, target, _, _) = account(&pool, org, Role::Member).await;
@@ -476,7 +476,7 @@ async fn invite_existing_account_requires_signed_in_matching_account_and_is_sing
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let org = org(&pool).await;
     let other = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
@@ -585,7 +585,7 @@ async fn new_account_acceptance_is_atomic_and_concurrent_consumption_has_one_win
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let app = crate::app(AppState::for_test(pools.app.clone()).await);

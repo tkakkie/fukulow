@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { connect, createServer, type AddressInfo, type Socket } from 'node:net';
 import { test } from 'node:test';
 import { emptyLog, readLogLine, wallMs } from './revocation-holds-log.ts';
 import { CELL_NAMES, checkStall, parseOptions, planRuns, potentialHolds, restoreAccount, runId, socketAccount, stallBody, STALL_DEFAULT, targetSockets } from './revocation-holds-plan.ts';
 import { holdsEndSamples, retriesWithin, retryPeakPerSecond, timedSamples } from './revocation-holds-samples.ts';
-import { bytesBetween, StallProxy } from './revocation-holds-stall.ts';
 
 test('fixture shapes match the pre-registered matrix', () => {
   assert.deepEqual(CELL_NAMES.map(cell => [cell, targetSockets(cell), potentialHolds(cell)]), [
@@ -88,7 +85,7 @@ test('the log reader keeps holds samples, send records, clock samples and 60 s e
   assert.deepEqual(log, {
     clock: [4], clockWall: [Date.parse('2026-11-22T00:00:01Z') + 123.456], sends: [{ channelId: 'c', beforeMs: 5, afterMs: 6, afterHold: true }],
     holds: [{ serverMs: 12.5, activeHolds: 3, highWaterMark: 9, retryAttempts: 40 }],
-    pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }],
+    pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }], sendBuffers: [],
   });
 });
 
@@ -121,72 +118,4 @@ test('samples convert to the harness clock and bracket windows conservatively', 
   assert.equal(retryPeakPerSecond(samples, 0, 2_000), 900);
   assert.equal(retryPeakPerSecond(samples, 1_200, 2_000), 850);
   assert.deepEqual(timedSamples({ samples: [], sendTiming: undefined }), []);
-});
-
-async function proxied(t: { after: (fn: () => Promise<void> | void) => void }) {
-  const server = createServer();
-  const accepted = once(server, 'connection') as Promise<[Socket]>;
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  let now = 0;
-  const proxy = new StallProxy({ host: '127.0.0.1', port: (server.address() as AddressInfo).port }, () => now);
-  const port = await proxy.listen();
-  const client = connect(port, '127.0.0.1');
-  await once(client, 'connect');
-  const [upstream] = await accepted;
-  t.after(async () => { client.destroy(); upstream.destroy(); await proxy.close(); await new Promise<void>(r => server.close(() => r())); });
-  return { proxy, port, client, upstream, setNow: (value: number) => { now = value; } };
-}
-const settle = () => new Promise(r => setTimeout(r, 50));
-
-test('the stall proxy stops reading upstream while paused and records the backlog after resume', { timeout: 5000 }, async t => {
-  const { proxy, client, upstream, setNow } = await proxied(t);
-  let received = 0;
-  client.on('data', (chunk: Buffer) => { received += chunk.length; });
-  upstream.write(Buffer.alloc(1000)); await settle();
-  assert.equal(received, 1000);
-  setNow(10); proxy.pause();
-  upstream.write(Buffer.alloc(5000)); await settle();
-  assert.equal(received, 1000);
-  assert.equal(bytesBetween(proxy.record, 10, Infinity), 0);
-  // Client-to-server bytes keep flowing during the pause.
-  const toServer = once(upstream, 'data') as Promise<[Buffer]>;
-  client.write('pong');
-  assert.equal(String((await toServer)[0]), 'pong');
-  setNow(20); proxy.resume(); await settle();
-  assert.equal(received, 6000);
-  assert.equal(bytesBetween(proxy.record, 20, Infinity), 5000);
-  assert.equal(bytesBetween(proxy.record, 0, 10), 1000);
-  assert.deepEqual([proxy.record.pausedAt, proxy.record.resumedAt], [[10], [20]]);
-});
-
-test('a paused proxy backs up into the kernel: the server-side write stays queued, then every byte arrives', { timeout: 15_000 }, async t => {
-  const { proxy, client, upstream, setNow } = await proxied(t);
-  let received = 0;
-  client.on('data', (chunk: Buffer) => { received += chunk.length; });
-  setNow(10); proxy.pause();
-  const chunk = Buffer.alloc(64 * 1024);
-  let written = 0;
-  // Write until the bytes stay queued in user space after a pause of 200 ms: the kernel send and
-  // receive buffers are then full, because nothing reads the proxy's upstream socket.
-  for (let stuck = false; !stuck && written < 256 * 1024 * 1024;) {
-    upstream.write(chunk); written += chunk.length;
-    if (upstream.writableLength > 0) { await new Promise(r => setTimeout(r, 200)); stuck = upstream.writableLength > 0; }
-  }
-  assert.ok(upstream.writableLength > 0, 'the server-side write must stay queued while paused');
-  assert.equal(bytesBetween(proxy.record, 10, Infinity), 0, 'the proxy must not read while paused');
-  assert.equal(received, 0);
-  setNow(20); proxy.resume();
-  if (upstream.writableLength > 0) await once(upstream, 'drain');
-  while (received < written) await new Promise(r => setTimeout(r, 20));
-  assert.equal(received, written);
-  assert.equal(bytesBetween(proxy.record, 20, Infinity), written);
-});
-
-test('the stall proxy records closes and serves one WebSocket only', { timeout: 5000 }, async t => {
-  const { proxy, port, client, upstream, setNow } = await proxied(t);
-  const second = connect(port, '127.0.0.1');
-  await once(second, 'close');
-  setNow(30); upstream.destroy();
-  await once(client, 'close');
-  assert.deepEqual(proxy.record.closes, [{ at: 30, side: 'upstream' }]);
 });

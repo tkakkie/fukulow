@@ -1,8 +1,8 @@
 use super::Transaction;
 use crate::{
-    database::tests::{
-        context::{clean, pools, settings},
-        interrupted,
+    database::{
+        test_support::{clean, pools, settings},
+        tests::interrupted,
     },
     messages::admission::Admission,
 };

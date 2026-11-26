@@ -330,11 +330,8 @@
       for (const hit of searchState.items) ids.push(hit.message.sender)
     }
     if (resolvedReplyAnchor) ids.push(resolvedReplyAnchor.sender)
-    members?.authors.watch(ids)
+    members?.authors.watch(ids, selectedChannelId)
   })
-  $effect(() => { void selectedChannelId; members?.authors.retry() })
-  $effect(() => { if (currentLive) members?.authors.retry() })
-
   const initialDisplayViewKey = $derived(
     selected && currentChannel && !search
       ? `${currentOrganizationId}:${selected.id}:${route?.topicId ?? ''}`

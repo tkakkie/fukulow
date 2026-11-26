@@ -7,8 +7,6 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-#[cfg(test)]
-use serde::Serialize;
 use std::time::Duration;
 use tracing::Instrument;
 #[cfg(test)]

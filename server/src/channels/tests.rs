@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::activity::hook_decorator::{Decorator, RecheckHooks};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -8,6 +9,10 @@ use axum::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tower::ServiceExt;
 
 pub(super) mod archive;
@@ -22,6 +27,30 @@ mod names;
 mod role_changes;
 mod sections_storage;
 mod visibility;
+
+struct RecheckObservation {
+    access: AccessChanges,
+    calls: Arc<AtomicUsize>,
+}
+
+impl RecheckObservation {
+    fn install(changes: &auth::SessionChanges) -> Self {
+        let access = AccessChanges::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        changes.set_subscription_recheck(Arc::new(Decorator {
+            inner: access.clone(),
+            hooks: RecheckHooks {
+                on_check: Some(Box::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                })),
+                on_failed: Some(Box::new(|| panic!("unexpected subscription failure"))),
+                ..RecheckHooks::default()
+            },
+        }));
+        Self { access, calls }
+    }
+}
 
 async fn router(pool: &PgPool) -> Router {
     crate::app(AppState::for_test(pool.clone()).await)

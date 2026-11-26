@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import type { Entry } from './check-versions.ts'
 
-// Weekly version and support report (#512). Prints the body of the single `Version check` Issue.
+// Weekly version and support report (#512).
 export type Release = { name: string, eolFrom: string | null, ltsFrom?: string | null, latest?: { name: string } | null }
 export type Facts = { latest?: string, support?: string, notes: string[], failures: string[] }
 type Fetch = (url: string) => Promise<{ status: number, json: () => Promise<unknown> }>
@@ -83,33 +83,53 @@ export function addMonths(date: string, months: number): string {
   return target.toISOString().slice(0, 10)
 }
 
-export function report(entries: Entry[], facts: Map<string, Facts>, today: string): string {
+type Update = { component: string, pinned: string, latest: string, file: string, class: string, newMajor: boolean }
+type SupportEnd = { component: string, version: string, end: string, source: 'endoflife.date' | 'versions.json' }
+type Notice = { component: string, message: string }
+type Findings = { newer: Update[], soon: SupportEnd[], past: SupportEnd[], failures: Notice[], notes: Notice[] }
+export type VersionReport = Findings & { actionable: boolean, body: string }
+
+export function report(entries: Entry[], facts: Map<string, Facts>, today: string): VersionReport {
   const soon = addMonths(today, 6)
-  const rows = { newer: [] as string[], soon: [] as string[], past: [] as string[], failures: [] as string[], notes: [] as string[] }
+  const supportDate = /^\d{4}-\d{2}-\d{2}$/
+  const findings: Findings = { newer: [], soon: [], past: [], failures: [], notes: [] }
   for (const entry of entries) {
-    const fact = facts.get(entry.component) ?? { notes: [], failures: ['no result gathered'] }
-    const where = `\`${entry.file}\``
-    if (fact.latest && newer(fact.latest, entry.version)) {
-      const major = fact.latest.split('.')[0] !== entry.version.split('.')[0] ? ', new major: one Issue, maintainer decides' : ''
-      rows.newer.push(`- ${entry.component}: ${entry.version} -> ${fact.latest} (${where}, ${entry.class}${major})`)
+    const { component, version, file } = entry
+    const fact = facts.get(component) ?? { notes: [], failures: ['no result gathered'] }
+    if (fact.latest && newer(fact.latest, version)) {
+      findings.newer.push({ component, pinned: version, latest: fact.latest, file, class: entry.class,
+        newMajor: fact.latest.split('.')[0] !== version.split('.')[0] })
     }
-    const end = /^\d{4}-\d{2}-\d{2}$/.test(fact.support ?? '') ? fact.support! : /^\d{4}-\d{2}-\d{2}$/.test(entry.support) ? entry.support : undefined
-    const source = fact.support === end && end ? 'endoflife.date' : 'versions.json'
-    if (end && end < today) rows.past.push(`- ${entry.component} ${entry.version}: support ended ${end} (${source})`)
-    else if (end && end <= soon) rows.soon.push(`- ${entry.component} ${entry.version}: support ends ${end} (${source})`)
-    if (fact.support && /^\d{4}-\d{2}-\d{2}$/.test(fact.support) && /^\d{4}-\d{2}-\d{2}$/.test(entry.support) && fact.support !== entry.support) {
-      rows.notes.push(`- ${entry.component}: versions.json says ${entry.support}, endoflife.date says ${fact.support}`)
+    const upstreamEnd = fact.support && supportDate.test(fact.support) ? fact.support : undefined
+    const pinnedEnd = supportDate.test(entry.support) ? entry.support : undefined
+    const end = upstreamEnd ?? pinnedEnd
+    if (end && end <= soon) {
+      const deadline: SupportEnd = { component, version, end, source: upstreamEnd ? 'endoflife.date' : 'versions.json' }
+      const deadlines = end < today ? findings.past : findings.soon
+      deadlines.push(deadline)
     }
-    for (const failure of fact.failures) rows.failures.push(`- ${entry.component}: ${failure}`)
-    for (const note of fact.notes) rows.notes.push(`- ${entry.component}: ${note}`)
+    if (upstreamEnd && pinnedEnd && upstreamEnd !== pinnedEnd) {
+      findings.notes.push({ component, message: `versions.json says ${pinnedEnd}, endoflife.date says ${upstreamEnd}` })
+    }
+    for (const message of fact.failures) findings.failures.push({ component, message })
+    for (const message of fact.notes) findings.notes.push({ component, message })
   }
+
   const section = (title: string, lines: string[]) => [`## ${title}`, lines.length ? lines.join('\n') : '- none', '']
-  return [marker, `Checked ${today} against \`versions.json\` (${entries.length} entries). Rules: \`docs/workflow.md\` section 8.`, '',
-    ...section('Newer versions available', rows.newer),
-    ...section('Support ends within 6 months', rows.soon),
-    ...section('Past support end', rows.past),
-    ...section('Upstream failures (not checked this run)', rows.failures),
-    ...section('Notes', rows.notes)].join('\n')
+  const updateLine = (row: Update) => {
+    const major = row.newMajor ? ', new major: one Issue, maintainer decides' : ''
+    return `- ${row.component}: ${row.pinned} -> ${row.latest} (\`${row.file}\`, ${row.class}${major})`
+  }
+  const supportLine = (row: SupportEnd, verb: 'ends' | 'ended') =>
+    `- ${row.component} ${row.version}: support ${verb} ${row.end} (${row.source})`
+  const noticeLine = (row: Notice) => `- ${row.component}: ${row.message}`
+  const body = [marker, `Checked ${today} against \`versions.json\` (${entries.length} entries). Rules: \`docs/workflow.md\` section 8.`, '',
+    ...section('Newer versions available', findings.newer.map(updateLine)),
+    ...section('Support ends within 6 months', findings.soon.map(row => supportLine(row, 'ends'))),
+    ...section('Past support end', findings.past.map(row => supportLine(row, 'ended'))),
+    ...section('Upstream failures (not checked this run)', findings.failures.map(noticeLine)),
+    ...section('Notes', findings.notes.map(noticeLine))].join('\n')
+  return { ...findings, actionable: Object.values(findings).some(rows => rows.length > 0), body }
 }
 
 if (import.meta.main) {
@@ -118,5 +138,5 @@ if (import.meta.main) {
   const fetchJson: Fetch = url => fetch(url, { headers: url.startsWith('https://api.github.com/') && token
     ? { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' } : {} })
   const today = new Date().toISOString().slice(0, 10)
-  process.stdout.write(report(entries, await gather(entries, fetchJson, today), today))
+  console.log(JSON.stringify(report(entries, await gather(entries, fetchJson, today), today)))
 }

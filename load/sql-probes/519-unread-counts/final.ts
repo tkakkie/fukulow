@@ -7,12 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
 import { allowedCpus, cpuList, parseCpuSets, pinned } from '../../harness-core/cpusets.ts';
+import { containerCpuArgs } from '../../harness-core/frequency-container-args.ts';
 import { hostRecord, linuxViolations } from '../../harness-core/host-record.ts';
-import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, extractListCounts, finishBlock, measuredPgbench, member, migrationOutcome, organization, pgbench, pgbenchEvidence, planSummary,
+import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, finishBlock, listCountsAtCommit, measuredPgbench, member, migrationOutcome, organization, pgbench, pgbenchEvidence, planSummary,
   quantile, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
-import { containerCpuArgs, frequencyClientArgs, frequencyContainerReadbacks, frequencyServerArgs, probeImage as image,
+import { frequencyClientArgs, frequencyContainerReadbacks, frequencyServerArgs, probeImage as image,
   serverImageArgs } from './frequency-containers.ts';
 import { hostAffinityProblems, readHostAffinity } from './frequency-host-affinity.ts';
 import type { CounterBlock, ReferenceWindow } from './frequency-evidence.ts';
@@ -101,7 +102,7 @@ writeFileSync(join(work, a3Update), git('show', `${update}:server/migrations/${a
 // symlinked input throws (stage-sql.ts).
 stageSql(join(root, 'load/sql-probes/519-unread-counts/sql'), work);
 for (const arm of ['current', 'final'] as FinalArm[]) {
-  writeFileSync(join(work, `sql/list-${arm}.sql`), extractListCounts(git('show', `${commits[arm]}:server/src/messages/unread.rs`)) + '\n');
+  writeFileSync(join(work, `sql/list-${arm}.sql`), listCountsAtCommit(git, commits[arm]) + '\n');
 }
 const migrations = readdirSync(join(work, 'server/migrations')).filter(f => f.endsWith('.sql')).sort();
 

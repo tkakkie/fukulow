@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import { channelsXor, evidence } from './revocation-holds-evidence.ts';
 import { channelId, holdsFixture, jsonl, memberId, target, traceLines, watermarkLine } from './revocation-holds-fixture.ts';
 import { judgeHolds } from './revocation-holds-judgment.ts';
+import { TIMELINE } from './revocation-holds-plan.ts';
+import { rehearsalCounts } from './revocation-holds-rehearsal.ts';
 import { parseTrace } from './revocation-holds-trace.ts';
 
 const rules = (run: ReturnType<typeof holdsFixture>) => [...new Set(evidence(run).issues.map(i => i.rule))];
@@ -146,23 +148,42 @@ test('zero registrations or zero trace records cannot pass', () => {
   assert.equal(judgeHolds(run).verdict, 'INVALID');
 });
 
-test('E6 requires all 120 Messages after release on every target, while late E7 is diagnostic', () => {
+test('E6 requires all 120 distinct Messages after release on every target', () => {
   const run = holdsFixture();
-  run.times.resume += 51;
-  run.targets.forEach(t => {
-    t.stall.resumedAt[0] += 51;
-    t.stall.reads[1].at += 51;
-    t.stallMessages.forEach(message => { message.at += 51; });
-  });
   assert.equal(judgeHolds(run).verdict, 'PASS');
-  assert.equal(evidence(run).e7ResumeLagMs, 51);
-  assert.equal(evidence(run).q8Over50Ms, true);
   run.targets.at(-1)!.stallMessages[0].at = run.times.resume - 1;
   assert.deepEqual(rules(run), ['E6']);
   assert.equal(judgeHolds(run).verdict, 'INVALID');
   const messages = run.targets.at(-1)!.stallMessages;
   messages[0] = { ...messages[1] };
   assert.deepEqual(rules(run), ['E6']); // a duplicate cannot replace a missed Message
+});
+
+test('E7 at exactly 50 ms passes, but a later resume is a V4/V5 exclusion unless the run failed a gate', () => {
+  for (const kind of ['fault', 'control'] as const) {
+    const run = holdsFixture(kind);
+    run.times.resume += 49;
+    run.times.resumeBoundsMs = [run.times.resume, run.times.resume + 1];
+    for (const t of run.targets) {
+      t.stall.resumedAt[0] = run.times.resume;
+      t.stall.reads[1].at += 49;
+    }
+    assert.equal(judgeHolds(run).verdict, kind === 'fault' ? 'PASS' : 'CONTROL');
+    run.times.resumeBoundsMs[1] += 1;
+    const late = judgeHolds(run);
+    assert.deepEqual(late.floorReasons, []);
+    assert.equal(late.verdict, 'INVALID');
+    assert.equal(late.evidenceOnly, true);
+    assert.deepEqual(late.evidence.issues.map(i => i.rule), ['E7']);
+    assert.equal(late.evidence.e7ResumeLagMs, 51);
+    if (kind === 'fault') {
+      run.bystanderCloses = [run.times.resume + 1_600];
+      const failed = judgeHolds(run);
+      assert.equal(failed.verdict, 'FAIL');
+      assert.equal(failed.evidenceOnly, false);
+      assert.deepEqual(failed.evidence.issues.map(i => i.rule), ['E7']);
+    }
+  }
 });
 
 test('Q2 reports late admission without changing release or adding a verdict rule', () => {
@@ -174,16 +195,18 @@ test('Q2 reports late admission without changing release or adding a verdict rul
   lines[3] = withFields(lines[3], { completed_ms: 40_066 });
   run.trace = parseTrace(jsonl([...lines, watermarkLine(4)]), true);
   assert.equal(evidence(run).q2AdmissionReview, true);
-  assert.equal(run.times.resume - run.times.pass, 100);
+  assert.equal(TIMELINE.resume, 100);
+  assert.equal(rehearsalCounts(run).q2Trigger, 'Q2 trigger fired: re-propose P + 0.5 s to the maintainer');
   assert.equal(judgeHolds(run).verdict, 'PASS');
 });
 
 test('Q2 requests review when a target registration lacks a finite admission margin', () => {
   const run = holdsFixture();
   assert.equal(evidence(run).q2AdmissionReview, false);
+  assert.equal(rehearsalCounts(run).q2Trigger, undefined);
   const outcome = run.trace!.events.find(event => event.name === 'revocation_fallback_outcome')!;
   const records = outcome.records.split(',');
-  for (const first of [records[0].replace(/:40020$/, ':-'), records[0].replace(/:40020$/, ':Infinity')]) {
+  for (const first of ['-', 'Infinity', '40026'].map(time => records[0].replace(/:40020$/, `:${time}`))) {
     outcome.records = [first, ...records.slice(1)].join(',');
     const result = evidence(run);
     assert.equal(result.admissions.length, 31);
@@ -193,14 +216,33 @@ test('Q2 requests review when a target registration lacks a finite admission mar
   assert.equal(evidence(run).q2AdmissionReview, true);
 });
 
-test('Q2 requests review for a fault with no matching S4', () => {
+test('Q2 reports missing S4 separately from unprovable target admission', () => {
   for (const kind of ['fault', 'control'] as const) {
     const run = holdsFixture(kind);
     run.trace!.events = run.trace!.events.filter(event => event.name !== 'revocation_fallback_check');
     const result = evidence(run);
     assert.equal(result.s4FinishAfterPassMs, undefined);
     assert.equal(result.q2AdmissionReview, kind === 'fault');
+    assert.deepEqual(result.q2Reasons, kind === 'fault' ? [
+      'missing calibrated worker completion (S4)', 'a target admission is not provably before resume',
+    ] : []);
   }
+});
+
+test('Q2 fires on a target admission at the earliest possible resume', () => {
+  const run = holdsFixture();
+  run.times.resume = 40_021; // 40_020 on the server clock, plus the 1 ms upper offset.
+  const result = evidence(run);
+  assert.ok(result.admissions.every(a => a.marginMs === 0));
+  assert.deepEqual(result.q2Reasons, ['a target admission is not provably before resume']);
+});
+
+test('Q2 cannot establish admission order without a resume acknowledgement', () => {
+  const run = holdsFixture();
+  run.times.resumeUnobserved = true;
+  const result = evidence(run);
+  assert.deepEqual(result.admissions, []);
+  assert.deepEqual(result.q2Reasons, ['a target admission is not provably before resume']);
 });
 
 test('V1 preserves a certain in-fault send failure when E4 reports gone checks', () => {
