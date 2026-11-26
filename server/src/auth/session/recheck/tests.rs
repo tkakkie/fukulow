@@ -159,7 +159,7 @@ async fn chunked_pass_checks_exact_keys_and_excludes_expired_sessions(pool: PgPo
     expected.insert(cross_pair, 4003);
     keys.push(foreign_key.clone());
     let checks: Vec<_> = keys.iter().map(|key| (key.0, key.1.clone(), 0)).collect();
-    let (counted, transactions) = crate::database::tests::context::counted_pool(&pool).await;
+    let (counted, transactions) = crate::database::test_support::counted_pool(&pool).await;
     let ended = check(&counted, &checks, Instant::now() + CHECK_TIMEOUT)
         .await
         .unwrap();
@@ -181,7 +181,7 @@ async fn multi_chunk_recheck_uses_one_transaction_per_organization(pool: PgPool)
     sqlx::query("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND account_id=$2")
         .bind(inactive.identity.organization.organization_id).bind(inactive.account_id)
         .execute(&pools.admin).await.unwrap();
-    crate::database::tests::context::context_policies(&pools.admin).await;
+    crate::database::test_support::context_policies(&pools.admin).await;
     let mut keys = Vec::new();
     let mut expected = HashMap::new();
     for i in 0..(2 * BATCH_SIZE + 1) {
@@ -202,7 +202,7 @@ async fn multi_chunk_recheck_uses_one_transaction_per_organization(pool: PgPool)
             keys.push((key.0, key.1, 0));
         }
     }
-    let (counted, transactions) = crate::database::tests::context::counted_pool(&pools.app).await;
+    let (counted, transactions) = crate::database::test_support::counted_pool(&pools.app).await;
     assert_eq!(
         check(&counted, &keys, Instant::now() + CHECK_TIMEOUT)
             .await
@@ -360,7 +360,7 @@ async fn unconfirmed_cleanup_frees_fallback_pool_slot_synchronously(pool: PgPool
                 .is_err()
             );
             assert_eq!(single.size(), 0);
-            assert_ne!(crate::database::tests::context::clean(single).await, pid);
+            assert_ne!(crate::database::test_support::clean(single).await, pid);
         },
     )
     .await;
@@ -678,7 +678,7 @@ async fn rechecks_scope_each_organization_and_preserve_revocation_causes(pool: P
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, first) = fixture(&pools.admin).await;
     let (_, second) = fixture(&pools.admin).await;
-    crate::database::tests::context::context_policies(&pools.admin).await;
+    crate::database::test_support::context_policies(&pools.admin).await;
     let key = |auth: &Auth| {
         (
             auth.identity.organization.organization_id,

@@ -165,7 +165,7 @@ async fn answering_pings_keeps_websocket_and_live_delivery_healthy(pool: PgPool)
 async fn post_replay_ping(f: &Fixture, socket: &mut Client) {
     let canonical = post(f, f.channel).await;
     assert_eq!(event(socket).await["message"], canonical);
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     resubscribe(socket, f.channel, 0).await;
     gate.entered().await;
     // No client frame is sent while replay prevents the first heartbeat Ping.
@@ -242,7 +242,7 @@ async fn pong_queued_during_replay_clears_outstanding_ping(pool: PgPool) {
         frame(&mut socket).await,
         tungstenite::Message::Ping(_)
     ));
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     resubscribe(&mut socket, f.channel, 0).await;
     gate.entered().await;
     socket

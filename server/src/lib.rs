@@ -337,14 +337,19 @@ pub async fn serve(
     .await
 }
 
-pub async fn serve_with_search(
-    listener: tokio::net::TcpListener,
+pub async fn serve_with_search<L>(
+    listener: L,
     state: AppState,
     search_engine: messages::search::SearchEngine,
     allowed_host: AllowedHost,
     signal: impl Future<Output = ()>,
     deadline: Duration,
-) -> std::io::Result<bool> {
+) -> std::io::Result<bool>
+where
+    L: axum::serve::Listener<Addr = std::net::SocketAddr>,
+    std::net::SocketAddr:
+        for<'a> axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, L>>,
+{
     let shutdown = state.shutdown.clone();
     let pool = state.pool.clone();
     let delivery = state.message_delivery.clone();

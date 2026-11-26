@@ -8,6 +8,7 @@ export const PREFLIGHT_VOLUMES = [20, 40, 60] as const;
 const ACCEPTANCE_VOLUME = 60;
 const SNAPSHOT_RECORDS = targetSockets('Hcap');
 const requiredRules = new Set(['E2', 'E4c', 'E6', 'E8']);
+const positive = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 type Volume = typeof PREFLIGHT_VOLUMES[number];
 
 export type PreflightTrial = {
@@ -30,13 +31,14 @@ export function preflightTrialEvidence(trial: PreflightTrial, run: HoldsRun) {
   const proof = evidence(run, trial.volume);
   const issues = proof.issues.filter(issue => requiredRules.has(issue.rule));
   const readback = run.stallReadbacks?.[0]?.after;
+  const effectiveSendBuffer = run.effectiveSendBuffer;
   const passed = run.kind === trial.run.kind && run.cell === trial.run.cell && run.repeat === trial.run.repeat &&
-    issues.length === 0 && typeof readback === 'number' && Number.isSafeInteger(readback) && readback > 0;
-  return { passed, issues, snapshotRecords: proof.snapshotRecords, readback };
+    issues.length === 0 && positive(readback) && positive(effectiveSendBuffer);
+  return { passed, issues, snapshotRecords: proof.snapshotRecords, readback, effectiveSendBuffer };
 }
 
 export type PreflightRow = {
-  id: string; volume: Volume; repeat: number; passed: boolean; readback?: number;
+  id: string; volume: Volume; repeat: number; passed: boolean; readback?: number; effectiveSendBuffer?: number;
   attemptId?: string; issues?: ReturnType<typeof preflightTrialEvidence>['issues']; snapshotRecords?: number; error?: string;
 };
 
@@ -45,17 +47,22 @@ export function preflightResult(identity: SessionIdentity, runs: readonly Prefli
     runs.filter(row => row?.id === trial.id && row.volume === trial.volume && row.repeat === trial.run.repeat).length === 1);
   const acceptance = runs.filter(row => row.volume === ACCEPTANCE_VOLUME);
   const readback = acceptance[0]?.readback;
+  const effectiveSendBuffer = acceptance[0]?.effectiveSendBuffer;
   const passed = identity.gitClean === true && complete && runs.length === PREFLIGHT_VOLUMES.length * REPEATS && acceptance.length === REPEATS &&
-    typeof readback === 'number' && Number.isSafeInteger(readback) && readback > 0 &&
-    acceptance.every(row => row.passed === true && row.snapshotRecords === SNAPSHOT_RECORDS && row.readback === readback);
-  return { identity, passed, readback: passed ? readback : null, runs };
+    positive(readback) && positive(effectiveSendBuffer) &&
+    acceptance.every(row => row.passed === true && row.snapshotRecords === SNAPSHOT_RECORDS && row.readback === readback &&
+      row.effectiveSendBuffer === effectiveSendBuffer);
+  return { identity, passed, readback: passed ? readback : null, effectiveSendBuffer: passed ? effectiveSendBuffer : null, runs };
 }
 
-export function preflightReadback(value: unknown, current: SessionIdentity): number | undefined {
+export function preflightReadback(value: unknown, current: SessionIdentity) {
   const result = value as Partial<ReturnType<typeof preflightResult>> | null;
   const identity = result?.identity;
   if (!identity || result.passed !== true || !Array.isArray(result.runs) || result.runs.some(row => !row)) return;
   if (!sameSessionIdentity(identity, current)) return;
   const verified = preflightResult(current, result.runs);
-  if (verified.passed && verified.readback === result.readback) return verified.readback ?? undefined;
+  if (verified.passed && verified.readback === result.readback && verified.effectiveSendBuffer === result.effectiveSendBuffer &&
+      verified.readback !== null && verified.effectiveSendBuffer !== null) {
+    return { receiveBuffer: verified.readback, sendBuffer: verified.effectiveSendBuffer };
+  }
 }

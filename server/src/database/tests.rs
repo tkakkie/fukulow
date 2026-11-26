@@ -1,31 +1,20 @@
-use super::{check_server_version, migrate, validate_migrations, validate_server_version};
+use super::{
+    check_server_version, migrate, test_support::startup_pool, validate_migrations,
+    validate_server_version,
+};
 use sqlx::{
     PgPool,
     migrate::{Migrate, MigrateError},
 };
 use std::time::{Duration, Instant};
 
-pub(crate) mod context;
+mod context;
 mod generic_plan;
 pub(crate) mod interrupted;
 mod migrations;
 mod read_only;
 mod rls;
 mod statement;
-
-// Carries the app session settings; migrations must override them and never
-// leak their own settings back.
-async fn startup_pool(pool: &PgPool) -> PgPool {
-    super::PoolConfig::configured(None, None)
-        .unwrap()
-        .options()
-        .max_connections(1)
-        .connect_with(super::pool::session(
-            pool.connect_options().as_ref().clone(),
-        ))
-        .await
-        .unwrap()
-}
 
 #[fukulow_test::test(migrations = false)]
 async fn server_version_check_requires_postgresql_17(pool: PgPool) {

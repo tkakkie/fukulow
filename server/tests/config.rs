@@ -29,6 +29,20 @@ fn assert_config_error(output: Output, diagnostic: &str) {
 }
 
 #[test]
+fn startup_rejects_invalid_measurement_send_buffers_before_database_access() {
+    for invalid in ["", "0", "-1", "+1", "1.5", "2147483648", "secret-buffer"] {
+        let output = server_command()
+            .env("FUKULOW_MEASUREMENT_SNDBUF", invalid)
+            .output()
+            .unwrap();
+        assert_config_error(
+            output,
+            "FUKULOW_MEASUREMENT_SNDBUF must be an integer from 1 to 2147483647",
+        );
+    }
+}
+
+#[test]
 fn measured_server_requires_a_new_dedicated_trace_file_in_both_modes() {
     let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir(&dir).unwrap();

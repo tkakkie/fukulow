@@ -1,3 +1,11 @@
+// Harness history (#621 C3):
+// - 2026-11-21 (#961, b04a5288): C3 diagnostic harness for the send path.
+// - 2026-11-26 (#1034): the first smoke stays INVALID (#621 comment 7172147501). Autovacuum of system catalogs, triggered
+//   by CREATE DATABASE, ran in 3 windows, and 2 more were INVALID through their INVALID paired base. Each clone and the
+//   seed now get VACUUM (ANALYZE) of every connectable database's catalogs, then a plain VACUUM of pg_statistic, and the
+//   run waits until autovacuum has finished, before the app starts (c3-catalog-settle.ts). Every attempt, failed ones
+//   included, goes into manifest.json and the window's catalog-settle.json. Measurement conditions, INVALID rules and
+//   evaluation criteria are unchanged.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,6 +19,8 @@ import { verifyPins, verifySmoke, type Pin, type Pins } from './c3-pins.ts';
 import { countChecks, disableMaintenance, fixtureChecks, fixtureReasons, maintenanceReasons, maintenanceSQL,
   settleFixture, shapeSQL, workersSQL, type Maintenance, type Workers } from './c3-fixture.ts';
 import { connectionEvidence, logSettings, parseTraffic } from './c3-logs.ts';
+import { settleCatalogs, type CatalogSettle } from './c3-catalog-settle.ts';
+import { settleRecorder } from './c3-catalog-evidence.ts';
 import { c3ExitCode, summarizeC3, type WindowResult } from './c3-summary.ts';
 import { evictionReason, statementEvidence, statementSQL } from './c3-statements.ts';
 import { cpuWindow, DrainPending, latency, loadBoundaries, storageCoverage, storageReason, trafficReasons } from './c3-timing.ts';
@@ -50,6 +60,9 @@ const source = (name: string) => fileURLToPath(new URL(name, import.meta.url));
 const reason = (error: unknown) => (error instanceof SyntaxError ? 'malformed diagnostic evidence' : (error as Error).message)
   .replaceAll(password, '[redacted]').replaceAll(setupToken, '[redacted]');
 let pins: Pins, recordedPins: Pins | undefined, dbStarted = false, networkStarted = false;
+const manifest: Record<string, unknown> = {}, catalogSettles: CatalogSettle[] = [];
+const settle = (stage: string, windowDir?: string) => settleCatalogs(stage, sql, { capMs: Math.min(60000, active()), signal,
+  report: settleRecorder(output, manifest, catalogSettles, windowDir) });
 
 const stop = runtimeEnv.remove;
 
@@ -154,6 +167,7 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
         clone = name;
       },
       disableMaintenance: name => { sql(name, disableMaintenance, 'disable automatic maintenance on clone'); },
+      settle: () => settle(window.id, dir),
       async restart(arm, name) { appUp = true; await appStart(app, name, pins[arm]); },
     });
     const cpuTask = observe(observer, cpuPath, app);
@@ -261,7 +275,8 @@ try {
   if (!busy || !existsSync(busy) || !process.env.FUKULOW_LAUNCH_JOB) throw new Error('run requires the approved launcher and its HOST-BUSY marker');
   pins = json<Pins>(read(resolve(pinsArg)));
   recordedPins = pins;
-  dump(resolve(output, 'manifest.json'), { smoke, warmSeconds, rate, measuredSeconds, schedule: plan, pins, pgImage, k6Image, observerImage, logSettings });
+  Object.assign(manifest, { smoke, warmSeconds, rate, measuredSeconds, schedule: plan, pins, pgImage, k6Image, observerImage, logSettings });
+  dump(resolve(output, 'manifest.json'), manifest);
   if (!smoke) verifySmoke(json(read(resolve(smokeArg))), pins, warmSeconds);
   verifyPins(pins, git, image => json(docker('inspect pinned image', ['image', 'inspect', '--format',
     '{"id":{{json .Id}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}', image])),
@@ -285,6 +300,7 @@ try {
   sql('postgres', 'CREATE EXTENSION pg_walinspect; ALTER ROLE fukulow_app SET pg_stat_statements.track_planning=off;', 'enable checkpoint evidence');
   const seedFixture = await prepareSeed();
   if (sql('seed_base', 'SHOW pg_stat_statements.track_planning;', 'verify app planning setting', 'fukulow_app') !== 'off') throw new Error('planning tracking mismatch');
+  await settle('after seed');
   for (const window of plan) {
     active();
     console.log(`Window ${window.index}/${plan.length}: ${window.id}`);

@@ -29,7 +29,7 @@ export function createTopicSync(options: SyncOptions & { topicsApi?: TopicsApi; 
     },
   } })
   const topics = createTopics(sync, { api: options.topicsApi ?? topicsApi(options.organizationId ?? ''),
-    onSessionEnded: options.onSessionEnded, requestTimeoutMs: options.requestTimeoutMs, activity: options.activity,
+    requestTimeoutMs: options.requestTimeoutMs, activity: options.activity,
     initialTimeline: options.initialTimeline, isDm: options.isDm })
   function resolveDm(channel: string) {
     if (options.isDm?.(channel)) options.initialTimeline?.discard(channel)

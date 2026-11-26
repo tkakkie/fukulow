@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { awaitCoverage, covered, coverageDeadlineMs, freshFast, gaps, otherWorkers, parseMeminfo, stopProcess, windowFacts, type Sample } from './sampler.ts';
+import { awaitCoverage, covered, coverageDeadlineMs, fastSample, foreignContainers, freshFast, gaps, otherWorkers, parseMeminfo, stopProcess, windowFacts, type Sample } from './sampler.ts';
 
 const fast = (at: number, over: Partial<Extract<Sample, {stream: 'fast'; dirtyBytes: number}>> = {}): Sample =>
   ({at, stream: 'fast', dirtyBytes: 10, writebackBytes: 5, cachedBytes: 1, autovacuum: [], checkpointer: {}, wal: {}, ...over});
@@ -214,4 +214,20 @@ test('the sampler stop is verified only when its whole process group is gone', a
   assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL']);
   const stuck = new FakeChild(['SIGTERM']);
   assert.deepEqual(await stopProcess(stuck, 10, 10, () => true), {verified: false, how: 'its process group outlived SIGKILL'});
+});
+
+
+test('the fast sampler reads host memory and sends only SQL to the client container', async () => {
+  const sample = await fastSample('owned-client', async (argv, sql) => {
+    assert.deepEqual(argv.slice(0, 5), ['docker', 'exec', '-i', 'owned-client', 'psql']);
+    assert.match(sql ?? '', /pg_stat_activity/);
+    return '{"autovacuum":[],"checkpointer":{},"wal":{}}';
+  }, () => 'Cached: 10 kB\nDirty: 11 kB\nWriteback: 12 kB\n');
+  assert.deepEqual(sample, {cachedBytes: 10 * 1024, dirtyBytes: 11 * 1024, writebackBytes: 12 * 1024,
+    autovacuum: [], checkpointer: {}, wal: {}});
+});
+
+test('only the exact two owned container names are exempt from foreign-container observations', () => {
+  assert.deepEqual(foreignContainers('server\nserver-client\nserver-other\nother-client\n', 'server', 'server-client'),
+    ['server-other', 'other-client']);
 });

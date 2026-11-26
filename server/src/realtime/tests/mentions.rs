@@ -1,4 +1,4 @@
-use super::*;
+use super::{hooks::Phase, *};
 
 async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, target: Uuid) {
     sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3) ON CONFLICT (organization_id,channel_id,member_id) DO UPDATE SET membership_revision=(SELECT membership_revision FROM users WHERE organization_id=$1 AND id=$3)")
@@ -48,7 +48,7 @@ async fn mention_live_and_replay_follow_current_names_and_never_accept_later_gra
 
 #[fukulow_test::test]
 async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(pool: PgPool) {
-    for phase in ["live", "page", "frame"] {
+    for phase in [Phase::Live, Phase::Page, Phase::Frame] {
         let f = fixture(&pool).await;
         sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
             .bind(f.organization)
@@ -60,18 +60,18 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
         let (reader, token) = member(&pool, f.organization).await;
         grant(&pool, f.organization, c, reader).await;
         let mut socket = f.server.connect(&token).await;
-        let gate = access_loss::gate(
+        let gate = hooks::register(
             c,
             phase,
-            if phase == "page" {
+            if phase == Phase::Page {
                 0
-            } else if phase == "frame" {
+            } else if phase == Phase::Frame {
                 2
             } else {
                 1
             },
         );
-        if phase == "live" {
+        if phase == Phase::Live {
             subscribe(&mut socket, c, 0).await;
             ready(&mut socket, c, 0).await;
         }
@@ -85,13 +85,13 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
             )
             .await;
         }
-        if phase != "live" {
+        if phase != Phase::Live {
             subscribe(&mut socket, c, 0).await;
         }
         gate.entered().await;
         let mut control = f.server.connect(&f.token).await;
         subscribe(&mut control, c, 0).await;
-        if phase == "frame" {
+        if phase == Phase::Frame {
             assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
         }
         assert_eq!(

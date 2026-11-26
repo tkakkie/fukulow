@@ -51,10 +51,11 @@ pub fn serve(
     } = connect(address, |socket, address| {
         socket.connect_timeout(address, Duration::from_secs(5))
     })?;
+    let upstream_port = upstream.local_addr()?.port();
     client.set_nodelay(true)?;
     writeln!(
         io::stdout().lock(),
-        r#"{{"event":"connected","socket":{id},"before":{before},"after":{after}}}"#,
+        r#"{{"event":"connected","socket":{id},"before":{before},"after":{after},"upstream_port":{upstream_port}}}"#,
     )?;
 
     let (mut client_read, mut upstream_write) = (client.try_clone()?, upstream.try_clone()?);

@@ -6,7 +6,7 @@ use auth::activity::ChangeScope;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -307,6 +307,7 @@ struct Entry {
     organization: Uuid,
     member: (Uuid, i64),
     hash: Vec<u8>,
+    notice_queries: Arc<OnceLock<Semaphore>>,
     buffer: Mutex<Buffer>,
     wake: Notify,
 }
@@ -320,6 +321,7 @@ pub struct Activity {
     directory_member: Option<Uuid>,
     directory_channels: Vec<Uuid>,
     capacity: Arc<Semaphore>,
+    notice_queries: Arc<OnceLock<Semaphore>>,
     batches: Arc<Mutex<HashMap<(Uuid, Uuid), ActivityBatch>>>,
     #[cfg(test)]
     tasks: Arc<Mutex<HashMap<(Uuid, Uuid), tokio::task::AbortHandle>>>,
@@ -336,6 +338,7 @@ impl Default for Activity {
             directory_member: None,
             directory_channels: Vec::new(),
             capacity: Arc::new(Semaphore::new(40)),
+            notice_queries: Default::default(),
             batches: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
@@ -412,6 +415,7 @@ impl Activity {
             organization: auth.identity.organization.organization_id,
             member: (auth.identity.member.id, auth.membership_revision),
             hash: auth.session_hash(),
+            notice_queries: self.notice_queries.clone(),
             buffer: Default::default(),
             wake: Notify::new(),
         });
@@ -619,7 +623,10 @@ impl Activity {
                 )
             })
             .collect();
-        let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
+        let selected: Vec<_> = captured
+            .iter()
+            .map(|(entry, _)| (entry.clone(), channel))
+            .collect();
         #[cfg(test)]
         if matches!(notice, Notice::ChannelMembersChanged { .. }) {
             test_pause(
@@ -637,9 +644,10 @@ impl Activity {
         #[cfg(test)]
         self.queries
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let proofs = authorize_notices(pool, &entries, channel).await?;
+        let proofs = self.authorize(pool, &selected).await?;
         let shared_guests =
             if matches!(notice, Notice::MembersChanged) && !self.directory_channels.is_empty() {
+                let entries: Vec<_> = selected.into_iter().map(|(entry, _)| entry).collect();
                 directory_guests(pool, organization, &entries, &self.directory_channels).await?
             } else {
                 HashSet::new()
@@ -1152,6 +1160,7 @@ impl NoticeFrame {
                 Some(self.entry.member.0),
             )
             .await;
+            let _slot = notice_query_slot(&self.entry.notice_queries, pool).await?;
             if let Some(capacity) = retry_measurement {
                 capacity.count_retry_attempt();
             }
@@ -1169,16 +1178,23 @@ impl NoticeFrame {
         Ok(())
     }
 }
-async fn authorize_notices(
+async fn notice_query_slot<'a>(
+    budget: &'a OnceLock<Semaphore>,
     pool: &sqlx::PgPool,
-    entries: &[Arc<Entry>],
-    channel: Option<Uuid>,
-) -> Result<Vec<Option<Proof>>, sqlx::Error> {
-    let selected: Vec<_> = entries
-        .iter()
-        .map(|entry| (entry.clone(), channel))
-        .collect();
-    authorize_batch(pool, &selected).await
+) -> Result<tokio::sync::SemaphorePermit<'a>, sqlx::Error> {
+    // One Activity registry per app pool. Allow up to half the connections for
+    // notice authorization, counting the single periodic pass separately so
+    // socket retries cannot queue ahead of it. At the minimum pool size (3),
+    // allow one query from each lane and leave one connection for other work.
+    // Take the permit before checkout and release it before backoff or handoff.
+    budget
+        .get_or_init(|| {
+            let half = pool.options().get_max_connections() as usize / 2;
+            Semaphore::new(half.saturating_sub(1).max(1))
+        })
+        .acquire()
+        .await
+        .map_err(|_| sqlx::Error::PoolClosed)
 }
 async fn directory_guests(
     pool: &sqlx::PgPool,
@@ -1568,6 +1584,18 @@ impl auth::activity::ActivityChange for TargetChange {
     }
 }
 impl Activity {
+    async fn authorize(
+        &self,
+        pool: &sqlx::PgPool,
+        selected: &[(Arc<Entry>, Option<Uuid>)],
+    ) -> Result<Vec<Option<Proof>>, sqlx::Error> {
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _slot = notice_query_slot(&self.notice_queries, pool).await?;
+        authorize_batch(pool, selected).await
+    }
+
     async fn revoked(
         &self,
         pool: &sqlx::PgPool,
@@ -1606,7 +1634,7 @@ impl Activity {
             .iter()
             .flat_map(|(entry, _, _)| [(entry.clone(), None), (entry.clone(), Some(channel))])
             .collect();
-        let proofs = authorize_batch(pool, &selected).await?;
+        let proofs = self.authorize(pool, &selected).await?;
         #[cfg(test)]
         test_pause(organization, channel, "revocation_authorized", Some(target)).await;
         let (proofs, _) = proofs.as_chunks::<2>();
@@ -1795,7 +1823,13 @@ impl Activity {
                     )
                     .await;
                 }
-                let Ok(proofs) = authorize_batch(pool, &selected).await else {
+                let proofs = if matches!(scope, auth::SubscriptionScope::All) {
+                    // The Session worker runs this pass serially.
+                    authorize_batch(pool, &selected).await
+                } else {
+                    self.authorize(pool, &selected).await
+                };
+                let Ok(proofs) = proofs else {
                     if let Some(trace) = &mut trace {
                         trace.failed_chunk();
                     }
@@ -2067,6 +2101,7 @@ mod tests {
                 organization: scope,
                 member: (id, i64::from(id == inactive || id == stale)),
                 hash: Vec::new(),
+                notice_queries: Default::default(),
                 buffer: Default::default(),
                 wake: Notify::new(),
             }));
@@ -2141,6 +2176,7 @@ mod tests {
                         } else {
                             hashes[n].clone()
                         },
+                        notice_queries: Default::default(),
                         buffer: Default::default(),
                         wake: Notify::new(),
                     }),
@@ -2221,6 +2257,7 @@ mod tests {
             organization: Uuid::new_v4(),
             member: (Uuid::new_v4(), 0),
             hash: vec![],
+            notice_queries: Default::default(),
             buffer: Default::default(),
             wake: Notify::new(),
         })

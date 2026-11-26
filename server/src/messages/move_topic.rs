@@ -308,13 +308,9 @@ async fn persist(
     };
     super::search::SearchEngine::index_move(&mut tx, &event);
     let delivery = &state.message_delivery;
-    let mut notification = delivery.notification(org, channel, event.seq);
-    if let Err(error) = commit::finish(tx, outcome.operation_id).await {
-        if commit::definitely_rolled_back(&error) {
-            notification.complete();
-        }
-        return Err(error.into());
-    }
+    let notification = delivery
+        .commit_for_publication(tx, outcome.operation_id, org, channel, event.seq)
+        .await?;
     delivery
         .channel_access
         .activity

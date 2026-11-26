@@ -3,7 +3,17 @@ import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
-export function spawnMeasuredServer(binary: string, dir: string, port: number, setupToken: string, databaseUrl: string, events = true, prefix: string[] = []) {
+export const SEND_BUFFER_ENV = 'FUKULOW_MEASUREMENT_SNDBUF';
+
+export function parseSendBuffer(value: string | undefined): number {
+  const size = Number(value);
+  if (value === undefined || !/^[0-9]+$/.test(value) || !Number.isInteger(size) || size < 1 || size > 2_147_483_647) {
+    throw new Error(`${SEND_BUFFER_ENV} must be an integer from 1 to 2147483647`);
+  }
+  return size;
+}
+
+export function spawnMeasuredServer(binary: string, dir: string, port: number, setupToken: string, databaseUrl: string, events = true, prefix: string[] = [], sendBuffer?: number) {
   const tracePath = resolve(dir, `revocation-trace-${randomUUID()}.jsonl`);
   const [file, ...args] = [...prefix, binary];
   const server = spawn(file, args, {
@@ -15,6 +25,7 @@ export function spawnMeasuredServer(binary: string, dir: string, port: number, s
       FUKULOW_REVOCATION_MEASUREMENT: '1',
       FUKULOW_REVOCATION_TRACE_PATH: tracePath,
       FUKULOW_REVOCATION_TRACE_EVENTS: events ? '1' : '0',
+      ...(sendBuffer === undefined ? {} : { [SEND_BUFFER_ENV]: String(sendBuffer) }),
       DATABASE_URL: databaseUrl,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

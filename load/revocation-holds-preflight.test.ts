@@ -4,7 +4,7 @@ import { channelId, holdsFixture, jsonl, memberId, target, traceLines, watermark
 import { BYSTANDERS, STALL_DEFAULT } from './revocation-holds-plan.ts';
 import { messagesForSender, preflightPlan, preflightReadback, preflightResult, preflightTrialEvidence, type PreflightTrial } from './revocation-holds-preflight.ts';
 import { preflightSession } from './revocation-holds-preflight-session.ts';
-import { preflightIdentity as identity, preflightReadbackValue as after } from './revocation-holds-preflight-fixture.ts';
+import { preflightIdentity as identity, preflightReadbackValue as after, preflightSendBuffer } from './revocation-holds-preflight-fixture.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
 import { parseTrace } from './revocation-holds-trace.ts';
 
@@ -20,6 +20,7 @@ function trialRun(trial: PreflightTrial) {
     return socket;
   });
   run.stallReadbacks = run.targets.map(() => ({ before: after, after }));
+  run.effectiveSendBuffer = preflightSendBuffer;
   run.trace = parseTrace(jsonl([...traceLines(run), watermarkLine(4)]), true);
   return run;
 }
@@ -46,7 +47,10 @@ test('preflight schedules three control repeats per k with Hcap and distributes 
 
 test('preflight requires positive E2, E4c, E6 and E8 evidence at k=60', () => {
   const accepted = preflightTrialEvidence(trial, trialRun(trial));
-  assert.deepEqual(accepted, { passed: true, issues: [], snapshotRecords: 96, readback: after });
+  assert.deepEqual(accepted, { passed: true, issues: [], snapshotRecords: 96, readback: after, effectiveSendBuffer: preflightSendBuffer });
+  const noSendBuffer = trialRun(trial);
+  delete noSendBuffer.effectiveSendBuffer;
+  assert.equal(preflightTrialEvidence(trial, noSendBuffer).passed, false);
   for (const [rule, corrupt] of Object.entries({
     E2: (run: ReturnType<typeof trialRun>) => {
       const snapshot = run.trace!.events[0];
@@ -77,7 +81,8 @@ test('preflight requires positive E2, E4c, E6 and E8 evidence at k=60', () => {
 test('preflight acceptance depends on all three k=60 runs and one common readback', () => {
   const results = rows().map(row => row.volume === 60 ? row : { ...row, passed: false });
   assert.equal(preflightResult(identity, results).passed, true);
-  for (const patch of [{ passed: false }, { readback: after + 1 }, { snapshotRecords: 0 }, { repeat: 2 }]) {
+  for (const patch of [{ passed: false }, { readback: after + 1 }, { effectiveSendBuffer: undefined },
+    { effectiveSendBuffer: preflightSendBuffer + 1 }, { snapshotRecords: 0 }, { repeat: 2 }]) {
     assert.equal(preflightResult(identity, [...results.slice(0, -1), { ...results.at(-1)!, ...patch }]).passed, false);
   }
   assert.equal(preflightResult(identity, results.slice(1)).passed, false);
@@ -86,19 +91,20 @@ test('preflight acceptance depends on all three k=60 runs and one common readbac
 
 test('SA2 validates saved readback provenance and acceptance evidence', () => {
   const saved = JSON.parse(JSON.stringify(preflightResult(identity, rows())));
-  assert.equal(preflightReadback(saved, identity), after);
+  assert.deepEqual(preflightReadback(saved, identity), { receiveBuffer: after, sendBuffer: preflightSendBuffer });
   for (const [field, value] of Object.entries(identity)) {
     const changed = typeof value === 'number' ? value + 1 : typeof value === 'boolean' ? !value : value + '-different';
     assert.equal(preflightReadback(saved, { ...identity, [field]: changed }), undefined, field);
   }
   assert.equal(preflightReadback(saved, { ...identity, session: '' }), undefined);
-  for (const field of ['gitClean', 'bootId', 'serverSha256', 'stallHelperSha256']) {
+  for (const field of ['gitClean', 'bootId', 'serverSha256', 'stallHelperSha256', 'sendBuffer']) {
     const incomplete = { ...saved.identity };
     delete incomplete[field];
     assert.equal(preflightReadback({ ...saved, identity: incomplete }, identity), undefined, field);
   }
   assert.equal(preflightReadback({ ...saved, passed: false }, identity), undefined);
   assert.equal(preflightReadback({ ...saved, readback: after + 1 }, identity), undefined);
+  assert.equal(preflightReadback({ ...saved, effectiveSendBuffer: undefined }, identity), undefined);
   assert.equal(preflightReadback({ ...saved, runs: saved.runs.slice(0, -1) }, identity), undefined);
 });
 

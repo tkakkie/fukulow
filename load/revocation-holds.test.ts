@@ -85,7 +85,7 @@ test('the log reader keeps holds samples, send records, clock samples and 60 s e
   assert.deepEqual(log, {
     clock: [4], clockWall: [Date.parse('2026-11-22T00:00:01Z') + 123.456], sends: [{ channelId: 'c', beforeMs: 5, afterMs: 6, afterHold: true }],
     holds: [{ serverMs: 12.5, activeHolds: 3, highWaterMark: 9, retryAttempts: 40 }],
-    pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }],
+    pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }], sendBuffers: [],
   });
 });
 

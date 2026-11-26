@@ -35,7 +35,7 @@ struct Runner {
 impl Drop for Runner {
     fn drop(&mut self) {
         for (channel, gate) in &self.gates {
-            REPLAY_GATES.take(channel);
+            hooks::discard_replay(channel);
             gate.release();
         }
     }
@@ -234,7 +234,7 @@ impl Runner {
             Step::HoldReplay { channel } => {
                 for label in channel.labels() {
                     let id = self.channels[&label];
-                    assert!(self.gates.insert(id, pause(id)).is_none());
+                    assert!(self.gates.insert(id, hooks::register_replay(id)).is_none());
                 }
             }
             Step::AwaitReplayHeld { channel } => {

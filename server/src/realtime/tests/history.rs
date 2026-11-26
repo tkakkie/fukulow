@@ -1,4 +1,4 @@
-use super::*;
+use super::{hooks::Phase, *};
 
 #[fukulow_test::test]
 async fn stale_generation_subscribe_denials_cover_guest_dm_roles_and_foreign_organization(
@@ -132,7 +132,7 @@ async fn subscribe_handoff_generation_recheck_preserves_access_and_organization_
     for loss in ["grant", "member"] {
         let f = fixture(&pool).await;
         let private = channel(&pool, f.organization, f.member, true).await;
-        let gate = access_loss::gate(private, "handoff_generation", 0);
+        let gate = hooks::register(private, Phase::HandoffGeneration, 0);
         let mut socket = f.server.connect(&f.token).await;
         subscribe(&mut socket, private, 0).await;
         gate.entered().await;

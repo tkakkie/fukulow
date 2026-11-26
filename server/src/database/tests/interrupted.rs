@@ -1,3 +1,4 @@
+use crate::database::test_support::clean;
 use sqlx::{PgPool, postgres::PgSslMode};
 use std::{
     sync::{
@@ -152,7 +153,7 @@ async fn interrupted(
         }
         // 3 s covers a fresh connect+auth on a loaded runner and stays below SQLx's
         // 5 s graceful-close hold, so a regressed (retained) slot still times out.
-        let next_pid = tokio::time::timeout(Duration::from_secs(3), super::context::clean(&single))
+        let next_pid = tokio::time::timeout(Duration::from_secs(3), clean(&single))
             .await.expect("replacement acquire must succeed while the old transport stays stalled");
         assert_ne!(next_pid, pid, "interrupted {statement} must discard the connection");
         hold.send(false).unwrap();
@@ -191,7 +192,7 @@ pub(crate) async fn failed_rollback(app: &PgPool, work: impl AsyncFnOnce(&PgPool
         connection.return_to_pool().await;
         drop(connection);
         assert_eq!(
-            super::context::clean(&single).await,
+            clean(&single).await,
             pid,
             "SQLx must reuse the live backend after the control's cleanup error"
         );
@@ -249,7 +250,7 @@ pub(crate) async fn failed_start(
             .await
             .unwrap();
         drop(reused);
-        assert_eq!(super::context::clean(&single).await, pid);
+        assert_eq!(clean(&single).await, pid);
         armed.store(true, Ordering::SeqCst);
         work(&single, pid).await;
         assert!(

@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
 import { createActivity, createActivityTarget, type ActivityNotice } from './activity'
+import { isOrganizationUnavailable } from './api'
 import type { Result, TimelinePage, TopicSummary } from './api'
 import { createTopics, type TopicsApi } from './topics'
 import { createTopicSync } from './topic-sync'
@@ -14,6 +15,20 @@ import { message, observe, record } from './protocol-test-helpers'
 export { scenarios, record } from './protocol-test-helpers'
 
 export const flush = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
+
+// Standalone controller tests supply the Organization lifetime callbacks that createSession owns in the app.
+export function standaloneAccess(onEnded?: () => void): Pick<SyncOptions, 'reportSyncAccess' | 'reportOrganizationUnavailable'> {
+  return {
+    reportSyncAccess(result, source) {
+      if (!result.ok && result.kind === 'http' && result.status === 401) {
+        void source?.close()
+        onEnded?.()
+      } else if (isOrganizationUnavailable(result)) void source?.unavailable()
+    },
+    reportOrganizationUnavailable(apply) { void apply() },
+  }
+}
+
 export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopicSync = false, withReplySync = false, withUnread = false) {
   let emitted: FixtureEffect[] = []
   let nextId = 'unused'
@@ -36,6 +51,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
   }
   const options: SyncOptions = {
     selfId: 'me', newId: () => nextId,
+    ...standaloneAccess(overrides.onSessionEnded),
     // As in production (session.ts): a pre-connect close asks REST; the fixture answers with membership_check_result.
     checkMembership: () => request({ type: 'membership_check' }),
     api: {

@@ -1,20 +1,20 @@
-use super::*;
+use super::{hooks::Phase, *};
 use tracing::instrument::WithSubscriber;
 
 #[fukulow_test::test]
 async fn connection_database_failures_emit_once_with_fixed_operation_and_no_details(pool: PgPool) {
     for (phase, operation) in [
-        ("authorize", "websocket_authorize"),
-        ("access_subscribe", "websocket_subscribe"),
-        ("registered", "websocket_latest_seq"),
-        ("refresh", "websocket_refresh"),
-        ("snapshot", "websocket_replay"),
-        ("subscribed_seq", "websocket_subscribed_seq"),
-        ("handoff_generation", "websocket_authorize"),
-        ("duplicate_generation", "websocket_authorize"),
+        (Some(Phase::Authorize), "websocket_authorize"),
+        (Some(Phase::AccessSubscribe), "websocket_subscribe"),
+        (Some(Phase::Registered), "websocket_latest_seq"),
+        (Some(Phase::Refresh), "websocket_refresh"),
+        (Some(Phase::Snapshot), "websocket_replay"),
+        (Some(Phase::SubscribedSeq), "websocket_subscribed_seq"),
+        (Some(Phase::HandoffGeneration), "websocket_authorize"),
+        (None, "websocket_authorize"),
     ] {
         let f = fixture(&pool).await;
-        if phase == "snapshot" {
+        if phase == Some(Phase::Snapshot) {
             post(&f, f.channel).await;
         }
         let output = crate::observability::tests::Capture::default();
@@ -60,8 +60,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
             .with_state(f.state.clone());
         let server = Server::start(router).await;
         // The duplicate branch has no pause point: a second Subscribe reaches it.
-        let gate =
-            (phase != "duplicate_generation").then(|| access_loss::gate(f.channel, phase, 0));
+        let gate = phase.map(|phase| hooks::register(f.channel, phase, 0));
         let mut socket = server.connect(&f.token).await;
         subscribe(&mut socket, f.channel, 0).await;
         if let Some(gate) = gate {
@@ -103,22 +102,22 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
             .enumerate()
             .filter(|(_, event)| event["fields"]["event"] == "database_failure")
             .collect();
-        assert_eq!(failures.len(), 1, "{phase}: {}", output.text());
+        assert_eq!(failures.len(), 1, "{phase:?}: {}", output.text());
         let (failure_index, failure) = failures[0];
         let close_index = events
             .iter()
             .position(|event| event["fields"]["event"] == "websocket_closed")
-            .unwrap_or_else(|| panic!("{phase}: {}", output.text()));
-        assert!(failure_index < close_index, "{phase}: {}", output.text());
+            .unwrap_or_else(|| panic!("{phase:?}: {}", output.text()));
+        assert!(failure_index < close_index, "{phase:?}: {}", output.text());
         assert_eq!(
             failure["fields"],
             json!({"event":"database_failure", "kind":"pool_closed"}),
-            "{phase}"
+            "{phase:?}"
         );
         assert_eq!(
             failure["span"],
             json!({"name":"database", "operation":operation}),
-            "{phase}"
+            "{phase:?}"
         );
         for forbidden in [
             "pool closed",
@@ -130,7 +129,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
         ] {
             assert!(
                 !output.text().contains(forbidden),
-                "{phase}: {}",
+                "{phase:?}: {}",
                 output.text()
             );
         }

@@ -196,16 +196,15 @@ async fn persist_admitted(
         log::create(tx.connection()?, organization_id, &message).await?;
         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
-        // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
-        // connected subscribers silently missing a possibly committed message.
-        let mut notification =
-            delivery.notification(organization_id, channel_id, message.created_seq);
-        if let Err(error) = commit::finish(tx, input.client_message_id).await {
-            if commit::definitely_rolled_back(&error) {
-                notification.complete();
-            }
-            return Err(error.into());
-        }
+        let notification = delivery
+            .commit_for_publication(
+                tx,
+                input.client_message_id,
+                organization_id,
+                channel_id,
+                message.created_seq,
+            )
+            .await?;
         delivery.channel_access.activity.message(
             pool.clone(),
             organization_id,

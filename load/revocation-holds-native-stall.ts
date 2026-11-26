@@ -8,13 +8,14 @@ import type { StallRecord } from './revocation-holds-stall.ts';
 type Command = 'ping' | 'pause' | 'resume';
 type ProxyEvent =
   | { event: 'listening'; socket: number; port: number }
-  | { event: 'connected'; socket: number; before: number; after: number }
+  | { event: 'connected'; socket: number; before: number; after: number; upstream_port: number }
   | { event: 'read'; socket: number; at: number; bytes: number }
   | { event: 'close'; socket: number; at: number; side: 'client' | 'upstream' }
   | { event: 'socket_error'; socket: number }
   | { event: 'ack'; command: Command; at: number };
 
 export type Readback = { before: number; after: number };
+export type TargetReadback = Readback & { upstreamPort: number };
 export type ClockBounds = [number, number];
 
 function commandBounds(sample: ClockSample, [low, high]: ClockBounds): ClockBounds {
@@ -28,7 +29,7 @@ export class NativeStall {
   private events = new EventEmitter();
   private failure?: Error;
   private ports = new Map<number, number>();
-  private connected = new Map<number, Readback>();
+  private connected = new Map<number, TargetReadback>();
   private acks = new Map<Command, number>();
   private failedSockets = new Set<number>();
   private records: StallRecord[];
@@ -52,6 +53,8 @@ export class NativeStall {
 
   get pid() { return this.child.pid; }
 
+  upstreamPort(socket: number) { return this.connected.get(socket)?.upstreamPort; }
+
   private fail(error: Error) {
     this.failure ??= error;
     this.events.emit('update');
@@ -66,7 +69,13 @@ export class NativeStall {
       if (!record) throw new Error('invalid socket index');
       switch (event.event) {
         case 'listening': this.ports.set(event.socket, event.port); break;
-        case 'connected': this.connected.set(event.socket, { before: event.before, after: event.after }); break;
+        case 'connected': {
+          if (this.connected.has(event.socket) || !Number.isInteger(event.upstream_port) || event.upstream_port < 1 || event.upstream_port > 65_535) {
+            throw new Error('invalid upstream port or duplicate target connection');
+          }
+          this.connected.set(event.socket, { before: event.before, after: event.after, upstreamPort: event.upstream_port });
+          break;
+        }
         case 'read': record.reads.push({ at: event.at, bytes: event.bytes }); break;
         case 'close': record.closes.push({ at: event.at, side: event.side }); break;
         case 'socket_error': this.failedSockets.add(event.socket); break;
