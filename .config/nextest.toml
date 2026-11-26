@@ -1,3 +1,6 @@
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 2 }
+
 # Reserve all slots for the 512-socket contract's shared Postgres load and tests
 # with real 1s admission expiry, bounded storm progress or 100-200ms fallback
 # checks. The paused-time 512-socket contract does not assert wall-clock capacity.
@@ -10,6 +13,15 @@ test(=realtime::tests::watermark::simultaneous_admitted_subscriptions_receive_ca
 | test(=realtime::tests::session::fallback_database_failure_closes_with_internal_error)
 '''
 threads-required = "num-test-threads"
+
+# The projection oracle cases took up to 89s on green CI.
+[[profile.default.overrides]]
+filter = '''
+test(=messages::tests::unread::a3_oracle::projection::topic_pages_equal_the_prefix_query_after_every_random_step)
+| test(=messages::tests::unread::a3_oracle::projection::topic_pages_equal_the_prefix_query_after_every_random_step_seed_1)
+| test(=messages::tests::unread::a3_oracle::projection::topic_pages_equal_the_prefix_query_after_every_random_step_seed_2)
+'''
+slow-timeout = { period = "60s", terminate-after = 3 }
 
 # #800: start the longest tests first so they overlap the short ones instead of
 # setting each CI shard's tail. Order only; every test still runs.
