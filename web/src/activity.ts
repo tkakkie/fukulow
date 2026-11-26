@@ -3,13 +3,14 @@ import { createRequestDeadlines } from './request-deadlines'
 
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
+export type ReadReason = 'initial' | Invalidation
 export type FencedInvalidation = Exclude<Invalidation, 'notice'>
 export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number, discovery?: boolean): void; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
   canLoad?(): boolean
-  load(signal: AbortSignal): Promise<Result<T>>
+  load(signal: AbortSignal, reasons: readonly ReadReason[]): Promise<Result<T>>
   accept(value: T): void
   covers?(value: T): boolean
   hide?(reason: FencedInvalidation): void
@@ -25,6 +26,7 @@ export function createActivityTarget<T>(options: {
   const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
   let noticePending = false, servingNotice = false
+  const pendingReasons = new Set<ReadReason>()
   let timer: ReturnType<typeof setTimeout> | undefined
   let retry = false, due = 0, stopped = false
   let failure: Exclude<Result<T>, { ok: true }> | undefined
@@ -58,12 +60,13 @@ export function createActivityTarget<T>(options: {
     if (retry || options.canLoad?.() === false) return
     inFlight = true; queued = false; failure = undefined
     servingNotice = noticePending; noticePending = false
+    const reasons = [...pendingReasons]; pendingReasons.clear()
     const own = generation
     const request = new AbortController()
     controller = request
     let cancelled = false
     let pending: Promise<Result<T>>
-    try { pending = options.load(request.signal).catch((): Result<T> => ({ ok: false, kind: 'network' })) }
+    try { pending = options.load(request.signal, reasons).catch((): Result<T> => ({ ok: false, kind: 'network' })) }
     catch { pending = Promise.resolve({ ok: false, kind: 'network' }) }
     const networkFailure: Result<T> = { ok: false, kind: 'network' }
     completion = () => { cancelled = true; request.abort(); deadlines.cancel() }
@@ -81,11 +84,13 @@ export function createActivityTarget<T>(options: {
     try { if (result.ok) {
       if (own !== generation) {
         if (wasServingNotice) noticePending = true
+        if (dirty && pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
         if (dirty && !retry) schedule(200)
         return
       }
       if (options.covers?.(result.data) === false) {
         if (wasServingNotice) noticePending = true
+        if (pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
         if (++belowFloor >= 3) scheduleRetry()
         else schedule(200)
         return
@@ -95,15 +100,17 @@ export function createActivityTarget<T>(options: {
       if (dirty) schedule(200)
     } else {
       if (own === generation) { belowFloor = 0; failure = result; options.error?.(result) }
-      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; stopped = true; return }
-      if (options.manualRetry) { dirty = false; queued = false; noticePending = false; return }
+      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true; return }
+      if (options.manualRetry) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
         if (wasServingNotice) noticePending = true
+        if (pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
         scheduleRetry(result.retryAfterMs ?? 0)
       } else if (own !== generation) {
         if (wasServingNotice) noticePending = true
+        if (dirty && pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
         if (dirty) schedule(200)
-      } else { dirty = false; queued = false; noticePending = false; stopped = true }
+      } else { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true }
     } } finally { options.settled?.() }
   }
   function fence() {
@@ -114,6 +121,7 @@ export function createActivityTarget<T>(options: {
   }
   function invalidate(reason: Invalidation = 'notice', delay = 200) {
     if (closed) return
+    pendingReasons.add(reason)
     if (reason !== 'notice') { fence(); options.hide?.(reason) }
     else noticePending = true
     stopped = false; failure = undefined; dirty = true
@@ -132,10 +140,14 @@ export function createActivityTarget<T>(options: {
     pendingNotice: () => !closed && (servingNotice || (noticePending && dirty)),
     ensure() {
       if (inFlight) return running
-      if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }
+      if (!closed && !stopped && !dirty && timer === undefined && !retry) {
+        if (pendingReasons.size === 0) pendingReasons.add('initial')
+        dirty = true; return run()
+      }
     },
-    refresh() {
+    refresh(reason: ReadReason = 'reconcile') {
       if (closed) return
+      pendingReasons.add(reason)
       stopped = false; dirty = true
       if (inFlight) { queued = true; return running }
       if (!retry) { clearTimeout(timer); timer = undefined; return run() }
@@ -146,8 +158,8 @@ export function createActivityTarget<T>(options: {
       if (dirty && !retry && timer !== undefined) { clearTimeout(timer); timer = undefined; return run() }
     },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
-    suspend() { generation++; dirty = false; queued = false; noticePending = false; servingNotice = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
-    close() { closed = true; generation++; noticePending = false; servingNotice = false; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
+    suspend() { generation++; dirty = false; queued = false; noticePending = false; servingNotice = false; pendingReasons.clear(); retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
+    close() { closed = true; generation++; noticePending = false; servingNotice = false; pendingReasons.clear(); clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
   }
 }
 

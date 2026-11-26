@@ -1476,3 +1476,118 @@ it('delayed background summary below local confirmed read position does not hide
     expect(session.unread.get('A').topics.T?.error).toBe(false)
   } finally { session.close(); listChannels.mockRestore(); markTopicRead.mockRestore() }
 })
+
+it('accumulates and restores read reasons across ensure, refresh, periodic, below-floor, retry and fence (#983)', async () => {
+  const seen: string[][] = []
+  let failOnce = true
+  let covered = true
+  let gate: ReturnType<typeof held<Result<number>>> | undefined
+  const target = createActivityTarget<number>({
+    load: async (_signal, reasons) => {
+      seen.push([...reasons])
+      if (gate) { const p = gate.promise; gate = undefined; return p }
+      if (failOnce) { failOnce = false; return { ok: false, kind: 'network' } }
+      return ok(1)
+    },
+    accept() {},
+    covers: () => covered,
+    random: () => 0,
+  })
+  try {
+    // ensure() -> ['initial'], restored on retryable network failure
+    void target.ensure(); await flush()
+    expect(seen).toEqual([['initial']])
+    await vi.advanceTimersByTimeAsync(1_000); await flush()
+    expect(seen).toEqual([['initial'], ['initial']])
+
+    // below-floor snapshot restores reasons for the follow-up read
+    covered = false
+    target.invalidate('notice', 0); await vi.advanceTimersByTimeAsync(0); await flush()
+    expect(seen.at(-1)).toEqual(['notice'])
+    covered = true
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(seen.at(-1)).toEqual(['notice'])
+
+    // periodic-only invalidation yields ['periodic'], coalesced periodic+notice yields both
+    target.invalidate('periodic', 0); await vi.advanceTimersByTimeAsync(0); await flush()
+    expect(seen.at(-1)).toEqual(['periodic'])
+    target.invalidate('periodic', 200)
+    target.invalidate('notice', 200)
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(seen.at(-1)).toEqual(['periodic', 'notice'])
+
+    // generation mismatch while in flight restores reasons if still dirty
+    gate = held<Result<number>>()
+    const inFlight = gate
+    void target.refresh('reconcile'); await flush()
+    expect(seen.at(-1)).toEqual(['reconcile'])
+    target.fence()
+    target.invalidate('access', 200)
+    inFlight.resolve(ok(1)); await flush()
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(seen.at(-1)).toEqual(['access'])
+  } finally { target.close() }
+})
+
+it('marks startup and O5-only Channel list reads one-to-one with read ids (#983)', async () => {
+  const { createSession, startInitialChannels } = await import('./session')
+  const { CHANNEL_READ_MARK } = await import('./channels')
+  const { CHANNELS_API_PATH, classifyChannelReads } = await import('../scripts/read-reasons')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000983'
+  const marks: Array<{ id: unknown; reasons: unknown }> = []
+  const markSpy = vi.spyOn(performance, 'mark').mockImplementation(((name: string, options?: PerformanceMarkOptions) => {
+    if (name === CHANNEL_READ_MARK && options?.detail && typeof options.detail === 'object') {
+      const detail = options.detail as { id?: unknown; reasons?: unknown }
+      marks.push({ id: detail.id, reasons: detail.reasons })
+    }
+    return {} as PerformanceMark
+  }) as typeof performance.mark)
+  const requests: Array<{ seq: number; method: string; path: string; search: string; readId: string | null }> = []
+  const listChannels = vi.spyOn(api, 'listChannels').mockImplementation(async (_org, _f, _signal, query, readId) => {
+    const search = query?.archived ? '?archived=true' : ''
+    requests.push({ seq: requests.length + 1, method: 'GET', path: CHANNELS_API_PATH, search, readId: readId ?? null })
+    return ok({ history_generation: gen, channels: [] })
+  })
+  const getMe = vi.spyOn(api, 'getOrganizationMe').mockResolvedValue({ ok: false, kind: 'network' })
+  let socket!: import('./realtime').RealtimeHandlers
+  const account = new AbortController()
+  const initialChannels = startInitialChannels('org-1', account.signal)
+  const session = createSession({
+    selfId: 'me',
+    organizationId: 'org-1',
+    onEnded() {},
+    initialChannels,
+    sync: {
+      random: () => 0.5,
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ({ ok: false, kind: 'network' }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    await flush()
+    socket.onReady()
+    socket.onEvent({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    // Advance past the first periodic O5 interval (random=0.5 * 30_000 = 15_000ms) + 200ms debounce.
+    await vi.advanceTimersByTimeAsync(15_200); await flush()
+
+    const summary = classifyChannelReads(requests, marks)
+    expect(summary.valid).toBe(true)
+    expect(summary.invalidReasons).toEqual([])
+    expect(summary.reads.map(r => r.reasons)).toEqual([['initial'], ['reconcile'], ['periodic']])
+    expect(summary.reads.map(r => r.classification)).toEqual(['startup', 'startup', 'O5-only'])
+    expect(summary.countedReads).toBe(2)
+    expect(summary.countsByClass['O5-only']).toBe(1)
+  } finally {
+    session.close()
+    account.abort()
+    listChannels.mockRestore()
+    getMe.mockRestore()
+    markSpy.mockRestore()
+  }
+})

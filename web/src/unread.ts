@@ -12,12 +12,12 @@ export type { UnreadScope } from './unread-counts'
 
 type Sync = ReturnType<typeof createSync>
 export type UnreadApi = {
-  listChannels(signal?: AbortSignal): Promise<Result<ChannelList>>
+  listChannels(signal?: AbortSignal, readId?: string): Promise<Result<ChannelList>>
   markRead(scope: UnreadScope, body: MarkReadRequest): Promise<Result<ReadPosition>>
   getTopicSummary(channel: string, topic: string): Promise<Result<TopicSummaryResponse>>
 }
 export const unreadApi = (org: string, generation: () => string | undefined = () => undefined): UnreadApi => ({
-  listChannels: signal => api.listChannels(org, undefined, signal, { history_generation: generation() }),
+  listChannels: (signal, readId) => api.listChannels(org, undefined, signal, { history_generation: generation() }, readId),
   markRead: (s, body) => s.topicId === null ? api.markChannelRead(org, s.channel, body) : api.markTopicRead(org, s.channel, s.topicId, body),
   getTopicSummary: (c, t) => api.getTopicSummary(org, c, t, undefined, undefined, { history_generation: generation() }),
 })
