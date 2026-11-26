@@ -30,6 +30,7 @@ mod dms;
 mod fanout;
 mod history;
 pub(super) mod hooks;
+mod isolated_test;
 mod keepalive;
 mod lifecycle;
 mod limits;

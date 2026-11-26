@@ -1,4 +1,5 @@
 use super::*;
+use crate::realtime::tests::isolated_test::run_isolated_test;
 use crate::{
     auth::{
         SubscriptionRecheck, SubscriptionScope,
@@ -20,17 +21,14 @@ mod admission;
 fn send_measurement_records_delivered_revocation_only() {
     // The production subscriber is process-wide. Other connection tests reach the same
     // tracing callsites concurrently, so give this observation its own process.
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--ignored",
-            "--exact",
-            concat!(module_path!(), "::send_measurement_child")
-                .split_once("::")
-                .unwrap()
-                .1,
-        ])
-        .output()
-        .unwrap();
+    let result = run_isolated_test(&[
+        "--ignored",
+        "--exact",
+        concat!(module_path!(), "::send_measurement_child")
+            .split_once("::")
+            .unwrap()
+            .1,
+    ]);
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
         result.status.success() && stdout.contains("1 passed"),
