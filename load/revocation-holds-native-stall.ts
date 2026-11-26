@@ -53,6 +53,8 @@ export class NativeStall {
 
   get pid() { return this.child.pid; }
 
+  upstreamPort(socket: number) { return this.connected.get(socket)?.upstreamPort; }
+
   private fail(error: Error) {
     this.failure ??= error;
     this.events.emit('update');
