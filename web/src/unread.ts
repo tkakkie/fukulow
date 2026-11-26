@@ -463,9 +463,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
     prune(c); notify(changed)
   }
-  function reconcileTopicSummary(id: string, c: Channel, topic: string, s: Scope) {
+  function reconcileTopicSummary(id: string, c: Channel, topic: string, s: Scope, queueIfPending = false) {
     if (!needsRecovery(c, s) && !s.stopped && s.baseline) clearSummaryWork(c, topic)
-    else if (!s.recovery?.stopped && !c.summaryReads.has(topic)) void refreshTopic(id, topic)
+    else if (queueIfPending || !c.summaryReads.has(topic)) void refreshTopic(id, topic)
   }
   function collect(id: string, c: Channel): boolean {
     if (!watched(id)) return false
@@ -647,8 +647,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   const unsubscribeSummaries = options.topics?.subscribeSummary?.((id, response, startedAt) => {
     if (!active() || !watched(id)) return
     const c = channels.get(id), s = c?.topics.get(response.topic.id)
-    if (!c || !s || !completeCountFields(response.topic) || response.topic.read_seq < s.position) return
-    const changed = acceptTopic(c, s, topicBaseline(response.as_of_seq, response.topic), startedAt)
+    if (!c || !s || !completeCountFields(response.topic)) return
+    const changed = response.topic.read_seq >= s.position &&
+      acceptTopic(c, s, topicBaseline(response.as_of_seq, response.topic), startedAt)
     reconcileTopicSummary(id, c, response.topic.id, s)
     if (changed) {
       prune(c)
@@ -787,14 +788,15 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     activityRead(id: string, topic: string | null, readSeq?: number, viaActivity = false) {
       if (topic === null || !watched(id)) return
       const c = getChannel(id)
-      if (!c.topics.has(topic) && !options.topics?.hasActivitySummary(id, topic)) return
+      const activityHeld = options.topics?.hasActivitySummary(id, topic)
+      if (!c.topics.has(topic) && !activityHeld) return
       const s = getScope(c, topic)
       if (s.stopped || (readSeq !== undefined && readSeq <= (s.baseline?.readSeq ?? -1) && !needsRecovery(c, s))) return
       if (readSeq !== undefined && readSeq <= s.requiredPosition && s.recovery && !s.recovery.stopped) return
       const invalidatedAt = stampTopicEvidence()
       s.recovery = { invalidatedAt, after: readSeq === undefined ? invalidatedAt : s.recovery?.after ?? 0 }
       if (readSeq !== undefined) s.requiredPosition = Math.max(s.requiredPosition, readSeq)
-      if (!viaActivity) void refreshTopic(id, topic)
+      if (!viaActivity || !activityHeld) reconcileTopicSummary(id, c, topic, s, true)
       notify(id)
     },
     get(id: string) { let s = snapshots.get(id); if (!s) snapshots.set(id, s = snapshot(id)); return s },

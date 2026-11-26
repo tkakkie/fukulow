@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import * as api from './api'
 import type { ReadPosition, Result, TopicSummaryResponse } from './api'
+import { MAIN_MESSAGE_LIMIT } from './protocol-types'
 import type { RealtimeHandlers } from './realtime'
 import { createSession } from './session'
 import { deferred, flush, http, msg, ok, row, summary, unreadClient } from './unread-test-helpers'
@@ -239,4 +240,48 @@ it('covering Topic evidence restores both badges and permits a fresh presentatio
     await flush()
     expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(scope, { history_generation, read_seq: 3 })
   } finally { await c.sync.close() }
+})
+
+it('a WebSocket read notice recovers a retained Topic after its activity target is pruned', async () => {
+  const c = await sharedVisit()
+  try {
+    await c.topics.loadSummary('A', 'T')
+    expect(c.topics.hasActivitySummary('A', 'T')).toBe(true)
+    c.unread.leave()
+    c.topics.releaseTopic('A', 'T')
+    c.topics.reserveSearch('A', 'main', MAIN_MESSAGE_LIMIT)
+    c.topics.reserveSearch('A', 'main', 0)
+    expect(c.topics.hasActivitySummary('A', 'T')).toBe(false)
+    expect(c.counts()).toMatchObject({ position: 0, unreadCount: 3, mentionUnreadCount: 3 })
+
+    const fresh = deferred<Result<TopicSummaryResponse>>()
+    c.getTopicSummary.mockClear().mockReturnValueOnce(fresh.promise)
+    c.socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 2 })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(c.counts()).toMatchObject(hidden)
+    expect(c.getTopicSummary).toHaveBeenCalledTimes(1)
+    fresh.resolve(ok(read(3, 2, 1)))
+    await flush()
+    expect(c.counts()).toMatchObject({ position: 2, unreadCount: 1, mentionUnreadCount: 1, error: false })
+  } finally { c.close() }
+})
+
+it('a stale activity summary schedules Topic recovery before the periodic tick', async () => {
+  const c = await sharedVisit()
+  try {
+    c.getTopicSummary.mockResolvedValueOnce(ok(read(3, 2, 1)))
+    await c.topics.loadSummary('A', 'T')
+    expect(c.counts()).toMatchObject({ position: 2, unreadCount: 1, mentionUnreadCount: 1 })
+    expect(c.topics.hasActivitySummary('A', 'T')).toBe(true)
+
+    const fresh = deferred<Result<TopicSummaryResponse>>()
+    c.getTopicSummary.mockClear().mockResolvedValueOnce(ok(read(3, 1, 2))).mockReturnValueOnce(fresh.promise)
+    c.socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 3 })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(c.counts()).toMatchObject({ position: 2, ...hidden })
+    expect(c.getTopicSummary).toHaveBeenCalledTimes(2)
+    fresh.resolve(ok(read(3, 3, 0)))
+    await flush()
+    expect(c.counts()).toMatchObject({ position: 3, unreadCount: 0, mentionUnreadCount: 0, error: false })
+  } finally { c.close() }
 })
