@@ -101,10 +101,7 @@ export function createSession(options: SessionOptions) {
       if (notice.type === 'channel_activity') return (unread.get(notice.channel_id).asOfSeq ?? -1) >= notice.seq
       if (notice.type !== 'read_position_changed') return false
       if ((target === 'channels' || target === 'dms')) return notice.topic_id === null && unread.activityMainCoverage(notice.channel_id) >= notice.read_seq
-      if (notice.topic_id !== null) {
-        const summary = topics.get(notice.channel_id).topics.find(t => t.topicId === notice.topic_id)?.baseline?.summary
-        return summary !== undefined && completeCountFields(summary) && summary.read_seq >= notice.read_seq
-      }
+      if (notice.topic_id !== null) return unread.activityTopicCoverage(notice.channel_id, notice.topic_id) >= notice.read_seq
       return false
     },
     revoke: id => {
@@ -172,15 +169,16 @@ export function createSession(options: SessionOptions) {
       ...options.sync,
       selfId: options.selfId,
       organizationId,
-      refreshList: !options.channelsApi ? () => Promise.resolve().then(() => channels.load()) : undefined,
-      ensureList: !options.channelsApi ? () => channels.ensure() : undefined,
+      refreshList: !options.channelsApi ? async () => { await Promise.resolve().then(() => channels.load()) } : undefined,
+      ensureList: !options.channelsApi ? async () => { await channels.ensure() } : undefined,
       refreshArchived: () => channels.refreshArchived(),
       refreshDms: () => dms?.refresh(),
       isDm,
+      readTopicSummary: options.unreadApi ? undefined : topics.readTopicSummary,
       unreadApi: {
         listChannels: (signal, readId) => observe(unreadSource.listChannels(signal, readId)),
         markRead: (scope, body) => observe(unreadSource.markRead(scope, body)),
-        getTopicSummary: (channel, topic) => observe(options.unreadApi ? unreadSource.getTopicSummary(channel, topic) : topics.activitySummary(channel, topic, unread.get(channel).topics[topic]?.position ?? 0, unread.activityRequiredBase(channel))),
+        getTopicSummary: (channel, topic) => observe(unreadSource.getTopicSummary(channel, topic)),
       },
       onSessionEnded: notifyEnded,
     },
@@ -308,6 +306,9 @@ export function createSession(options: SessionOptions) {
   const stopActivity = sync.onActivity(notice => {
     // Subscribe rechecks Channel access (C9) and Organization Membership (C10) after the startup snapshot.
     if (notice.type === 'activity_ready') { dms?.ready(); sections.ready() }
+    if (notice.type === 'read_position_changed') {
+      unread.activityRead(notice.channel_id, notice.topic_id, notice.read_seq, true)
+    }
     activity.notice(notice)
   })
   function terminate() {

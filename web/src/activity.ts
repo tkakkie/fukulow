@@ -1,6 +1,7 @@
 import type { Result, ServerEvent } from './api'
 import { createRequestDeadlines } from './request-deadlines'
 
+export type ActivityRead<T> = { startedAt: number; result: Result<T> }
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
 export type ReadReason = 'initial' | Invalidation
@@ -11,7 +12,7 @@ export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, 
 export function createActivityTarget<T>(options: {
   canLoad?(): boolean
   load(signal: AbortSignal, reasons: readonly ReadReason[]): Promise<Result<T>>
-  accept(value: T): void
+  retryQueuedTerminal?: boolean
   covers?(value: T): boolean
   /** A snapshot can carry authoritative data even when a derived baseline needs a follow-up. */
   acceptBelowFloor?: boolean
@@ -27,7 +28,10 @@ export function createActivityTarget<T>(options: {
   /** A bounded multi-lane target owns retry admission; deadlines remain shared here. */
   manualRetry?: boolean
   settled?(): void
-}) {
+} & (
+  { stampRead?: never; accept(value: T): void } |
+  { stampRead(): number; accept(value: T, startedAt: number): void }
+)) {
   const random = options.random ?? Math.random
   const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
@@ -40,7 +44,7 @@ export function createActivityTarget<T>(options: {
   let failure: Exclude<Result<T>, { ok: true }> | undefined
   let completion: (() => void) | undefined
   let controller: AbortController | undefined
-  let running: Promise<void> | undefined
+  let running: Promise<ActivityRead<T> | undefined> | undefined
   function schedule(ms: number) {
     if (timer !== undefined || closed) return
     due = Date.now() + ms
@@ -77,6 +81,7 @@ export function createActivityTarget<T>(options: {
     const own = generation
     const epoch = options.connectionEpoch?.() ?? null
     inFlightEpoch = epoch; inFlightGen = own
+    const startedAt = options.stampRead?.() ?? 0
     const request = new AbortController()
     controller = request
     let cancelled = false
@@ -114,11 +119,13 @@ export function createActivityTarget<T>(options: {
       } else {
         dirty = queued; attempt = 0; belowFloor = 0
       }
-      failure = undefined; stopped = false; acceptedEpoch = epoch; options.accept(result.data)
+      failure = undefined; stopped = false; acceptedEpoch = epoch
+      if (options.stampRead) options.accept(result.data, startedAt)
+      else options.accept(result.data)
       if (covered && dirty) schedule(200)
     } else {
       if (own === generation) { belowFloor = 0; acceptedEpoch = null; failure = result; options.error?.(result) }
-      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true; return }
+      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true; return { startedAt, result } }
       if (options.manualRetry) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
         if (wasServingNotice) noticePending = true
@@ -128,8 +135,13 @@ export function createActivityTarget<T>(options: {
         if (wasServingNotice) noticePending = true
         if (dirty) for (const r of reasons) pendingReasons.add(r)
         replaceFencedRead()
+      } else if (queued && options.retryQueuedTerminal) {
+        if (wasServingNotice) noticePending = true
+        schedule(200)
       } else { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true }
-    } } finally { options.settled?.() }
+    }
+    if (own === generation) return { startedAt, result }
+    } finally { options.settled?.() }
   }
   function fence() {
     generation++
@@ -176,6 +188,7 @@ export function createActivityTarget<T>(options: {
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
     inFlight: () => inFlight,
+    idle: () => !closed && !inFlight && !dirty && !retry && !stopped,
     pendingNotice: () => !closed && (servingNotice || (noticePending && dirty)),
     ensure() {
       if (inFlight) return running
