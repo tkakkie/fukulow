@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { fakeNetwork } from './adapter-test-helpers.svelte'
 import type { Result } from './api'
+import { createSync } from './sync'
 import { controllerClient, flush, record } from './sync-test-helpers'
+import { deferred } from './topic-test-helpers'
+import { createTopics } from './topics'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -113,4 +117,72 @@ it('a Membership probe that never answers times out and reconnects instead of ha
   expect(client.sockets).toHaveLength(2)
   await client.sync.close()
   expect(vi.getTimerCount()).toBe(0)
+})
+
+const membershipLost = { ok: false, kind: 'http', status: 404, error: 'organization_unavailable' } as const
+
+it.each([
+  { name: '401', result: { ok: false, kind: 'http', status: 401 } as const, organization: 'available', ended: 1 },
+  { name: 'Membership loss', result: membershipLost, organization: 'unavailable', ended: 0 },
+])('handles late Topics $name through the default sync access reporter', async ({ result, organization, ended }) => {
+  const net = fakeNetwork()
+  const options = net.options()
+  const onSessionEnded = vi.fn()
+  const sync = createSync({ ...options.sync, selfId: 'me', onSessionEnded })
+  const response = deferred<Result<never>>()
+  const listTopics = vi.fn(() => response.promise)
+  const requestTimeoutMs = 100
+  const topics = createTopics(sync, { api: { ...options.topicsApi!, listTopics }, requestTimeoutMs })
+  try {
+    await sync.start()
+    net.socket.onReady()
+    await sync.watch('A')
+    const load = topics.loadList('A')
+    await vi.advanceTimersByTimeAsync(requestTimeoutMs)
+    await load
+    expect(listTopics).toHaveBeenCalledOnce()
+    expect(sync.get()).toMatchObject({ organization: 'available', running: true })
+    expect(onSessionEnded).not.toHaveBeenCalled()
+
+    response.resolve(result)
+    await flush()
+
+    expect(sync.get()).toMatchObject({ organization, running: false, connected: false })
+    expect(net.socket.closed).toBe(true)
+    expect(onSessionEnded).toHaveBeenCalledTimes(ended)
+  } finally {
+    topics.close()
+    await sync.close()
+  }
+})
+
+it('applies Membership probe loss through the default Organization-unavailable reporter', async () => {
+  const net = fakeNetwork()
+  const checkMembership = vi.fn(async () => membershipLost)
+  const sync = createSync({ ...net.options().sync, selfId: 'me', checkMembership })
+  try {
+    await sync.start()
+    net.socket.onClose(1006)
+    await flush()
+
+    expect(checkMembership).toHaveBeenCalledOnce()
+    expect(sync.get()).toMatchObject({ organization: 'unavailable', running: false, connected: false })
+    expect(net.socket.closed).toBe(true)
+  } finally { await sync.close() }
+})
+
+it('applies WebSocket close 4003 through the default Organization-unavailable reporter', async () => {
+  const net = fakeNetwork()
+  const sync = createSync({ ...net.options().sync, selfId: 'me' })
+  try {
+    await sync.start()
+    net.socket.onReady()
+    expect(sync.get()).toMatchObject({ organization: 'available', connected: true })
+
+    net.socket.onClose(4003)
+    await flush()
+
+    expect(sync.get()).toMatchObject({ organization: 'unavailable', running: false, connected: false })
+    expect(net.socket.closed).toBe(true)
+  } finally { await sync.close() }
 })

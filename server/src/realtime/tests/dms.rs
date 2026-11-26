@@ -1,4 +1,4 @@
-use super::*;
+use super::{hooks::Phase, *};
 
 mod denials;
 mod open_grants;
@@ -89,7 +89,7 @@ async fn dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does
     ready(&mut active, c, 1).await;
     let mut idle = f.server.connect(&peer_token).await;
     let mut replay = f.server.connect(&peer_token).await;
-    let gate = pause(c);
+    let gate = hooks::register_replay(c);
     subscribe(&mut replay, c, 0).await;
     gate.entered().await;
     let (owner, owner_token) = member(&pool, f.organization).await;
@@ -313,7 +313,7 @@ async fn dm_stale_revision_cannot_subscribe_replay_or_receive_even_after_explici
     subscribe(&mut idle, missing, 0).await;
     denied(&mut idle, missing).await;
     let mut replay = server.connect(&pt).await;
-    let gate = pause(c);
+    let gate = hooks::register_replay(c);
     subscribe(&mut replay, c, 0).await;
     gate.entered().await;
     fallback.entered().await;
@@ -462,7 +462,7 @@ async fn dm_mention_denial_matrix_has_no_identity_rows_counts_or_notifications(p
 async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines(
     pool: PgPool,
 ) {
-    for phase in ["live", "page", "frame"] {
+    for phase in [Phase::Live, Phase::Page, Phase::Frame] {
         let f = fixture(&pool).await;
         sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
             .bind(f.organization)
@@ -473,18 +473,18 @@ async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_b
         let (peer, reader) = member(&pool, f.organization).await;
         let c = open(&f, peer).await;
         let mut socket = f.server.connect(&reader).await;
-        let gate = access_loss::gate(
+        let gate = hooks::register(
             c,
             phase,
-            if phase == "page" {
+            if phase == Phase::Page {
                 0
-            } else if phase == "frame" {
+            } else if phase == Phase::Frame {
                 2
             } else {
                 1
             },
         );
-        if phase == "live" {
+        if phase == Phase::Live {
             subscribe(&mut socket, c, 0).await;
             ready(&mut socket, c, 0).await;
         }
@@ -499,7 +499,7 @@ async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_b
             .await;
             assert_eq!(m["mentions"], json!([{"member_id":peer,"name":"Member"}]));
         }
-        if phase != "live" {
+        if phase != Phase::Live {
             subscribe(&mut socket, c, 0).await;
         }
         gate.entered().await;
@@ -512,7 +512,7 @@ async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_b
         )
         .await;
         assert_eq!(body(r).await["dms"][0]["mention_unread_count"], 3);
-        if phase == "frame" {
+        if phase == Phase::Frame {
             assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
         }
         let r = request(

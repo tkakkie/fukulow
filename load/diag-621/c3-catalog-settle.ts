@@ -77,11 +77,3 @@ export async function settleCatalogs(stage: string, sql: Sql, { capMs = 60000, i
     throw error;
   }
 }
-
-// Keeps every attempt in the run's list and hands it to the artifact writer on each report.
-export function settleRecorder(settles: CatalogSettle[], write: (settles: CatalogSettle[], latest: CatalogSettle) => void) {
-  return (evidence: CatalogSettle) => {
-    if (!settles.includes(evidence)) settles.push(evidence);
-    write(settles, evidence);
-  };
-}

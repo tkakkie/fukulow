@@ -122,7 +122,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let app = router(&pools.app).await;
     let org = organization(&pool).await;
     let foreign = organization(&pool).await;

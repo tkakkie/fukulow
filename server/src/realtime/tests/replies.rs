@@ -207,7 +207,7 @@ async fn reply_live_replay_member_revision_and_removed_grant_denials_have_positi
         subscribe(&mut live, target, 2).await;
         ready(&mut live, target, 2).await;
         let mut replay = f.server.connect(&token).await;
-        let gate = pause(target);
+        let gate = hooks::register_replay(target);
         subscribe(&mut replay, target, 0).await;
         gate.entered().await;
         if loss == "grant" {

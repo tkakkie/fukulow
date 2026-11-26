@@ -14,7 +14,7 @@ import { startInitialSelection } from './initial-timeline'
 import type { Navigation } from './navigation'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
-import { createSession, startInitialChannels, type SessionOptions } from './session'
+import { createSession, createSessionEndReporter, startInitialChannels, type SessionOptions } from './session'
 import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess, type MemberListAccess } from './members'
@@ -124,6 +124,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
   const drafts = createDraftStore()
   let accountGeneration = 0
   let accountRequests = new AbortController()
+  let reportAccountRejection = accountRejection(accountGeneration)
   let selectionGeneration = 0
   let startup: ReturnType<typeof startInitialSelection> | undefined
 
@@ -139,8 +140,10 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     selectionGeneration++
     changes++
   }
-  function ended(generation: number) {
-    if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedMessage })
+  function accountRejection(generation: number) {
+    return createSessionEndReporter(() => {
+      if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedMessage })
+    }, accountRequests.signal)
   }
   const route = () => navigation ? navigation.get().target
     : typeof window !== 'undefined' ? parseNavigation(window.location.href) : null
@@ -152,9 +155,10 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     selectedOrganizationId = id
     organizationStatus = 'loading'
     const account = accountGeneration, selection = selectionGeneration
+    const reportEnded = reportAccountRejection
     const result = await deps.getOrganization(id)
     // Account Session rejection remains authoritative even when this selection was replaced.
-    if (!result.ok && result.kind === 'http' && result.status === 401) { ended(account); return }
+    if (!result.ok && result.kind === 'http' && result.status === 401) { reportEnded(); return }
     if (account !== accountGeneration || selection !== selectionGeneration) return
     if (!result.ok) {
       if (isOrganizationUnavailable(result)) organizationStatus = 'unavailable'
@@ -164,12 +168,12 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     // A superseded selection's 401 can still end this Account Session.
     const initialChannels = deps.readInitialChannels?.(id, accountRequests.signal)
       .then(list => {
-        if (!list.ok && list.kind === 'http' && list.status === 401) ended(account)
+        if (!list.ok && list.kind === 'http' && list.status === 401) reportEnded()
         return list
       })
     const initial = startInitialSelection({
       organizationId: id, route, navigation, channels: initialChannels, accountSignal: accountRequests.signal,
-      load: deps.readInitialTimeline, onEnded: () => ended(account),
+      load: deps.readInitialTimeline, onEnded: reportEnded,
       onUnavailableBeforeSession: () => { organizationStatus = 'unavailable' },
     })
     startup = initial
@@ -180,7 +184,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     if (initial.unavailable) return
     const { initialChannelHint, initialTimeline } = initial
     organization = result.data
-    const opened = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
+    const opened = deps.openSession(result.data.member.id, reportEnded, id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
@@ -190,7 +194,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     session = opened
     initial.attachSession(() => { void opened.sync.markUnavailable() })
     organizationStatus = 'ready'
-    members = deps.openMembers?.(id, () => ended(account), () => {
+    members = deps.openMembers?.(id, reportEnded, () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       void session?.sync.markUnavailable()
     }, session.memberListAccess ?? (() => organization?.member.role ?? null)) ?? null
@@ -215,13 +219,13 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     // Reply reads survive Organization switches for C6. End their transport once the Account is fenced.
     accountRequests.abort()
     accountRequests = new AbortController()
+    reportAccountRejection = accountRejection(accountGeneration)
     selectedOrganizationId = ''
     organizationStatus = 'loading'
     operations.clearError()
     view = next
     if (next.screen === 'app') {
-      const account = accountGeneration
-      security = accountSecurityAdapter((deps.openSecurity ?? createAccountSecurity)(() => ended(account)))
+      security = accountSecurityAdapter((deps.openSecurity ?? createAccountSecurity)(reportAccountRejection))
       const requested = route()?.organizationId
       const id = requested ?? next.identity.organizations[0]?.organization_id
       if (id) await selectOrganization(id)
@@ -233,7 +237,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     selection: () => selectionGeneration,
     loading: () => { view = { screen: 'loading' } },
     show,
-    ended,
+    ended: generation => { if (generation === accountGeneration) reportAccountRejection() },
     async accepted(identity) {
       if (view.screen !== 'app') return
       const organizations = view.identity.organizations.filter(o => o.organization_id !== identity.organization.organization_id)

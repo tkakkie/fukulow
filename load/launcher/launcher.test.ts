@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { HostRecord } from '../harness-core/host-record.ts';
+import { formatHostBusy, parseHostBusy } from './host-busy.ts';
 import { clockEvents, fixedRate, launch, workers, type Deps } from './launcher.ts';
 import { darwin, linux, type Platform } from './platform.ts';
 import { parseQueue, type Queue } from './queue.ts';
@@ -465,6 +466,16 @@ test('maintainer confirmations go to the chain log and the session record', asyn
 
 const files = (w: World, suffix: string) => [...w.files.entries()].filter(([k]) => k.endsWith(suffix)).map(([, v]) => v);
 
+test('the HOST-BUSY formatter preserves the marker line and round-trips the jobs and session', () => {
+  const at = new Date('2026-11-26T00:00:00.000Z');
+  const jobs = ['smoke-870', 'stage1-870', 'stage2-870'];
+  const line = formatHostBusy('diagnosis: #870', jobs, at, 'sess-1');
+  assert.equal(line, 'diagnosis: #870: smoke-870, stage1-870, stage2-870 2026-11-26T00:00:00.000Z session sess-1\n');
+  assert.deepEqual(parseHostBusy(line), { jobs, session: 'sess-1' });
+  assert.equal(parseHostBusy(line.replace(' session sess-1', '')), null);
+  assert.equal(parseHostBusy(line + 'extra line\n'), null);
+});
+
 test('every artefact, the HOST-BUSY marker and each spawn carry the one launch session id', async () => {
   const w = world({ tctl: [45], record: { boost: '0' } as unknown as HostRecord });
   const label = { workloadLabel: 'io.fukulow.probe=519-final', requireHost: { boost: '0' }, ...cooling, thermalSampleSeconds: 5, gate: ['node', 'gate.ts'] };
@@ -473,7 +484,7 @@ test('every artefact, the HOST-BUSY marker and each spawn carry the one launch s
   const claim = d.claim;
   d.claim = (path, text) => { marker = text; return claim(path, text); };
   assert.equal((await launch(queue([job('a', label)]), d)).outcome, 'done');
-  assert.match(marker, /session sess-1/);
+  assert.deepEqual(parseHostBusy(marker), { jobs: ['a'], session: 'sess-1' });
   assert.deepEqual(w.envs.map(e => e?.FUKULOW_LAUNCH_SESSION), ['sess-1', 'sess-1']); // gate and job
   for (const f of ['a-cooldown.json', 'a-host-before.json', 'a-launch-check.json', 'a-host-after.json']) {
     assert.equal(JSON.parse(w.files.get('/runs/chain/' + f) ?? '{}').launchSession, 'sess-1', f);
@@ -770,8 +781,8 @@ test('each gate and job is told the HOST-BUSY this queue holds and its own name'
   const w = world({ exits: [0, 0, 0] });
   await launch(queue([job('a', { gate: ['node', 'gate.ts'], env: { X: '1' } }), job('b')]), deps(w));
   assert.deepEqual(w.envs, [
-    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1' },
-    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1' },
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1', FUKULOW_LAUNCH_GATE_LOG: '/runs/chain/a-gate.log' },
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1', FUKULOW_LAUNCH_GATE_LOG: '/runs/chain/a-gate.log' },
     { FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'b', FUKULOW_LAUNCH_SESSION: 'sess-1' },
   ]);
 });

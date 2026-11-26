@@ -75,7 +75,7 @@ impl Activity {
         if let Some(&(channel, _, _)) = changes.first() {
             test_fault(organization, channel)?;
         }
-        let proofs = authorize_batch(pool, &batch).await?;
+        let proofs = self.authorize(pool, &batch).await?;
         for (authorization, proof) in authorizations.iter().zip(&proofs) {
             authorization.proved(proof);
         }

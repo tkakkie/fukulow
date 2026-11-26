@@ -351,7 +351,7 @@ async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_recon
         subscribe(&mut live, f.channel, 0).await;
         ready(&mut live, f.channel, 0).await;
         let mut replaying = f.server.connect(&f.token).await;
-        let replay_gate = pause(f.channel);
+        let replay_gate = hooks::register_replay(f.channel);
         subscribe(&mut replaying, f.channel, 0).await;
         replay_gate.entered().await;
         let mut unrelated = f.server.connect(&f.token).await;
@@ -440,12 +440,12 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
 
     // A replay on another Channel prevents this socket from draining its live queue.
     let other = channel(&pool, f.organization, f.member, false).await;
-    let parked = pause(other);
+    let parked = hooks::register_replay(other);
     subscribe(&mut replayed, other, 0).await;
     parked.entered().await;
     // Another subscriber has registered but is still inside this Channel's replay.
     let mut mid_replay = f.server.connect(&f.token).await;
-    let replay = pause(f.channel);
+    let replay = hooks::register_replay(f.channel);
     subscribe(&mut mid_replay, f.channel, 0).await;
     replay.entered().await;
     let published = post(&f, f.channel).await;

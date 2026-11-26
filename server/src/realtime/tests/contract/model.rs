@@ -1,4 +1,5 @@
 use super::*;
+use serde::Serialize;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

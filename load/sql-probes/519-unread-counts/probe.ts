@@ -6,13 +6,23 @@ export const member = "md5('user-2')::uuid";
 export const channels = "(SELECT array_agg(md5('chan-'||g)::uuid ORDER BY g) FROM generate_series(1,200) g)::uuid[]";
 export type Arm = 'current' | 'a3';
 
-// The Channel-list counts SQL as committed in unread.rs at the pinned commit.
+// The Channel-list counts SQL at the pinned commit.
 export function extractListCounts(source: string): string {
-  const parts = source.split('pub(super) const LIST_COUNTS_SQL: &str = r#"');
+  const parts = source.split(/pub\((?:super|in crate::messages)\) const LIST_COUNTS_SQL: &str = r#"/);
   if (parts.length !== 2) throw new Error('LIST_COUNTS_SQL not found exactly once');
   const end = parts[1].indexOf('"#;');
   if (end < 0) throw new Error('LIST_COUNTS_SQL is not terminated');
   return parts[1].slice(0, end).trim();
+}
+
+export function listCountsAtCommit(git: (...args: string[]) => string, commit: string): string {
+  let source: string;
+  try {
+    source = git('show', `${commit}:server/src/messages/unread/counts.rs`);
+  } catch {
+    source = git('show', `${commit}:server/src/messages/unread.rs`);
+  }
+  return extractListCounts(source);
 }
 
 // Replace $1..$4 with literals so one checksum query can wrap the counts query.

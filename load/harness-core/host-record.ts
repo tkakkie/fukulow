@@ -115,7 +115,7 @@ function docker() {
   return server === null ? null : { server, cpus: cmd('docker', ['info', '--format', '{{.NCPU}}']) };
 }
 
-export function hostRecord(diskPath: string): HostRecord {
+export function hostRecord(diskPath: string, readDocker = docker): HostRecord {
   const linux = platform() === 'linux';
   return {
     at: new Date().toISOString(), platform: platform(), kernel: release(),
@@ -134,7 +134,7 @@ export function hostRecord(diskPath: string): HostRecord {
     // #796 cooling levers: fan mode (hp-wmi: 0 full speed, 2 automatic), fan speed and the ACPI platform profile.
     fanControl: linux ? hwmon(/^pwm\d+_enable$/, 1) : null, fansRpm: linux ? hwmon(/^fan\d+_input$/, 1) : null,
     platformProfile: linux ? read('/sys/firmware/acpi/platform_profile') : null,
-    disk: diskFree(diskPath), docker: docker(),
+    disk: diskFree(diskPath), docker: readDocker(),
     updateUnits: linux ? units([...updateUnits, ...timerServices]) : null, sleepUnits: linux ? units(sleepUnits) : null,
     snapHold: linux ? snapHold() : null,
   };

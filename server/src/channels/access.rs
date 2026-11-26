@@ -455,7 +455,7 @@ mod tests {
                 .bind(organization).bind(channel).bind(if index == 0 {"private"} else {"public"})
                 .execute(&pools.admin).await.unwrap();
         }
-        crate::database::tests::context::context_policies(&pools.admin).await;
+        crate::database::test_support::context_policies(&pools.admin).await;
         let entry = |organization, revision| {
             Arc::new(Entry {
                 organization,
@@ -476,8 +476,7 @@ mod tests {
                 ]
             })
             .collect();
-        let (counted, transactions) =
-            crate::database::tests::context::counted_pool(&pools.app).await;
+        let (counted, transactions) = crate::database::test_support::counted_pool(&pools.app).await;
         assert_eq!(
             access_rows(&counted, &entries).await.unwrap(),
             [

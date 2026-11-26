@@ -6,7 +6,7 @@ import { createReplies } from './replies'
 import type { RealtimeHandlers } from './realtime'
 import { record } from './protocol-test-helpers'
 import { replyPage, ok, summary } from './topic-test-helpers'
-import { flush } from './sync-test-helpers'
+import { flush, standaloneAccess } from './sync-test-helpers'
 
 export function windowClient(size = 1000, activity?: Activity) {
   const records = Array.from({ length: size }, (_, i) => record(i + 1))
@@ -30,6 +30,7 @@ export function windowClient(size = 1000, activity?: Activity) {
     },
   }
   const { sync, topics } = createTopicSync({ selfId: 'me', activity, topicsApi: options,
+    ...standaloneAccess(),
     api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
     connect(h) { socket = h; return { send() {}, close() {} } },
   })

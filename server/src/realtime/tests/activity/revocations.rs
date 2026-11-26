@@ -1,34 +1,40 @@
 use super::*;
+use crate::realtime::tests::isolated_test::run_isolated_test;
 use crate::{
     auth::{
-        SubscriptionRecheck, SubscriptionScope,
-        activity::{ActivityChange, ActivityChanges, Capture, ChangeScope, ChannelChange},
+        SubscriptionScope,
+        activity::ChangeScope,
+        activity::hook_decorator::{
+            ActivityHooks, BeforeRecheck, ChangeHooks, Decorator, RecheckHooks,
+        },
     },
     channels::{
-        AccessChanges,
-        activity::{Activity, Notice, NoticeFrame, Registration, pause_member},
+        activity::{Notice, pause_member},
         tests::extract_auth,
     },
-    observability::RevocationMetric,
 };
 use futures_util::FutureExt;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::{Arc, Mutex};
+
+mod admission;
+mod case;
+mod holds;
+mod matrix;
+
+use case::{Case, Later};
 
 #[test]
 fn send_measurement_records_delivered_revocation_only() {
     // The production subscriber is process-wide. Other connection tests reach the same
     // tracing callsites concurrently, so give this observation its own process.
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--ignored",
-            "--exact",
-            concat!(module_path!(), "::send_measurement_child")
-                .split_once("::")
-                .unwrap()
-                .1,
-        ])
-        .output()
-        .unwrap();
+    let result = run_isolated_test(&[
+        "--ignored",
+        "--exact",
+        concat!(module_path!(), "::send_measurement_child")
+            .split_once("::")
+            .unwrap()
+            .1,
+    ]);
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
         result.status.success() && stdout.contains("1 passed"),
@@ -40,8 +46,7 @@ fn send_measurement_records_delivered_revocation_only() {
 #[fukulow_test::test]
 #[ignore = "subprocess helper with a global measurement subscriber"]
 async fn send_measurement_child(pool: PgPool) {
-    let output = crate::observability::tests::Capture::default();
-    tracing::subscriber::set_global_default(output.measurement_subscriber()).unwrap();
+    let output = crate::observability::tests::Capture::install_global_measurement();
     let case = Case::new(&pool, false, Later::Regrant).await;
     let mut socket = connect(&case.f, &case.token).await;
     let sent = || {
@@ -78,351 +83,10 @@ async fn send_measurement_child(pool: PgPool) {
     assert!(0.0 <= before && before <= after);
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Stage {
-    Selection,
-    Query,
-    Authorized,
-    Buffered,
-    FirstHandoff,
-}
-const STAGES: [Stage; 5] = [
-    Stage::Selection,
-    Stage::Query,
-    Stage::Authorized,
-    Stage::Buffered,
-    Stage::FirstHandoff,
-];
-
-#[derive(Clone, Copy, Debug)]
-enum Later {
-    OtherGrant,
-    OtherManager,
-    OtherMember,
-    Regrant,
-    Role,
-    Deactivate,
-}
-
-struct Case {
-    f: Fixture,
-    target: Uuid,
-    token: String,
-    registration: Registration,
-    revoked: Uuid,
-    other: Uuid,
-}
-impl Case {
-    async fn new(pool: &PgPool, whole_set: bool, later: Later) -> Self {
-        let f = fixture(pool).await;
-        owner(pool, &f).await;
-        let (target, token) = member(pool, f.organization).await;
-        let revoked = if whole_set {
-            f.channel
-        } else {
-            let private = channel(pool, f.organization, f.member, true).await;
-            grant(pool, &f, private, target).await;
-            private
-        };
-        let other = channel(pool, f.organization, f.member, true).await;
-        if matches!(later, Later::OtherManager) {
-            grant(pool, &f, other, target).await;
-        }
-        let auth = extract_auth(f.state.clone(), &token).await;
-        let registration = f
-            .state
-            .message_delivery
-            .channel_access
-            .activity
-            .register(&auth);
-        Self {
-            f,
-            target,
-            token,
-            registration,
-            revoked,
-            other,
-        }
-    }
-    fn delivery(&self) -> &Activity {
-        &self.f.state.message_delivery.channel_access.activity
-    }
-    fn revoked(&self) -> Notice {
-        Notice::ChannelAccessRevoked {
-            channel_id: self.revoked,
-        }
-    }
-    fn pause_revocation(&self, phase: &'static str) -> Arc<Gate> {
-        pause_member(self.f.organization, self.revoked, phase, Some(self.target))
-    }
-    fn pause_role_publisher(&self) -> Arc<Gate> {
-        pause_member(
-            self.f.organization,
-            Uuid::nil(),
-            "target_state",
-            Some(self.target),
-        )
-    }
-    async fn publish_channel_list(&self) {
-        self.delivery()
-            .publish(
-                &self.f.state.pool,
-                self.f.organization,
-                Notice::ChannelListChanged,
-                Some(self.target),
-                None,
-            )
-            .await
-            .unwrap();
-    }
-    async fn remove_grant(&self) {
-        self.request(
-            "DELETE",
-            &format!("/api/v1/channels/{}/members/{}", self.revoked, self.target),
-            Value::Null,
-            StatusCode::NO_CONTENT,
-        )
-        .await;
-    }
-    async fn set_role(&self, role: &str) {
-        self.request(
-            "PATCH",
-            &format!(
-                "/api/v1/orgs/{}/members/{}/role",
-                self.f.organization, self.target
-            ),
-            json!({"role":role}),
-            StatusCode::OK,
-        )
-        .await;
-    }
-    async fn grant(&self, channel: Uuid) {
-        self.request(
-            "POST",
-            &format!("/api/v1/channels/{channel}/members"),
-            json!({"member_id":self.target}),
-            StatusCode::NO_CONTENT,
-        )
-        .await;
-    }
-    async fn later(&self, pool: &PgPool, later: Later, whole_set: bool) {
-        match later {
-            Later::OtherGrant => self.grant(self.other).await,
-            Later::OtherManager => {
-                self.request(
-                    "PATCH",
-                    &format!("/api/v1/channels/{}/members/{}", self.other, self.target),
-                    json!({"manager":true}),
-                    StatusCode::NO_CONTENT,
-                )
-                .await
-            }
-            Later::OtherMember => {
-                let (other, _) = member(pool, self.f.organization).await;
-                self.request(
-                    "POST",
-                    &format!("/api/v1/channels/{}/members", self.revoked),
-                    json!({"member_id":other}),
-                    StatusCode::NO_CONTENT,
-                )
-                .await;
-            }
-            Later::Regrant => self.grant(self.revoked).await,
-            Later::Role => {
-                self.set_role(if whole_set { "member" } else { "guest" })
-                    .await
-            }
-            Later::Deactivate => {
-                self.request(
-                    "POST",
-                    &format!(
-                        "/api/v1/orgs/{}/members/{}/deactivate",
-                        self.f.organization, self.target
-                    ),
-                    Value::Null,
-                    StatusCode::NO_CONTENT,
-                )
-                .await
-            }
-        }
-    }
-    async fn request(&self, method: &str, path: &str, body: Value, expected: StatusCode) {
-        let response = request(&self.f.app, method, path, &self.f.token, body).await;
-        assert_eq!(response.status(), expected, "{method} {path}");
-    }
-    fn next(&self) -> Option<NoticeFrame> {
-        // With counted publishers drained, next is ready exactly while there is buffered work.
-        self.registration.next().now_or_never().flatten()
-    }
-    fn take_revocation(&self) -> NoticeFrame {
-        while let Some(frame) = self.next() {
-            if frame.event == self.revoked() {
-                return frame;
-            }
-        }
-        panic!("expected a revocation ready for first handoff");
-    }
-    async fn received_revocations(&self, held: Option<NoticeFrame>) -> usize {
-        let mut count = 0;
-        let mut frame = held.or_else(|| self.next());
-        while let Some(next) = frame {
-            count += usize::from(
-                next.handoff(&self.f.state.pool, |event| async { event })
-                    .await
-                    == Some(self.revoked()),
-            );
-            frame = self.next();
-        }
-        count
-    }
-}
-
-async fn transition_matrix(pool: &PgPool, whole_set: bool, changes: &[Later]) {
-    let mut failures = Vec::new();
-    for stage in STAGES {
-        for &later in changes {
-            let case = Case::new(pool, whole_set, later).await;
-            let phase = match stage {
-                Stage::Selection => Some("revocation"),
-                Stage::Query => Some("revoked"),
-                Stage::Authorized => Some("revocation_authorized"),
-                Stage::Buffered | Stage::FirstHandoff => None,
-            };
-            let gate = phase.map(|phase| {
-                pause_member(case.f.organization, case.revoked, phase, Some(case.target))
-            });
-            // A Guest cannot receive a manager right. Commit B's real manager
-            // change while the target is still a Member, then delay its retirement
-            // until the Role revocation reaches the selected stage.
-            let old_manager = if whole_set && matches!(later, Later::OtherManager) {
-                let retirement = case.hold_retirement(Some(case.other));
-                case.later(pool, later, false).await;
-                retirement.entered().await;
-                Some(retirement)
-            } else {
-                None
-            };
-            if whole_set {
-                case.set_role("guest").await;
-            } else {
-                case.remove_grant().await;
-            }
-            let mut held = None;
-            if let Some(gate) = &gate {
-                gate.entered().await;
-            } else {
-                case.delivery().drained().await;
-                assert!(
-                    case.registration.buffered(&case.revoked()),
-                    "{stage:?}: revocation was never buffered"
-                );
-                if matches!(stage, Stage::FirstHandoff) {
-                    held = Some(case.take_revocation());
-                }
-            }
-            // Hold the later publisher so an access gain cannot replace a stale revocation.
-            let later_gate = if let Some(manager) = old_manager {
-                manager.release();
-                manager.entered().await;
-                None
-            } else if matches!(later, Later::OtherMember) {
-                case.later(pool, later, whole_set).await;
-                None
-            } else {
-                let gate = pause_member(
-                    case.f.organization,
-                    Uuid::nil(),
-                    "target_state",
-                    Some(case.target),
-                );
-                case.later(pool, later, whole_set).await;
-                gate.entered().await;
-                Some(gate)
-            };
-            if let Some(gate) = &gate {
-                gate.release();
-            }
-            case.delivery()
-                .drained_except(u32::from(later_gate.is_some()))
-                .await;
-            let actual = case.received_revocations(held).await;
-            if let Some(later_gate) = &later_gate {
-                later_gate.release();
-                case.delivery().drained().await;
-            }
-            let expected = usize::from(
-                matches!(
-                    later,
-                    Later::OtherGrant | Later::OtherManager | Later::OtherMember
-                ) || (!whole_set && matches!(later, Later::Role)),
-            );
-            if actual != expected {
-                failures.push((stage, later, actual, expected));
-            }
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "revocations (stage, later transition, actual, expected): {failures:?}"
-    );
-}
-
-#[fukulow_test::test]
-async fn channel_revocation_survives_only_unrelated_transitions(pool: PgPool) {
-    transition_matrix(
-        &pool,
-        false,
-        &[
-            Later::OtherGrant,
-            Later::OtherManager,
-            Later::OtherMember,
-            Later::Regrant,
-            Later::Role,
-            Later::Deactivate,
-        ],
-    )
-    .await;
-}
-
 enum MemberRecheck {
     Run,
     Hold(Arc<Gate>),
     Skip,
-}
-struct TestRechecks {
-    access: AccessChanges,
-    member: (Uuid, Uuid),
-    member_recheck: MemberRecheck,
-    skip_channel: Option<Uuid>,
-}
-impl SubscriptionRecheck for TestRechecks {
-    fn check<'a>(
-        &'a self,
-        pool: &'a PgPool,
-        scope: SubscriptionScope,
-    ) -> Pin<Box<dyn Future<Output = Result<(), sqlx::Error>> + Send + 'a>> {
-        Box::pin(async move {
-            if matches!(scope, SubscriptionScope::Channel(org, channel)
-                if org == self.member.0 && self.skip_channel == Some(channel))
-            {
-                return Ok(());
-            }
-            if matches!(scope, SubscriptionScope::Member(org, member) if (org, member) == self.member)
-            {
-                match &self.member_recheck {
-                    MemberRecheck::Run => {}
-                    MemberRecheck::Hold(gate) => {
-                        gate.pause().await;
-                    }
-                    MemberRecheck::Skip => return Ok(()),
-                }
-            }
-            self.access.check(pool, scope).await
-        })
-    }
-    fn failed(&self, scope: SubscriptionScope) {
-        self.access.failed(scope);
-    }
 }
 impl Case {
     fn hold_member_recheck(&self) -> Arc<Gate> {
@@ -432,14 +96,33 @@ impl Case {
     }
 
     fn set_rechecks(&self, member_recheck: MemberRecheck, skip_channel: Option<Uuid>) {
+        let identity = (self.f.organization, self.target);
         self.f
             .state
             .session_changes
-            .set_subscription_recheck(Arc::new(TestRechecks {
-                access: self.f.state.message_delivery.channel_access.clone(),
-                member: (self.f.organization, self.target),
-                member_recheck,
-                skip_channel,
+            .set_subscription_recheck(Arc::new(Decorator {
+                inner: self.f.state.message_delivery.channel_access.clone(),
+                hooks: RecheckHooks {
+                    before_recheck: Some(Box::new(move |scope| match scope {
+                        SubscriptionScope::Channel(org, channel)
+                            if org == identity.0 && skip_channel == Some(channel) =>
+                        {
+                            BeforeRecheck::Skip
+                        }
+                        SubscriptionScope::Member(org, member) if (org, member) == identity => {
+                            match &member_recheck {
+                                MemberRecheck::Run => BeforeRecheck::Run,
+                                MemberRecheck::Hold(gate) => {
+                                    let gate = gate.clone();
+                                    BeforeRecheck::Wait(Box::pin(async move { gate.pause().await }))
+                                }
+                                MemberRecheck::Skip => BeforeRecheck::Skip,
+                            }
+                        }
+                        _ => BeforeRecheck::Run,
+                    })),
+                    ..RecheckHooks::default()
+                },
             }));
     }
 }
@@ -845,315 +528,6 @@ async fn handoff_rechecks_through_role_observation_and_two_retirements(pool: PgP
 }
 
 #[fukulow_test::test]
-async fn fallback_failure_holds_revocations(pool: PgPool) {
-    let case = Case::new(&pool, false, Later::Role).await;
-    let metrics = case.registration.isolate_revocation_metrics();
-    case.remove_grant().await;
-    case.delivery().drained().await;
-    let private = case.take_revocation();
-    case.set_role("guest").await;
-    case.delivery().drained().await;
-    let public = Notice::ChannelAccessRevoked {
-        channel_id: case.f.channel,
-    };
-    assert!(case.registration.buffered(&public));
-    case.delivery().retire(case.f.organization, case.target);
-
-    let closed = closed_pool(&case.f.state.pool).await;
-    let gate = case.pause_revocation("fallback_snapshot");
-    let ((), ()) = tokio::join!(
-        case.delivery().check(
-            &closed,
-            SubscriptionScope::Channel(case.f.organization, case.revoked)
-        ),
-        async {
-            gate.entered().await;
-            // The fallback captured only revocation checks. It must also
-            // retire ordinary notices buffered after that snapshot.
-            case.publish_channel_list().await;
-            assert!(case.registration.buffered(&Notice::ChannelListChanged));
-            tokio::time::pause();
-            gate.release();
-        }
-    );
-    assert_eq!(
-        private
-            .handoff(&case.f.state.pool, |_| async {
-                panic!("fallback error polled the dequeued private write")
-            })
-            .await,
-        None::<()>
-    );
-    assert!(!case.registration.buffered(&Notice::ChannelListChanged));
-    let queued = case
-        .next()
-        .expect("fallback discarded the buffered public revocation");
-    assert_eq!(queued.event, public);
-    assert_eq!(
-        queued
-            .handoff(&case.f.state.pool, |_| async {
-                panic!("fallback error polled the buffered public write")
-            })
-            .await,
-        None::<()>
-    );
-    assert!(case.next().is_none());
-    assert_eq!(metrics.load(RevocationMetric::Held), 2);
-    assert_eq!(metrics.load(RevocationMetric::RecheckError), 1);
-    tokio::time::advance(Duration::from_millis(250)).await;
-    tokio::time::resume();
-
-    let retry = case
-        .next()
-        .expect("fallback discarded the dequeued private revocation");
-    assert_eq!(retry.event, case.revoked());
-    let query = case.pause_revocation("handoff_recheck");
-    let (sent, ()) = tokio::join!(
-        retry.handoff(&case.f.state.pool, |event| async { event }),
-        async {
-            query.entered().await;
-            query.release();
-        }
-    );
-    assert_eq!(sent, Some(case.revoked()));
-    let retry = case.next().expect("public revocation was not retried");
-    assert_eq!(
-        retry
-            .handoff(&case.f.state.pool, |event| async { event })
-            .await,
-        Some(public)
-    );
-    assert!(case.next().is_none());
-    assert_eq!(metrics.load(RevocationMetric::Delivered), 2);
-}
-
-#[fukulow_test::test]
-async fn handoff_failure_holds_only_its_frame(pool: PgPool) {
-    for verify_public_first in [false, true] {
-        let case = Case::new(&pool, false, Later::Role).await;
-        let metrics = case.registration.isolate_revocation_metrics();
-        case.remove_grant().await;
-        case.delivery().drained().await;
-        let frame = case.take_revocation();
-        let public = Notice::ChannelAccessRevoked {
-            channel_id: case.f.channel,
-        };
-        if verify_public_first {
-            case.set_rechecks(MemberRecheck::Skip, None);
-            case.set_role("guest").await;
-            case.delivery().drained().await;
-            assert!(case.registration.buffered(&public));
-        }
-
-        let gate = case.hold_member_recheck();
-        let ((), ()) = tokio::join!(case.set_role("guest"), async {
-            gate.entered().await;
-            case.publish_channel_list().await;
-            assert!(case.registration.buffered(&Notice::ChannelListChanged));
-            let closed = closed_pool(&case.f.state.pool).await;
-            let query = case.pause_revocation("handoff_recheck");
-            let mut handoff = std::pin::pin!(frame.handoff(&closed, |_| async {
-                panic!("a failed handoff recheck polled the private revocation write")
-            }));
-            tokio::select! {
-                biased;
-                sent = &mut handoff => panic!("completed before querying the closed pool: {sent:?}"),
-                () = query.entered() => {}
-            }
-            query.release();
-            assert_eq!(handoff.await, None::<()>);
-            assert!(
-                case.registration.buffered(&Notice::ChannelListChanged),
-                "handoff failure discarded an independent ordinary notice"
-            );
-            if verify_public_first {
-                assert!(
-                    case.registration.buffered(&public),
-                    "handoff failure fenced a verified public revocation"
-                );
-            }
-            assert_eq!(metrics.load(RevocationMetric::Held), 1);
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_millis(250)).await;
-            tokio::time::resume();
-            let retry = case.next().expect("handoff error discarded its frame");
-            assert_eq!(retry.event, case.revoked());
-            let query = case.pause_revocation("handoff_recheck");
-            let (sent, ()) = tokio::join!(
-                retry.handoff(&case.f.state.pool, |event| async { event }),
-                async {
-                    query.entered().await;
-                    query.release();
-                }
-            );
-            assert_eq!(sent, Some(case.revoked()));
-            assert_eq!(metrics.load(RevocationMetric::Delivered), 1);
-            gate.release();
-        });
-        case.delivery().drained().await;
-        let mut received = Vec::new();
-        while let Some(frame) = case.next() {
-            let sent = frame
-                .handoff(&case.f.state.pool, |event| async { event })
-                .await;
-            assert_ne!(sent, Some(Notice::ActivityReset));
-            received.extend(sent);
-        }
-        assert_eq!(
-            received.iter().filter(|notice| **notice == public).count(),
-            1
-        );
-        assert!(!received.contains(&case.revoked()));
-        assert!(case.next().is_none());
-    }
-}
-
-#[fukulow_test::test]
-async fn initial_handoff_deadline_parks_a_concurrent_fallback_hold(pool: PgPool) {
-    let case = Case::new(&pool, false, Later::Role).await;
-    let metrics = case.registration.isolate_revocation_metrics();
-    case.remove_grant().await;
-    case.delivery().drained().await;
-    let closed = closed_pool(&case.f.state.pool).await;
-    let member = case.hold_member_recheck();
-    let ((), ()) = tokio::join!(case.set_role("guest"), async {
-        member.entered().await;
-        let query = case.pause_revocation("handoff_recheck");
-        tokio::time::pause();
-        let frame = case.take_revocation();
-        {
-            let mut handoff =
-                std::pin::pin!(frame.handoff(&case.f.state.pool, |event| async { event }));
-            tokio::select! {
-                biased;
-                sent = &mut handoff => panic!("initial handoff completed before the query: {sent:?}"),
-                () = query.entered() => {}
-            }
-            tokio::time::advance(Duration::from_secs(4)).await;
-            case.delivery()
-                .check(
-                    &closed,
-                    SubscriptionScope::Channel(case.f.organization, case.revoked),
-                )
-                .await;
-            assert_eq!(metrics.load(RevocationMetric::Held), 1);
-            tokio::time::advance(Duration::from_secs(1)).await;
-            assert_eq!(handoff.await, None);
-        }
-        drop(frame);
-        let retry = case
-            .next()
-            .expect("initial handoff deadline lost the fallback hold's frame");
-        assert_eq!(retry.event, case.revoked());
-        assert_eq!(metrics.load(RevocationMetric::RecheckError), 1);
-        tokio::time::resume();
-        assert_eq!(
-            retry
-                .handoff(&case.f.state.pool, |event| async { event })
-                .await,
-            Some(case.revoked())
-        );
-        assert_eq!(metrics.load(RevocationMetric::Delivered), 1);
-        member.release();
-    });
-    case.delivery().drained().await;
-}
-
-#[fukulow_test::test]
-async fn successful_fallback_leaves_held_revocation_unverified(pool: PgPool) {
-    let case = Case::new(&pool, false, Later::Regrant).await;
-    let metrics = case.registration.isolate_revocation_metrics();
-    case.remove_grant().await;
-    case.delivery().drained().await;
-    let frame = case.take_revocation();
-    let closed = closed_pool(&case.f.state.pool).await;
-    let scope = SubscriptionScope::Channel(case.f.organization, case.revoked);
-
-    tokio::time::pause();
-    case.delivery().check(&closed, scope).await;
-    assert_eq!(
-        frame
-            .handoff(&case.f.state.pool, |event| async { event })
-            .await,
-        None
-    );
-    assert_eq!(metrics.load(RevocationMetric::Held), 1);
-    assert_eq!(metrics.load(RevocationMetric::RecheckError), 1);
-    tokio::time::advance(Duration::from_millis(250)).await;
-    tokio::time::resume();
-    drop(frame);
-
-    let fallback = case.pause_revocation("fallback_snapshot");
-    let ((), ()) = tokio::join!(case.delivery().check(&case.f.state.pool, scope), async {
-        fallback.entered().await;
-        fallback.release();
-    });
-    assert_eq!(metrics.load(RevocationMetric::RecheckError), 1);
-    // Restore access without the mutation hook, after fallback observed absence.
-    grant(&pool, &case.f, case.revoked, case.target).await;
-
-    let retry = case.next().expect("fallback discarded the held revocation");
-    assert_eq!(retry.event, case.revoked());
-    let query = case.pause_revocation("handoff_recheck");
-    let mut handoff = std::pin::pin!(retry.handoff(&case.f.state.pool, |event| async { event }));
-    tokio::select! {
-        biased;
-        sent = &mut handoff => panic!("scheduled retry skipped its authorization query: {sent:?}"),
-        () = query.entered() => {}
-    }
-    query.release();
-    assert_eq!(handoff.await, None, "restored access polled the held write");
-    assert!(case.next().is_none());
-    assert_eq!(metrics.load(RevocationMetric::Fenced), 1);
-    assert_eq!(metrics.load(RevocationMetric::Delivered), 0);
-}
-
-#[fukulow_test::test]
-async fn restored_access_fences_held_revocation(pool: PgPool) {
-    let case = Case::new(&pool, false, Later::Regrant).await;
-    let metrics = case.registration.isolate_revocation_metrics();
-    case.remove_grant().await;
-    case.delivery().drained().await;
-    let frame = case.take_revocation();
-    case.set_rechecks(MemberRecheck::Skip, None);
-    case.set_role("guest").await;
-    case.delivery().drained().await;
-    let closed = closed_pool(&case.f.state.pool).await;
-    tokio::time::pause();
-    assert_eq!(
-        frame
-            .handoff(&closed, |_| async {
-                panic!("a failed recheck polled the write")
-            })
-            .await,
-        None::<()>
-    );
-    // Drain the independent Role notices before advancing to the retry.
-    while let Some(frame) = case.next() {
-        assert_ne!(frame.event, case.revoked());
-    }
-    tokio::time::advance(Duration::from_millis(250)).await;
-    tokio::time::resume();
-    let retry = case.next().expect("the hold did not reach its retry");
-    let query = case.pause_revocation("handoff_recheck");
-    let (sent, ()) = tokio::join!(
-        retry.handoff(&case.f.state.pool, |_| async {
-            panic!("a retry with restored access polled the write")
-        }),
-        async {
-            query.entered().await;
-            // Restore access without the normal retirement and publication hooks.
-            grant(&pool, &case.f, case.revoked, case.target).await;
-            query.release();
-        }
-    );
-    assert_eq!(sent, None::<()>);
-    assert!(case.next().is_none());
-    assert_eq!(metrics.load(RevocationMetric::Fenced), 1);
-    assert_eq!(metrics.load(RevocationMetric::Delivered), 0);
-}
-
-#[fukulow_test::test]
 async fn role_visibility_gain_retires_an_older_revocation_through_later_loss(pool: PgPool) {
     let case = Case::new(&pool, true, Later::Role).await;
     case.set_role("guest").await;
@@ -1179,22 +553,6 @@ async fn role_visibility_gain_retires_an_older_revocation_through_later_loss(poo
         1,
         "the new Role loss"
     );
-}
-
-#[fukulow_test::test]
-async fn role_revocation_survives_only_unrelated_transitions(pool: PgPool) {
-    transition_matrix(
-        &pool,
-        true,
-        &[
-            Later::OtherGrant,
-            Later::OtherManager,
-            Later::Regrant,
-            Later::Role,
-            Later::Deactivate,
-        ],
-    )
-    .await;
 }
 
 #[fukulow_test::test]
@@ -1369,68 +727,38 @@ async fn visibility_preserving_role_change_uses_one_capture_per_registration(poo
     );
 }
 
-struct HoldRetirement {
-    activity: Activity,
-    scope: Option<Uuid>,
-    gate: std::sync::Mutex<Option<Arc<Gate>>>,
-}
-struct HeldRetirement {
-    change: Box<dyn ActivityChange>,
-    gate: Arc<Gate>,
-}
-impl ActivityChanges for HoldRetirement {
-    fn capture<'a>(
-        &'a self,
-        tx: &'a mut sqlx::PgConnection,
-        organization: Uuid,
-        target: Uuid,
-        scope: ChangeScope,
-    ) -> Capture<'a> {
-        Box::pin(async move {
-            let change = self
-                .activity
-                .capture(tx, organization, target, scope)
-                .await?;
-            let channel = match scope {
-                ChangeScope::Channel(channel) => Some(channel),
-                _ => None,
-            };
-            if channel == self.scope
-                && let Some(gate) = self.gate.lock().unwrap().take()
-            {
-                return Ok(Box::new(HeldRetirement { change, gate }) as Box<dyn ActivityChange>);
-            }
-            Ok(change)
-        })
-    }
-    fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
-        self.activity.channel(pool, organization, change);
-    }
-    fn directory(&self, pool: PgPool, organization: Uuid, target: Uuid) {
-        self.activity.directory(pool, organization, target);
-    }
-}
-impl ActivityChange for HeldRetirement {
-    fn retire(&mut self) {}
-
-    fn committed(self: Box<Self>, pool: PgPool) {
-        tokio::spawn(async move {
-            self.gate.pause().await;
-            self.change.committed(pool);
-            self.gate.signal_entered();
-        });
-    }
-}
 impl Case {
     fn hold_retirement(&self, channel: Option<Uuid>) -> Arc<Gate> {
         let gate = Arc::new(Gate::default());
+        let hold = Mutex::new(Some(gate.clone()));
         self.f
             .state
             .session_changes
-            .set_activity(Arc::new(HoldRetirement {
-                activity: self.delivery().clone(),
-                scope: channel,
-                gate: std::sync::Mutex::new(Some(gate.clone())),
+            .set_activity(Arc::new(Decorator {
+                inner: self.delivery().clone(),
+                hooks: ActivityHooks {
+                    after_capture: Some(Box::new(move |scope| {
+                        let captured_channel = match scope {
+                            ChangeScope::Channel(channel) => Some(channel),
+                            _ => None,
+                        };
+                        if captured_channel != channel {
+                            return None;
+                        }
+                        let gate = hold.lock().unwrap().take()?;
+                        Some(ChangeHooks {
+                            skip_retire: true,
+                            commit: Box::new(move |change, pool| {
+                                tokio::spawn(async move {
+                                    gate.pause().await;
+                                    change.committed(pool);
+                                    gate.signal_entered();
+                                });
+                            }),
+                        })
+                    })),
+                    ..ActivityHooks::default()
+                },
             }));
         gate
     }

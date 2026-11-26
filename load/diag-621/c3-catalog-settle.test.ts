@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 import test from 'node:test';
-import { catalogRelations, catalogRelationsSQL, databasesSQL, idleConfirmed, settleCatalogs, settleRecorder,
+import { settleRecorder } from './c3-catalog-evidence.ts';
+import { catalogRelations, catalogRelationsSQL, databasesSQL, idleConfirmed, settleCatalogs,
   statisticVacuumSQL, type CatalogSettle } from './c3-catalog-settle.ts';
 import type { Workers } from './c3-fixture.ts';
 
@@ -89,18 +93,41 @@ test('a malformed database or catalog list fails the setup', async () => {
     /catalog list of postgres malformed/);
 });
 
-test('a failed settle reports what it did before failing to every artifact writer', async () => {
-  const settles: CatalogSettle[] = [], manifest: CatalogSettle[][] = [], window: CatalogSettle[] = [];
-  const report = settleRecorder(settles, (all, latest) => { manifest.push(structuredClone(all)); window.push(structuredClone(latest)); });
-  await settleCatalogs('after seed', fakeCluster([0]).sql, { intervalMs: 0, report });
-  const cluster = fakeCluster([0], (db, query) => db === 'seed_base' && query === statisticVacuumSQL);
-  await assert.rejects(settleCatalogs('C3-r1-hot-17-base', cluster.sql, { intervalMs: 0, report }), /failed in seed_base/);
-  assert.deepEqual(settles.map(row => [row.stage, row.status]), [['after seed', 'settled'], ['C3-r1-hot-17-base', 'failed']]);
-  for (const latest of [manifest.at(-1)!.at(-1)!, window.at(-1)!]) {
-    assert.equal(latest.error, 'failed in seed_base');
-    assert.deepEqual(latest.targets.map(row => row.database), ['diag_1', 'postgres', 'seed_base']);
-    assert.deepEqual(latest.targets.at(-1)!.steps.map(row => row.error), [undefined, 'failed in seed_base']);
-    assert.match(latest.targets.at(-1)!.steps.at(-1)!.endedAt!, iso);
-  }
-  assert.equal(manifest.at(-1)!.length, 2, 'the manifest keeps the earlier settled attempt');
-});
+for (const status of ['settled', 'failed'] as const) {
+  test(`a ${status} catalog settle is written to both artifacts`, async t => {
+    const output = mkdtempSync(resolve(tmpdir(), 'diag621-c3-settle-'));
+    t.after(() => rmSync(output, { recursive: true, force: true }));
+    const stage = 'C3-r1-hot-17-base', windowDir = resolve(output, stage), manifestFile = resolve(output, 'manifest.json');
+    mkdirSync(windowDir);
+    const manifest = { smoke: true }, settles: CatalogSettle[] = [];
+    writeFileSync(manifestFile, JSON.stringify(manifest));
+    const seed = await settleCatalogs('after seed', fakeCluster([0]).sql, {
+      intervalMs: 0, report: settleRecorder(output, manifest, settles),
+    });
+    const cluster = fakeCluster([0], (db, query) => status === 'failed' && db === 'seed_base' && query === statisticVacuumSQL);
+    const attempt = settleCatalogs(stage, cluster.sql, {
+      intervalMs: 0, report: settleRecorder(output, manifest, settles, windowDir),
+    });
+    let completed: CatalogSettle | undefined;
+    if (status === 'failed') await assert.rejects(attempt, /failed in seed_base/);
+    else completed = await attempt;
+
+    const window: CatalogSettle = JSON.parse(readFileSync(resolve(windowDir, 'catalog-settle.json'), 'utf8'));
+    assert.deepEqual(JSON.parse(readFileSync(manifestFile, 'utf8')), {
+      ...manifest, catalogSettles: [seed, window],
+    });
+    assert.equal(window.stage, stage);
+    assert.equal(window.status, status);
+    if (completed) {
+      assert.deepEqual(window, completed);
+    } else {
+      assert.equal(window.error, 'failed in seed_base');
+      assert.deepEqual(window.databases, ['diag_1', 'postgres', 'seed_base', 'template1']);
+      assert.deepEqual(window.idle, []);
+      assert.deepEqual(window.targets.map(row => [row.database, row.relations]),
+        ['diag_1', 'postgres', 'seed_base'].map(db => [db, listed]));
+      assert.deepEqual(window.targets.at(-1)!.steps.map(row => row.error), [undefined, 'failed in seed_base']);
+      assert.match(window.targets.at(-1)!.steps.at(-1)!.endedAt!, iso);
+    }
+  });
+}
