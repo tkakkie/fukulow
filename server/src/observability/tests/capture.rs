@@ -4,7 +4,7 @@ use std::{
     io::{self, Write},
     sync::{
         Arc, Mutex, Once,
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, Ordering},
     },
 };
 use tracing::{
@@ -23,7 +23,7 @@ impl Default for Capture {
         static INSTALL: Once = Once::new();
         INSTALL.call_once(|| {
             set_global_default(CaptureFallback).unwrap();
-            ROUTER_INSTALLED.store(true, Relaxed);
+            ROUTER_INSTALLED.store(true, Ordering::Release);
             rebuild_interest_cache();
         });
         Self(Arc::default())
@@ -91,7 +91,7 @@ impl Subscriber for CaptureFallback {
     fn max_level_hint(&self) -> Option<LevelFilter> {
         // Keep tracing macros off until the first dispatcher is the global default.
         // Dispatcher creation registers it before set_global_default publishes it.
-        Some(if ROUTER_INSTALLED.load(Relaxed) {
+        Some(if ROUTER_INSTALLED.load(Ordering::Acquire) {
             LevelFilter::TRACE
         } else {
             LevelFilter::OFF
@@ -163,4 +163,17 @@ fn capture_rebuilds_interest_for_a_callsite_registered_before_installation() {
         Event::dispatch(&META, &META.fields().value_set(&[]));
     });
     assert_eq!(output.events().len(), 1);
+}
+
+#[test]
+fn capture_sees_a_callsite_first_reached_on_an_unscoped_thread() {
+    fn emit() {
+        tracing::info!(target: "fukulow", "capture_unscoped_first");
+    }
+
+    let output = Capture::default();
+    // This thread has no scoped subscriber; before #948 its first visit cached never.
+    std::thread::spawn(emit).join().unwrap();
+    tracing::subscriber::with_default(output.subscriber(), emit);
+    assert_eq!(output.events().len(), 1, "{}", output.text());
 }
