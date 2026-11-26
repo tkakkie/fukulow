@@ -1,7 +1,7 @@
 //! #314 step 4: production RLS policies, exercised as the restricted test role.
-use super::context::pools;
 use crate::database;
-use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
+use crate::database::test_support::{pools, single_connection_pool};
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 mod coverage;
@@ -369,11 +369,7 @@ async fn rls_account_context_reads_only_own_members_and_writes_nothing(pool: PgP
 async fn rls_context_never_survives_commit_rollback_or_abort_on_a_reused_connection(pool: PgPool) {
     let pools = pools(pool).await;
     let a = tenant_base(&pools.admin).await;
-    let single = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(pools.app.connect_options().as_ref().clone())
-        .await
-        .unwrap();
+    let single = single_connection_pool(&pools.app).await;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&single)
         .await

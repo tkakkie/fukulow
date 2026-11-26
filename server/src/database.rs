@@ -18,9 +18,9 @@ pub(crate) use stats::{test_acquisitions, test_inherit_acquisitions};
 
 pub(crate) const LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '5s'";
 
-pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
-pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
-pub(crate) const READY_RETURN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+const READY_RETURN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub(crate) async fn ready(pool: &PgPool) -> bool {
     let Ok(Ok(connection)) =
@@ -289,5 +289,7 @@ pub async fn validate_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -6,7 +6,7 @@ use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, org, _, channel, token) = fixture(&pools.admin).await;
-    crate::database::tests::context::context_policies(&pools.admin).await;
+    crate::database::test_support::context_policies(&pools.admin).await;
     let app = router(&pools.app).await;
     let key = Uuid::new_v4();
     let intent = json!({"client_message_id":key,"body":"Topic root","topic_name":"Context"});
@@ -106,7 +106,7 @@ async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
             .unwrap();
     sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Shared Account','member')")
         .bind(other_org).bind(Uuid::new_v4()).bind(account).execute(&pools.admin).await.unwrap();
-    crate::database::tests::context::context_policies(&pools.admin).await;
+    crate::database::test_support::context_policies(&pools.admin).await;
     let app = router(&pools.app)
         .await
         .layer(axum::Extension(axum::extract::ConnectInfo(

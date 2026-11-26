@@ -130,7 +130,7 @@ async fn bounded_fanout_batches_preserve_tenants_order_duplicates_and_revisions(
     let fixture = Fixture::new(&pools.admin, 1002).await;
     for mode in ["force_custom_plan", "force_generic_plan"] {
         let app = single(&pools.app, mode).await;
-        let pid = crate::database::tests::context::clean(&app).await;
+        let pid = crate::database::test_support::clean(&app).await;
         for count in [1, 1000, 1001] {
             let mut entries: Vec<_> = (0..count)
                 .flat_map(|i| {
@@ -157,7 +157,7 @@ async fn bounded_fanout_batches_preserve_tenants_order_duplicates_and_revisions(
                     "{mode}/{count}/{reverse}"
                 );
             }
-            assert_eq!(crate::database::tests::context::clean(&app).await, pid);
+            assert_eq!(crate::database::test_support::clean(&app).await, pid);
         }
         // member_access has no 1,000 split; test both sizes plus its measured 1,024.
         for count in [1000, 1001, 1024] {
@@ -204,7 +204,7 @@ async fn bounded_fanout_batches_preserve_tenants_order_duplicates_and_revisions(
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(crate::database::tests::context::clean(&app).await, pid);
+        assert_eq!(crate::database::test_support::clean(&app).await, pid);
         app.close().await;
     }
 }
@@ -354,7 +354,7 @@ async fn bounded_fanout_rechecks_channel_dm_guest_deactivation_and_grant_lifetim
             .bind(org).bind(fixture.channels[2]).bind(member).fetch_one(&pools.admin).await.unwrap();
         assert_access(&app, &fixture, 1, 1, 2, (true, Some(fresh_dm), true)).await;
         assert_access(&app, &fixture, 1, 0, 2, (false, None, false)).await;
-        crate::database::tests::context::clean(&app).await;
+        crate::database::test_support::clean(&app).await;
         app.close().await;
     }
 }
@@ -399,7 +399,7 @@ async fn bounded_fanout_requires_dm_participation_even_with_current_grants(pool:
         )
         .await;
         assert_access(&app, &fixture, 3, 0, 2, (false, Some(outsider_grant), true)).await;
-        crate::database::tests::context::clean(&app).await;
+        crate::database::test_support::clean(&app).await;
         app.close().await;
     }
 }
@@ -530,7 +530,7 @@ async fn bounded_candidates_keep_organization_scope_with_account_read_policy(poo
             "{mode}: private non-member and stale revision must still deny"
         );
         sqlx::query("ROLLBACK").execute(&app).await.unwrap();
-        crate::database::tests::context::clean(&app).await;
+        crate::database::test_support::clean(&app).await;
         app.close().await;
     }
 }
@@ -561,7 +561,7 @@ async fn bounded_fanout_cancellation_discards_context_in_both_plan_modes(pool: P
         // Pause a grant read after verifying context has run. Drop its future
         // mid-statement, then verify a clean replacement and successful reads.
         for read in 0..3 {
-            let pid = crate::database::tests::context::clean(&app).await;
+            let pid = crate::database::test_support::clean(&app).await;
             let mut lock = pools.admin.begin().await.unwrap();
             sqlx::query("SELECT pg_advisory_xact_lock(354,1)")
                 .execute(&mut *lock)
@@ -602,7 +602,7 @@ async fn bounded_fanout_cancellation_discards_context_in_both_plan_modes(pool: P
             lock.rollback().await.unwrap();
             let next = tokio::time::timeout(
                 std::time::Duration::from_secs(3),
-                crate::database::tests::context::clean(&app),
+                crate::database::test_support::clean(&app),
             )
             .await
             .unwrap();
