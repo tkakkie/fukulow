@@ -16,11 +16,7 @@ threads-required = "num-test-threads"
 
 # The projection oracle cases took up to 89s on green CI.
 [[profile.default.overrides]]
-filter = '''
-test(=messages::tests::unread::a3_oracle::projection::topic_pages_equal_the_prefix_query_after_every_random_step)
-| test(=messages::tests::unread::a3_oracle::projection::topic_pages_equal_the_prefix_query_after_every_random_step_seed_1)
-| test(=messages::tests::unread::a3_oracle::projection::topic_pages_equal_the_prefix_query_after_every_random_step_seed_2)
-'''
+filter = 'test(/^messages::tests::unread::a3_oracle::projection::topic_pages_equal_the_prefix_query_after_every_random_step/)'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
 # #800: start the longest tests first so they overlap the short ones instead of
