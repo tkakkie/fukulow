@@ -2,17 +2,19 @@ use super::*;
 use crate::realtime::tests::isolated_test::run_isolated_test;
 use crate::{
     auth::{
-        SubscriptionRecheck, SubscriptionScope,
-        activity::{ActivityChange, ActivityChanges, Capture, ChangeScope, ChannelChange},
+        SubscriptionScope,
+        activity::ChangeScope,
+        activity::hook_decorator::{
+            ActivityHooks, BeforeRecheck, ChangeHooks, Decorator, RecheckHooks,
+        },
     },
     channels::{
-        AccessChanges,
-        activity::{Activity, Notice, pause_member},
+        activity::{Notice, pause_member},
         tests::extract_auth,
     },
 };
 use futures_util::FutureExt;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::{Arc, Mutex};
 
 mod admission;
 mod case;
@@ -44,8 +46,7 @@ fn send_measurement_records_delivered_revocation_only() {
 #[fukulow_test::test]
 #[ignore = "subprocess helper with a global measurement subscriber"]
 async fn send_measurement_child(pool: PgPool) {
-    let output = crate::observability::tests::Capture::default();
-    tracing::subscriber::set_global_default(output.measurement_subscriber()).unwrap();
+    let output = crate::observability::tests::Capture::install_global_measurement();
     let case = Case::new(&pool, false, Later::Regrant).await;
     let mut socket = connect(&case.f, &case.token).await;
     let sent = || {
@@ -87,41 +88,6 @@ enum MemberRecheck {
     Hold(Arc<Gate>),
     Skip,
 }
-struct TestRechecks {
-    access: AccessChanges,
-    member: (Uuid, Uuid),
-    member_recheck: MemberRecheck,
-    skip_channel: Option<Uuid>,
-}
-impl SubscriptionRecheck for TestRechecks {
-    fn check<'a>(
-        &'a self,
-        pool: &'a PgPool,
-        scope: SubscriptionScope,
-    ) -> Pin<Box<dyn Future<Output = Result<(), sqlx::Error>> + Send + 'a>> {
-        Box::pin(async move {
-            if matches!(scope, SubscriptionScope::Channel(org, channel)
-                if org == self.member.0 && self.skip_channel == Some(channel))
-            {
-                return Ok(());
-            }
-            if matches!(scope, SubscriptionScope::Member(org, member) if (org, member) == self.member)
-            {
-                match &self.member_recheck {
-                    MemberRecheck::Run => {}
-                    MemberRecheck::Hold(gate) => {
-                        gate.pause().await;
-                    }
-                    MemberRecheck::Skip => return Ok(()),
-                }
-            }
-            self.access.check(pool, scope).await
-        })
-    }
-    fn failed(&self, scope: SubscriptionScope) {
-        self.access.failed(scope);
-    }
-}
 impl Case {
     fn hold_member_recheck(&self) -> Arc<Gate> {
         let gate = Arc::new(Gate::default());
@@ -130,14 +96,33 @@ impl Case {
     }
 
     fn set_rechecks(&self, member_recheck: MemberRecheck, skip_channel: Option<Uuid>) {
+        let identity = (self.f.organization, self.target);
         self.f
             .state
             .session_changes
-            .set_subscription_recheck(Arc::new(TestRechecks {
-                access: self.f.state.message_delivery.channel_access.clone(),
-                member: (self.f.organization, self.target),
-                member_recheck,
-                skip_channel,
+            .set_subscription_recheck(Arc::new(Decorator {
+                inner: self.f.state.message_delivery.channel_access.clone(),
+                hooks: RecheckHooks {
+                    before_recheck: Some(Box::new(move |scope| match scope {
+                        SubscriptionScope::Channel(org, channel)
+                            if org == identity.0 && skip_channel == Some(channel) =>
+                        {
+                            BeforeRecheck::Skip
+                        }
+                        SubscriptionScope::Member(org, member) if (org, member) == identity => {
+                            match &member_recheck {
+                                MemberRecheck::Run => BeforeRecheck::Run,
+                                MemberRecheck::Hold(gate) => {
+                                    let gate = gate.clone();
+                                    BeforeRecheck::Wait(Box::pin(async move { gate.pause().await }))
+                                }
+                                MemberRecheck::Skip => BeforeRecheck::Skip,
+                            }
+                        }
+                        _ => BeforeRecheck::Run,
+                    })),
+                    ..RecheckHooks::default()
+                },
             }));
     }
 }
@@ -742,68 +727,38 @@ async fn visibility_preserving_role_change_uses_one_capture_per_registration(poo
     );
 }
 
-struct HoldRetirement {
-    activity: Activity,
-    scope: Option<Uuid>,
-    gate: std::sync::Mutex<Option<Arc<Gate>>>,
-}
-struct HeldRetirement {
-    change: Box<dyn ActivityChange>,
-    gate: Arc<Gate>,
-}
-impl ActivityChanges for HoldRetirement {
-    fn capture<'a>(
-        &'a self,
-        tx: &'a mut sqlx::PgConnection,
-        organization: Uuid,
-        target: Uuid,
-        scope: ChangeScope,
-    ) -> Capture<'a> {
-        Box::pin(async move {
-            let change = self
-                .activity
-                .capture(tx, organization, target, scope)
-                .await?;
-            let channel = match scope {
-                ChangeScope::Channel(channel) => Some(channel),
-                _ => None,
-            };
-            if channel == self.scope
-                && let Some(gate) = self.gate.lock().unwrap().take()
-            {
-                return Ok(Box::new(HeldRetirement { change, gate }) as Box<dyn ActivityChange>);
-            }
-            Ok(change)
-        })
-    }
-    fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
-        self.activity.channel(pool, organization, change);
-    }
-    fn directory(&self, pool: PgPool, organization: Uuid, target: Uuid) {
-        self.activity.directory(pool, organization, target);
-    }
-}
-impl ActivityChange for HeldRetirement {
-    fn retire(&mut self) {}
-
-    fn committed(self: Box<Self>, pool: PgPool) {
-        tokio::spawn(async move {
-            self.gate.pause().await;
-            self.change.committed(pool);
-            self.gate.signal_entered();
-        });
-    }
-}
 impl Case {
     fn hold_retirement(&self, channel: Option<Uuid>) -> Arc<Gate> {
         let gate = Arc::new(Gate::default());
+        let hold = Mutex::new(Some(gate.clone()));
         self.f
             .state
             .session_changes
-            .set_activity(Arc::new(HoldRetirement {
-                activity: self.delivery().clone(),
-                scope: channel,
-                gate: std::sync::Mutex::new(Some(gate.clone())),
+            .set_activity(Arc::new(Decorator {
+                inner: self.delivery().clone(),
+                hooks: ActivityHooks {
+                    after_capture: Some(Box::new(move |scope| {
+                        let captured_channel = match scope {
+                            ChangeScope::Channel(channel) => Some(channel),
+                            _ => None,
+                        };
+                        if captured_channel != channel {
+                            return None;
+                        }
+                        let gate = hold.lock().unwrap().take()?;
+                        Some(ChangeHooks {
+                            skip_retire: true,
+                            commit: Box::new(move |change, pool| {
+                                tokio::spawn(async move {
+                                    gate.pause().await;
+                                    change.committed(pool);
+                                    gate.signal_entered();
+                                });
+                            }),
+                        })
+                    })),
+                    ..ActivityHooks::default()
+                },
             }));
         gate
     }
