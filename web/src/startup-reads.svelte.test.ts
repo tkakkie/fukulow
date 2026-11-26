@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createActivity } from './activity'
+import { CHANNEL_READ_ID_HEADER, type ChannelList, type DmChanges, type DmList, type Identity, type MemberList, type SectionLayout, type ServerEvent, type TimelinePage } from './api'
 import { createAuth } from './auth.svelte'
+import { CHANNEL_READ_MARK } from './channels'
 import { createDms } from './dms'
-import type { ChannelList, DmChanges, DmList, Identity, MemberList, SectionLayout, ServerEvent, TimelinePage } from './api'
 
 const ORG = '00000000-0000-4000-8000-000000000001'
 const CHANNEL = '00000000-0000-4000-8000-000000000010'
@@ -622,6 +623,162 @@ describe('Cold / startup REST read counts (#980)', () => {
       auth.members!.activate()
       await flush()
       expect(auth.view.screen).toBe('signin')
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+})
+
+describe('Channel read-reason instrumentation (#983)', () => {
+  type MarkDetail = { id: string; reasons: string[] }
+
+  const readMarks = (): MarkDetail[] =>
+    performance
+      .getEntriesByName(CHANNEL_READ_MARK, 'mark')
+      .map(entry => (entry as PerformanceMark).detail as MarkDetail)
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+    performance.clearMarks(CHANNEL_READ_MARK)
+  })
+
+  afterEach(() => {
+    performance.clearMarks(CHANNEL_READ_MARK)
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  function captureChannelHeaders() {
+    const headerIds: Array<string | null> = []
+    const onFetch = (path: string, url: URL, init?: RequestInit) => {
+      if (path === `/api/v1/orgs/${ORG}/channels` && !url.searchParams.has('archived')) {
+        const headers = init?.headers ? new Headers(init.headers) : null
+        headerIds.push(headers?.get(CHANNEL_READ_ID_HEADER) ?? null)
+      }
+      return undefined
+    }
+    return { headerIds, onFetch }
+  }
+
+  it('records initial and reconcile startup reads without periodic, with unique ids matching request headers', async () => {
+    const { headerIds, onFetch } = captureChannelHeaders()
+    const h = installHarness({ onFetch })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      h.open(0)
+      await vi.advanceTimersByTimeAsync(600)
+      await flush()
+      h.ready(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+
+      const marks = readMarks()
+      expect(headerIds).toHaveLength(2)
+      expect(marks).toHaveLength(2)
+      expect(headerIds.every(id => typeof id === 'string' && id.length > 0)).toBe(true)
+      expect(new Set(headerIds).size).toBe(2)
+      expect(marks.map(m => m.id)).toEqual(headerIds)
+      expect(marks[0]!.reasons).toEqual(['initial'])
+      expect(marks[1]!.reasons).toEqual(['reconcile'])
+      expect(marks.every(m => !m.reasons.includes('periodic'))).toBe(true)
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+
+  it('records an O5-only periodic tick with reasons {periodic} and a fresh paired read id', async () => {
+    const { headerIds, onFetch } = captureChannelHeaders()
+    const h = installHarness({ onFetch })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      h.openAndReady(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+      expect(headerIds).toHaveLength(2)
+
+      // Math.random is stubbed to 0.5 -> first O5 offset is 15_000 ms (+ 200 ms debounce).
+      await vi.advanceTimersByTimeAsync(15_000)
+      await flush()
+
+      const marks = readMarks()
+      expect(headerIds).toHaveLength(3)
+      expect(marks).toHaveLength(3)
+      expect(new Set(headerIds).size).toBe(3)
+      expect(marks.map(m => m.id)).toEqual(headerIds)
+      expect(marks[2]!.reasons).toEqual(['periodic'])
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+
+  it('records a composite reason set when an O5 tick coalesces with a notice', async () => {
+    const { headerIds, onFetch } = captureChannelHeaders()
+    const h = installHarness({ onFetch })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      const ws = h.openAndReady(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+      expect(headerIds).toHaveLength(2)
+
+      // Advance to the O5 tick at 15_000 ms (before its 200 ms debounce fires), then emit a notice.
+      await vi.advanceTimersByTimeAsync(14_000)
+      await flush()
+      expect(headerIds).toHaveLength(2)
+
+      ws.emit({ type: 'channel_activity', channel_id: '00000000-0000-4000-8000-000000000020', seq: 2 })
+      await vi.advanceTimersByTimeAsync(250)
+      await flush()
+
+      const marks = readMarks()
+      expect(headerIds).toHaveLength(3)
+      expect(marks).toHaveLength(3)
+      expect(new Set(headerIds).size).toBe(3)
+      expect(marks.map(m => m.id)).toEqual(headerIds)
+      expect(new Set(marks[2]!.reasons)).toEqual(new Set(['periodic', 'notice']))
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+
+  it('records a composite reason set when an O5 tick coalesces with Ready reconcile', async () => {
+    const { headerIds, onFetch } = captureChannelHeaders()
+    const h = installHarness({ onFetch })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      const ws = h.openAndReady(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+      expect(headerIds).toHaveLength(2)
+
+      // Advance to the O5 tick at 15_000 ms (while its 200 ms debounce is pending), then deliver activity_reset (reconcile).
+      await vi.advanceTimersByTimeAsync(14_000)
+      await flush()
+      expect(headerIds).toHaveLength(2)
+
+      ws.emit({ type: 'activity_reset' })
+      await vi.advanceTimersByTimeAsync(250)
+      await flush()
+
+      const marks = readMarks()
+      expect(headerIds).toHaveLength(3)
+      expect(marks).toHaveLength(3)
+      expect(new Set(headerIds).size).toBe(3)
+      expect(marks.map(m => m.id)).toEqual(headerIds)
+      expect(new Set(marks[2]!.reasons)).toEqual(new Set(['periodic', 'reconcile']))
     } finally {
       auth.session?.close()
       auth.members?.close()
