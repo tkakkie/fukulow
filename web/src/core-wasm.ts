@@ -84,9 +84,16 @@ export function createCore(selfId: string): SyncCore {
         }
         if (patch.splices) {
           const observed = new Map(records.get(id)?.map(m => [m.id, m]))
+          let priorById: Map<string, Message> | undefined
           const restore = (encoded: Interned<Message>) => {
             const m = expandBody<Message>(encoded, bodies)
-            const prior = before?.messages.find(old => old.id === m.id)
+            if (!priorById && before?.messages.length) {
+              priorById = new Map()
+              for (const old of before.messages) {
+                if (!priorById.has(old.id)) priorById.set(old.id, old)
+              }
+            }
+            const prior = priorById?.get(m.id)
             const record = observed.get(m.id)
             if (prior && sameMessage(prior, m) && !(input.refreshMentionNames && record)) return prior
             if (record && sameMessage(record, m)) return record
