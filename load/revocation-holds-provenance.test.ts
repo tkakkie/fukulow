@@ -29,7 +29,7 @@ test('SA2 hashes the actual server and helper binaries independently', async t =
   const binary = join(checkout, 'server'), helperBinary = join(checkout, 'helper');
   writeFileSync(binary, 'server bytes');
   writeFileSync(helperBinary, 'helper bytes');
-  const collect = () => collectSessionIdentity({ session: 'test', checkout, binary, helperBinary },
+  const collect = () => collectSessionIdentity({ session: 'test', checkout, binary, helperBinary, sendBuffer: 16_384 },
     (_program, args) => args[0] === 'status' ? '' : 'test-commit\n');
   const current = await collect();
   assert.equal(current.serverSha256, hash('sha256', 'server bytes'));
@@ -48,7 +48,7 @@ test('SA2 hashes the actual server and helper binaries independently', async t =
 
 test('SA2 refuses to identify a dirty checkout before reading either binary', async () => {
   for (const dirty of [' M modified.ts\n', '?? untracked.ts\n']) {
-    await assert.rejects(collectSessionIdentity({ session: 'test', checkout: 'checkout', binary: 'server', helperBinary: 'helper' },
+    await assert.rejects(collectSessionIdentity({ session: 'test', checkout: 'checkout', binary: 'server', helperBinary: 'helper', sendBuffer: 16_384 },
       (program, args, cwd) => {
         assert.deepEqual([program, ...args], ['git', 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none']);
         assert.equal(cwd, 'checkout');

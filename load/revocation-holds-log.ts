@@ -6,8 +6,9 @@ import type { HoldsSample } from './revocation-holds-judgment.ts';
 // is logged (pool_stats and websocket_closed carry no server_ms). clockWall pairs with clock.
 export type Stamped = { at: number; wallMs: number | undefined };
 export type ServerPoolSample = PoolSample & { wallMs: number | undefined };
-export type ServerLog = { clock: number[]; clockWall: (number | undefined)[]; sends: SendRecord[]; holds: HoldsSample[]; pool: ServerPoolSample[]; metrics: PoolSample[]; closes: Stamped[] };
-export const emptyLog = (): ServerLog => ({ clock: [], clockWall: [], sends: [], holds: [], pool: [], metrics: [], closes: [] });
+export type SendBufferReadback = { peerPort: number; effective: number };
+export type ServerLog = { clock: number[]; clockWall: (number | undefined)[]; sends: SendRecord[]; holds: HoldsSample[]; pool: ServerPoolSample[]; metrics: PoolSample[]; closes: Stamped[]; sendBuffers: SendBufferReadback[] };
+export const emptyLog = (): ServerLog => ({ clock: [], clockWall: [], sends: [], holds: [], pool: [], metrics: [], closes: [], sendBuffers: [] });
 
 /** tracing-subscriber's `YYYY-MM-DDTHH:MM:SS.ffffffZ` in epoch ms, keeping the microseconds. */
 export function wallMs(timestamp: unknown): number | undefined {
@@ -36,6 +37,12 @@ export function readLogLine(log: ServerLog, line: string, at: number) {
     return;
   }
   const numeric = Object.fromEntries(Object.entries(f).filter(([, v]) => typeof v === 'number')) as Record<string, number>;
+  if (event.target === 'fukulow' && f.event === 'measurement_send_buffer') {
+    const { peer_port: peerPort, effective } = numeric;
+    if (Number.isInteger(peerPort) && peerPort > 0 && peerPort <= 65_535 && Number.isSafeInteger(effective) && effective > 0) {
+      log.sendBuffers.push({ peerPort, effective });
+    }
+  }
   if (f.event === 'pool_stats') log.pool.push({ at, fields: numeric, wallMs: wallMs(event.timestamp) });
   if (f.event === 'metrics') log.metrics.push({ at, fields: numeric });
   if (f.event === 'websocket_closed') log.closes.push({ at, wallMs: wallMs(event.timestamp) });

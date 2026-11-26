@@ -28,6 +28,7 @@ export type HoldsRun = {
   accounts: AccountMutations[];
   targets: TargetSocket[];
   stallReadbacks?: Readback[];
+  effectiveSendBuffer?: number;
   notices: Notice[];
   bystanderNotices: number; bystanderCloses: number[];
   serverCloses: Stamped[]; // each server `websocket_closed` log event (any socket)

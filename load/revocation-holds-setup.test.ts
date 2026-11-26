@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { NativeStall } from './revocation-holds-native-stall.ts';
-import { requirePreflight, requireReadbacks, SetupAbort, startStall } from './revocation-holds-setup.ts';
+import { emptyLog, readLogLine } from './revocation-holds-log.ts';
+import { requirePreflight, requireReadbacks, requireSendBuffers, SetupAbort, startStall, targetSendBuffers } from './revocation-holds-setup.ts';
 
 const readback = (after: number) => ({ before: 32_768, after });
 
@@ -31,10 +32,29 @@ test('SA1 aborts when all targets agree on a value different from the recorded p
 });
 
 test('preflight discovers a positive post-connect value shared by all targets', async () => {
-  assert.equal(requirePreflight({ kind: 'preflight' }), undefined);
+  assert.equal(requirePreflight({ kind: 'preflight', sendBuffer: 16_384 }), undefined);
   const rows = [readback(55_555), readback(55_555)];
   assert.deepEqual(await requireReadbacks(async () => rows, 2), rows);
   for (const bad of [[], [readback(0), readback(0)], [readback(55_555), readback(55_556)]]) {
     await assert.rejects(requireReadbacks(async () => bad, 2), SetupAbort);
   }
+});
+
+test('SA1 requires exactly one matching server SO_SNDBUF per target upstream port', () => {
+  const log = emptyLog();
+  const targets = [{ upstreamPort: 1000, ...readback(32_768) }, { upstreamPort: 2000, ...readback(32_768) }];
+  const record = (peer_port: number, effective: unknown) =>
+    readLogLine(log, JSON.stringify({ target: 'fukulow', fields: { event: 'measurement_send_buffer', peer_port, effective } }), 0);
+  record(3000, 32_768); // An unrelated accepted connection cannot fill a missing target slot.
+  record(2000, 32_768);
+  record(1000, '32768');
+  assert.throws(() => requireSendBuffers(targetSendBuffers(targets, log.sendBuffers)), SetupAbort);
+  record(1000, 32_768);
+  const rows = targetSendBuffers(targets, log.sendBuffers);
+  assert.equal(requireSendBuffers(rows, 32_768), 32_768);
+  assert.throws(() => requireSendBuffers([], 32_768), SetupAbort);
+  assert.throws(() => requireSendBuffers(rows, 16_384), SetupAbort);
+  assert.throws(() => requireSendBuffers(targetSendBuffers([targets[0], targets[0]], log.sendBuffers)), SetupAbort);
+  record(2000, 32_768);
+  assert.throws(() => requireSendBuffers(targetSendBuffers(targets, log.sendBuffers)), SetupAbort);
 });

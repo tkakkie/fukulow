@@ -1,7 +1,9 @@
+use axum::serve::ListenerExt;
 use fukulow_server::{AppState, database::MigrationFailure};
 use sqlx::postgres::PgPoolOptions;
 
 mod init;
+mod measurement_listener;
 mod probe;
 
 const USAGE: &str = "Usage: fukulow-server [init --version TAG@sha256:DIGEST [--domain HOST] [--proxy caddy|nginx|none] | probe | migrate [roles] | rotate-history-generation <organization UUID | --all>]";
@@ -82,6 +84,9 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         }
         _ => return Err(USAGE.into()),
     }
+    let send_buffer = measurement_listener::send_buffer(
+        optional_env(measurement_listener::SEND_BUFFER_ENV)?.as_deref(),
+    )?;
     fukulow_server::messages::reactions::ReactionEmojiSet::load_embedded()?;
     let setup_token = std::env::var("FUKULOW_SETUP_TOKEN")
         .ok()
@@ -153,7 +158,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
     let revocation_holds_sampler = fukulow_server::spawn_revocation_holds_sampler();
     let completed = fukulow_server::serve_with_search(
-        listener,
+        listener.tap_io(move |stream| measurement_listener::apply(stream, send_buffer)),
         AppState {
             pool,
             shutdown,
