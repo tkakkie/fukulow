@@ -2,8 +2,13 @@
 //! (#287, #141) resolve a receipt after reauthorization and before checking
 //! `expected_version`, and record it in the mutation's transaction.
 //! Resolution ignores expired receipts even before the bounded purge reaches them.
-use sqlx::{PgConnection, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
+
+mod purge;
+#[cfg(test)]
+pub(super) use purge::Purge;
+pub use purge::purge_periodically;
 
 pub type Digest = sha2::digest::Output<sha2::Sha256>;
 
@@ -136,16 +141,37 @@ pub async fn record(
     Ok(recorded == 1)
 }
 
-pub(super) async fn purge(pool: &sqlx::PgPool, organization: Uuid) -> Result<u64, sqlx::Error> {
-    crate::database::organization(pool, organization, async |tx: &mut PgConnection| {
-        let deleted = sqlx::query(
+const BATCH_ROWS: u64 = 1_000;
+const EXPIRED: &str = "organization_id=$1 AND created_at <= now() - $2::interval";
+const PURGE_TX_TIMEOUT: &str = "SET LOCAL transaction_timeout = '100ms'";
+
+pub(super) async fn has_expired(pool: &PgPool, organization: Uuid) -> Result<bool, sqlx::Error> {
+    crate::database::organization_detached(pool, organization, async |tx: &mut PgConnection| {
+        sqlx::query(PURGE_TX_TIMEOUT).execute(&mut *tx).await?;
+        sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM operation_receipts WHERE {EXPIRED})"
+        ))
+        .bind(organization)
+        .bind(LIFETIME)
+        .fetch_one(tx)
+        .await
+    })
+    .await
+}
+
+pub(super) async fn purge(pool: &PgPool, organization: Uuid) -> Result<u64, sqlx::Error> {
+    crate::database::organization_detached(pool, organization, async |tx: &mut PgConnection| {
+        sqlx::query(PURGE_TX_TIMEOUT)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = sqlx::query(&format!(
             "WITH expired AS MATERIALIZED (\
                 SELECT actor, operation_id FROM operation_receipts \
-                WHERE organization_id=$1 AND created_at <= now() - $2::interval \
-                ORDER BY created_at, actor, operation_id LIMIT 1000 FOR UPDATE SKIP LOCKED) \
+                WHERE {EXPIRED} \
+                ORDER BY created_at, actor, operation_id LIMIT {BATCH_ROWS} FOR UPDATE SKIP LOCKED) \
              DELETE FROM operation_receipts r USING expired e \
              WHERE r.organization_id=$1 AND r.actor=e.actor AND r.operation_id=e.operation_id",
-        )
+        ))
         .bind(organization)
         .bind(LIFETIME)
         .execute(tx)
@@ -153,37 +179,4 @@ pub(super) async fn purge(pool: &sqlx::PgPool, organization: Uuid) -> Result<u64
         Ok(deleted.rows_affected())
     })
     .await
-}
-
-/// Each tick gives one Organization an expiry batch, including idle Organizations.
-pub async fn purge_periodically(pool: sqlx::PgPool, shutdown: crate::shutdown::Shutdown) {
-    use std::time::Duration;
-    let mut ticks = tokio::time::interval(Duration::from_secs(1));
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut after = None;
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return,
-            _ = ticks.tick() => {}
-        }
-        let work = async {
-            if let Some(organization) =
-                crate::auth::members::next_maintenance_organization(&pool, after).await?
-            {
-                after = Some(organization);
-                purge(&pool, organization).await?;
-            }
-            Ok::<_, sqlx::Error>(())
-        };
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return,
-            result = tokio::time::timeout(Duration::from_secs(2), work) => {
-                if !matches!(result, Ok(Ok(()))) {
-                    tracing::warn!(target: "fukulow", event = "database_failure", operation = "operation_receipts_expiry");
-                }
-            }
-        }
-    }
 }
