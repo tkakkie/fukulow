@@ -1691,6 +1691,8 @@ The deep saving beyond the measured planning difference is not identified.
 - `server/src/messages/tests/page_mentions.rs`: Mention index keys under a skewed multi-Organization fixture, and the REST 201-row lookahead.
 - `server/src/database/tests/generic_plan.rs`: helper errors, failed SET LOCAL or ROLLBACK, and cancellation.
 
+- Results (moved from `docs/measurements.md`): [SQL result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7071300064) · [App result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7089274168)
+
 ## Sign-in burst owner impact (#756, #359, 2026-11-23 JST, Mac)
 
 The 3 formal runs of the #756 burst method, pre-registered in [comment 7075307714](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7075307714) and approved by the maintainer on 2026-11-22 ([comment 7079651809](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7079651809)). B1–B5 are the #359 criteria ([comment 6979633120](https://github.com/tkakkie/fukulow/issues/359#issuecomment-6979633120)); A0, C1 and C2 are new in #756. The four #785 evidence tolerances (owner late 5 ms, clock 1,000 ms, sampler gap 100 ms, log stamp 1 ms) were approved before the runs ([comment 7080161589](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7080161589)). No criterion, threshold, tolerance or load condition changed after any run. Result comment: [7089274460](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7089274460). It follows the [2026-11-22 Part B alternative runs](#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac), whose limits (lock barely exercised, 233 ms poll) #756 followed up.
@@ -1907,3 +1909,20 @@ Maintainer go 2026-11-26 (#1066). Decision rule fixed before any results: p99.9 
 - **Verdict.** Option 3: p99.9 about 4.7 ms in both states, about 40x under the 200 ms readiness bound.
 - **Limits.** One host, one recorded run, local Compose network; no production database exists yet. The VPS idle repeat waits for #431.
 - **Evidence.** [Result comment](https://github.com/tkakkie/fukulow/issues/1066#issuecomment-7203718181). Raw samples on the host: `idle.jsonl` SHA-256 `7a53dc641fa7c46d…`, `loaded.jsonl` `0005f8e0dbb4b52c…`.
+
+## wasm merge Map (#488, 2026-11-27, Mac)
+
+[Pre-registration](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7196115679) · [Result](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7198767241) · [Cause](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7205140175). Harness `web/scripts/measure-wasm-core.ts` (#466/#487), Node 26.13.1. Arms: B = main `aca632bc`, W = PR #1073 `ff681721` (lazy per-Channel Map of prior Messages on every splice), R = #466 TS `117e75a1`. INCONCLUSIVE after 5 rounds, so the pre-committed extension to 9 rounds ran. 27 runs exited 0, G3 passed.
+
+| Metric | W vs B (median paired delta, 9 rounds) | Status |
+|---|---|---|
+| `step()` p50 / p95 / p99 | +20.7% (CI +18.6% to +25.9%) / -0.1% / +0.5% | MISSED (p50) |
+| Sustained 100 msg/s p95 | -3.5%, queue 0 | MET |
+| Max sustainable rate | 8000 msg/s (B and W) | MET |
+| Bulk receipt | -9% to -20% on every sub-metric | INCONCLUSIVE (`baselineNoisy` on 4) |
+| Steady / peak memory | -0.2% / -24.9% | MET |
+| Growth slope | 252.7 B/msg, +0 pages (B 257.2) | HOLD |
+
+- W was slower than B in `step()` p50 in every round (+17.5% to +26.2%, about +5.2 µs on 25.2 µs).
+- Deviation: rounds 4–6 ran on battery power. AC-only rounds alone are all above +10%, so the verdict does not depend on them.
+- Likely cause: the Map was built even for single-Message splices. The fix keeps `find` below 8 inserted Messages per Channel (`3482ee02`), and is re-measured under the same rules on a new go.

@@ -114,7 +114,7 @@ Mac-relative, B `b975ffa` vs A `f7fe08a`, harness `df695bc`, separate from #431.
 
 Build, then run each night: `node load/slice5/run.ts --help`.
 
-Mac diagnostics only. Night 3 stands (3 FAIL, 1 INVALID). Replay SQL (2026-11-22 JST) put A's page statement +0.38–0.53 ms p50 over B. App path (2026-11-23 JST) put A − B HTTP p50 at 0.48–0.58 ms, almost all in the component sum. [515-replay steps](../load/sql-probes/515-replay/README.md#run) · [515-app steps](../load/sql-probes/515-app/README.md#run) · [SQL result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7071300064) · [App result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7089274168) · [§14 record](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7196020425) · [F1 archive](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
+Mac diagnostics only. Night 3 stands (3 FAIL, 1 INVALID). Replay SQL (2026-11-22 JST) put A's page statement +0.38–0.53 ms p50 over B. App path (2026-11-23 JST) put A − B HTTP p50 at 0.48–0.58 ms, almost all in the component sum. [515-replay steps](../load/sql-probes/515-replay/README.md#run) · [515-app steps](../load/sql-probes/515-app/README.md#run) · [§14 record](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7196020425) · [F1 archive](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
 
 ## Unread candidate bounds (#355)
 
@@ -134,7 +134,7 @@ Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-pl
 
 ## Rust/wasm sync core (#466, #487)
 
-2026-11-21 JST. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466, `d2fc5ea`: throttled cold `/` Timeline p95 +16%). #487 (`c02e1a78`, 5 rounds): `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, 18.19 → 18.35 MiB; bulk INCONCLUSIVE, slope HOLD (#489). #954: preload (#962) MISSED, early list (#978) MET ([records](../load/measurements-archive.md#wasm-preload-954-2026-11-25)).
+2026-11-21. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466, `d2fc5ea`: throttled cold `/` Timeline p95 +16%). #487 (`c02e1a78`, 5 rounds): `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, 18.19 → 18.35 MiB; bulk INCONCLUSIVE, slope HOLD (#489). #954: preload (#962) MISSED, early list (#978) MET ([records](../load/measurements-archive.md#wasm-preload-954-2026-11-25)). #488 Map (`ff681721`): `step()` p50 +20.7% MISSED, fix `3482ee02` not yet measured ([record](../load/measurements-archive.md#wasm-merge-map-488-2026-11-27-mac)).
 
 Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
 
