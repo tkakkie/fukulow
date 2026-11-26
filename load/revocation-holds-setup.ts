@@ -10,13 +10,13 @@ export class SetupAbort extends Error {}
 export type Setup =
   | { kind: 'diagnostic'; sendBuffer?: number }
   | { kind: 'preflight'; sendBuffer: number }
-  | { kind: 'measured'; identity: SessionIdentity; ledger: string; preflightFile?: string };
+  | { kind: 'measured'; identity: SessionIdentity; ledger: string; hostLedger?: string; preflightFile?: string };
 
 export function requirePreflight(setup: Setup) {
   if (setup.kind !== 'measured') return;
   try {
-    const { identity, ledger, preflightFile } = setup;
-    const readback = preflightFile && preflightReadback(loadLedgerPreflight(ledger, preflightFile, identity), identity);
+    const { identity, ledger, hostLedger, preflightFile } = setup;
+    const readback = preflightFile && preflightReadback(loadLedgerPreflight(ledger, preflightFile, identity, hostLedger), identity);
     if (readback) return readback;
   } catch { /* An absent or unreadable result cannot authorize a run. */ }
   throw new SetupAbort('SA2: the latest preflight must pass and match this host, session, boot, checkout, binaries, Node version and requested SO_SNDBUF');
