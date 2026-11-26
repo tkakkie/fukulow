@@ -95,7 +95,7 @@ async fn account_sockets(pool: PgPool, operation: usize, cancel: bool) {
     for socket in [&mut current_foreign, &mut foreign_socket] {
         assert_eq!(event(socket).await["message"], foreign_message);
     }
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
     gate.entered().await;
     let mut blocker = pool.begin().await.unwrap();

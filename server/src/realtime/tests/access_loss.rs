@@ -1,16 +1,5 @@
-use super::*;
+use super::{hooks::Phase, *};
 use crate::auth::SessionChanges;
-type GateKey = (Uuid, String, i64);
-static LOSS_GATES: Gates<GateKey> = Gates::new();
-
-pub(super) fn gate(channel: Uuid, phase: &str, seq: i64) -> Arc<Gate> {
-    LOSS_GATES.register((channel, phase.into(), seq))
-}
-
-pub(crate) async fn pause(channel: Uuid, phase: &str, seq: i64) {
-    LOSS_GATES.pause((channel, phase.into(), seq)).await;
-}
-
 async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
     sqlx::query(
         "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
@@ -136,7 +125,7 @@ async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during
     pool: PgPool,
 ) {
     for case in ["private", "guest", "role"] {
-        for phase in ["live", "page", "frame"] {
+        for phase in [Phase::Live, Phase::Page, Phase::Frame] {
             let f = fixture(&pool).await;
             owner(&pool, &f).await;
             let (reader, token) = member(&pool, f.organization).await;
@@ -157,29 +146,29 @@ async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during
                     .unwrap();
             }
             let mut socket = f.server.connect(&token).await;
-            let g = gate(
+            let g = hooks::register(
                 c,
                 phase,
-                if phase == "page" {
+                if phase == Phase::Page {
                     0
-                } else if phase == "frame" {
+                } else if phase == Phase::Frame {
                     2
                 } else {
                     1
                 },
             );
-            if phase == "live" {
+            if phase == Phase::Live {
                 subscribe(&mut socket, c, 0).await;
                 ready(&mut socket, c, 0).await;
             }
             for i in 1..=3 {
                 send(&f, &f.token, c, Uuid::new_v4(), &format!("message {i}")).await;
             }
-            if phase != "live" {
+            if phase != Phase::Live {
                 subscribe(&mut socket, c, 0).await;
             }
             g.entered().await;
-            if phase == "frame" {
+            if phase == Phase::Frame {
                 assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
             }
             loss(&f, &pool, reader, c, case == "role").await;
@@ -505,7 +494,7 @@ async fn subscribe_registration_racing_removal_never_hands_off_a_stale_subscript
         .await
         .unwrap();
     grant(&pool, f.organization, f.channel, reader).await;
-    let g = gate(f.channel, "registered", 0);
+    let g = hooks::register(f.channel, Phase::Registered, 0);
     let mut socket = f.server.connect(&token).await;
     subscribe(&mut socket, f.channel, 0).await;
     g.entered().await;
@@ -683,7 +672,7 @@ async fn replay_snapshot_after_removal_commit_denies_even_without_a_fast_signal(
                 .unwrap();
         }
         let canonical = send(&f, &f.token, target, Uuid::new_v4(), "authorized control").await;
-        let g = gate(target, "snapshot", 0);
+        let g = hooks::register(target, Phase::Snapshot, 0);
         let mut socket = f.server.connect(&token).await;
         subscribe(&mut socket, target, 0).await;
         g.entered().await;

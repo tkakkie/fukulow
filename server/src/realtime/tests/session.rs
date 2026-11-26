@@ -86,7 +86,7 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
     let mut replay = server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
     gate.entered().await;
     let mut other = server.connect(&other_token).await;
@@ -175,7 +175,7 @@ async fn worker_panic_closes_existing_and_new_sockets_with_internal_error(pool: 
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
     let mut replay = server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
     gate.entered().await;
     tokio::time::timeout(Duration::from_secs(3), changes.panic_worker())
@@ -427,7 +427,7 @@ async fn lost_membership_signal_and_reactivation_still_close_stale_idle_and_repl
         subscribe(&mut idle, f.channel, 0).await;
         ready(&mut idle, f.channel, 0).await;
         let mut replay = server.connect(&f.token).await;
-        let gate = pause(f.channel);
+        let gate = hooks::register_replay(f.channel);
         subscribe(&mut replay, f.channel, 0).await;
         gate.entered().await;
         fallback.entered().await;
@@ -533,7 +533,7 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
     .unwrap();
     assert_eq!(event(&mut idle).await["code"], "channel_not_found");
     let mut replay = server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
     gate.entered().await;
     fallback.entered().await;

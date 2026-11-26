@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::tests::hooks::{self, Phase};
 use super::{CLOSE_QUEUE_OVERFLOW, ClientMessage, ServerEvent};
 use crate::{
     AppState,
@@ -133,7 +135,7 @@ impl<'a> Connection<'a> {
     async fn refresh(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<bool, u16> {
         if let Some(watch) = self.access.get(&channel) {
             #[cfg(test)]
-            super::tests::access_loss::pause(channel, "refresh", 0).await;
+            hooks::pause(channel, Phase::Refresh, 0).await;
             watch
                 .refresh(&self.state.pool)
                 .await
@@ -178,7 +180,7 @@ impl<'a> Connection<'a> {
         message: std::sync::Arc<messages::LiveMessage>,
     ) -> Result<(), u16> {
         #[cfg(test)]
-        super::tests::access_loss::pause(message.channel_id, "live", message.seq).await;
+        hooks::pause(message.channel_id, Phase::Live, message.seq).await;
         if !self.protected(socket, message.channel_id).await? {
             return Ok(());
         }
@@ -292,10 +294,10 @@ impl<'a> Connection<'a> {
         after = after.min(through);
         self.cursors.insert(channel, after);
         #[cfg(test)]
-        super::tests::replay_gate(channel).await;
+        hooks::pause_replay(channel).await;
         while after < through {
             #[cfg(test)]
-            super::tests::access_loss::pause(channel, "snapshot", after).await;
+            hooks::pause(channel, Phase::Snapshot, after).await;
             let page = match messages::authorized_replay_page(
                 &self.state.pool,
                 organization,
@@ -328,10 +330,10 @@ impl<'a> Connection<'a> {
                 return Err(1011);
             }
             #[cfg(test)]
-            super::tests::access_loss::pause(channel, "page", after).await;
+            hooks::pause(channel, Phase::Page, after).await;
             for message in page {
                 #[cfg(test)]
-                super::tests::access_loss::pause(channel, "frame", message.seq).await;
+                hooks::pause(channel, Phase::Frame, message.seq).await;
                 if !self.protected(socket, channel).await? {
                     return Ok(());
                 }
@@ -415,7 +417,7 @@ impl<'a> Connection<'a> {
             return Self::error(socket, Some(channel_id), "subscription_limit").await;
         }
         #[cfg(test)]
-        super::tests::access_loss::pause(channel_id, "authorize", 0).await;
+        hooks::pause(channel_id, Phase::Authorize, 0).await;
         match self.visible(channel_id, history_generation).await? {
             SubscriptionVisibility::Visible(_) => {}
             SubscriptionVisibility::HistoryGenerationChanged => {
@@ -426,7 +428,7 @@ impl<'a> Connection<'a> {
             }
         }
         #[cfg(test)]
-        super::tests::access_loss::pause(channel_id, "access_subscribe", 0).await;
+        hooks::pause(channel_id, Phase::AccessSubscribe, 0).await;
         let watch = self
             .state
             .message_delivery
@@ -444,7 +446,7 @@ impl<'a> Connection<'a> {
         };
         self.access.insert(channel_id, watch);
         #[cfg(test)]
-        super::tests::access_loss::pause(channel_id, "registered", 0).await;
+        hooks::pause(channel_id, Phase::Registered, 0).await;
         self.queue.subscribe(channel_id);
         self.cursors.insert(channel_id, after_seq);
         self.catch_up(socket, channel_id).await?;
@@ -467,7 +469,7 @@ impl<'a> Connection<'a> {
             return Ok(());
         }
         #[cfg(test)]
-        super::tests::access_loss::pause(channel_id, "subscribed_seq", 0).await;
+        hooks::pause(channel_id, Phase::SubscribedSeq, 0).await;
         if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
             #[cfg(test)]
             self.state.message_delivery.record_watermark_caller(
@@ -490,7 +492,7 @@ impl<'a> Connection<'a> {
                 return Ok(());
             }
             #[cfg(test)]
-            super::tests::access_loss::pause(channel_id, "handoff_generation", 0).await;
+            hooks::pause(channel_id, Phase::HandoffGeneration, 0).await;
             let history_generation = match self.visible(channel_id, None).await? {
                 SubscriptionVisibility::Visible(generation) => generation,
                 SubscriptionVisibility::NotFound => {
