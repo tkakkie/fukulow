@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -19,7 +20,7 @@ if (!out || !isAbsolute(out) || !outsideCheckout(out, process.cwd(), 'resolve'))
   throw new Error('--out must be an absolute path outside the checkout');
 }
 const runId = process.env.FUKULOW_LAUNCH_SESSION ?? randomUUID();
-const macBusy = '/Users/tomoya/dev/fukulow/runs/HOST-BUSY';
+const macBusy = join(homedir(), 'dev', 'fukulow', 'runs', 'HOST-BUSY');
 if (smoke) {
   if (process.platform !== 'darwin') throw new Error('--smoke is for the development Mac');
 } else {
