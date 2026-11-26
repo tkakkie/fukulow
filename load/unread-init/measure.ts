@@ -16,6 +16,7 @@ const buffers=(p:Plan)=>(p.Plan['Shared Hit Blocks']??0)+(p.Plan['Shared Read Bl
 const clockStart=`SELECT clock_timestamp() AS started \\gset`;
 const clockEnd=`SELECT json_build_object('latency_ms',extract(epoch FROM clock_timestamp()-:'started'::timestamptz)*1000);`;
 type Stats=Record<string,Record<string,number>>;
+export const senderBaselineMethod = 'In a disposable clone, one untimed sender transaction commits in the same session before the timed uncontended sender commit.';
 export async function measure(db:Database,name:string,p:Point,variant:string,repeat:number) {
   // Preserve an actual COMMIT baseline without deleting a retained creation or rewinding its counter.
   const baselineName = name + '_baseline';
@@ -23,6 +24,7 @@ export async function measure(db:Database,name:string,p:Point,variant:string,rep
   const baseline = new Session(db.name, baselineName);
   let senderBaselineMs: number;
   try {
+    await baseline.query(`${begin}${sender.replaceAll('sender-probe','warmup-probe')} COMMIT;`);
     const output = documents(await baseline.query(`${clockStart}\n${begin}${sender} COMMIT;\n${clockEnd}`));
     senderBaselineMs = (output.at(-1) as { latency_ms: number }).latency_ms;
   } finally {

@@ -1,7 +1,7 @@
 use super::*;
 
 #[fukulow_test::test]
-async fn directly_seeded_history_replays_from_zero_after_fixture_create_log(pool: PgPool) {
+async fn directly_seeded_messages_replay_from_zero_and_handoff_to_live(pool: PgPool) {
     let f = fixture(&pool).await;
     for statement in [
         "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) \

@@ -4,7 +4,6 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { outsideCheckout } from './dms-workload.ts';
-import { createLog } from './channel-log.ts';
 import { fixturePairs, heldCohorts, type MixedScenario } from './dms-formal-scenarios.ts';
 import { seedFailure, type SeedStop } from './dms-formal-seed-diagnostic.ts';
 
@@ -159,10 +158,7 @@ INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${
       const startedAtMs = trace ? Date.now() : 0;
       if (trace) Object.assign(trace, { batchIndex, baselineMs: batchBaselineMs ?? null, startedAtMs });
       const ids = batchPairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
-      batchSql(`BEGIN;
-INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
-${createLog(org, ids)}
-COMMIT;`);
+      batchSql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);`);
       const durationMs = performance.now() - batchStart;
       const endedAtMs = trace ? Date.now() : 0;
       recordTiming({ kind: 'batch', organization: o, batchIndex, durationMs, ...(trace ? { startedAtMs, endedAtMs, ...diagnosticClock() } : {}) });
@@ -171,11 +167,10 @@ COMMIT;`);
         Object.assign(trace, { rule: 'message-batch', durationMs, limitMs, endedAtMs });
       }));
       if (trace) Object.assign(trace, { batchIndex: null, baselineMs: organizationBaselineMs ?? null, startedAtMs: organizationStartedAtMs });
-      // The first batch gives ANALYZE rows from this Organization in both tables.
+      // Keep the pre-#620 ANALYZE command in the seed transcript.
       if (start === 0) sql('ANALYZE messages, channel_log;');
     }
-    sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');
-${createLog(org, [ordinary])}`);
+    sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');`);
     writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, scenario, heldAssignment:heldCohorts(scenario as MixedScenario), fixture:{pairs:pairs.length+extraPairs.length,historicalPairs:pairs.length,messages:batchPairs.length*history} }), { mode: 0o600 });
     const durationMs = performance.now() - organizationStart;
     const endedAtMs = trace ? Date.now() : 0;

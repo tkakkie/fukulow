@@ -712,6 +712,12 @@ async fn replay_detects_duplicate_at_page_boundary(pool: PgPool) {
         .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1,$2,50)")
         .bind(org).bind(channel).execute(&pool).await.unwrap();
+    assert_eq!(
+        event_response(&app, &token, channel, "?after_seq=0&limit=49")
+            .await
+            .status(),
+        StatusCode::OK
+    );
     sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,operation_id,destination_topic_id)
                  SELECT $1,$2,50,'move',id,$3,gen_random_uuid(),gen_random_uuid()
                  FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=1")

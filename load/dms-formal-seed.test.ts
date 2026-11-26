@@ -5,7 +5,6 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { createLog } from './channel-log.ts';
 import { checkMessageBatch, checkOrganization, dbBatchClock, messageBatchBaselineMs, seed, seedBatchLimit } from './dms-formal-seed.ts';
 import { batchServerStatements, seedRehearsal } from './dms-formal-seed-diagnostic.ts';
 import { seedMessagesPerOrganization, seedOrganizations, seedSizeEnv } from './dms-formal-host.ts';
@@ -36,14 +35,6 @@ test('Organization guard uses a strict 2x total-time limit', () => {
 });
 
 const originPsql = ['exec','-i','stub','psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'];
-// The committed Message batch uses one INSERT and a schema-aware fixture statement.
-function assertOriginBatch(input: string) {
-  const match = /^BEGIN;\nINSERT INTO messages\(organization_id,id,channel_id,seq,sender,client_message_id,body\) SELECT '([0-9a-f-]{36})',gen_random_uuid\(\),c\.id,n,CASE WHEN n%2=0 THEN c\.lower_member_id ELSE c\.higher_member_id END,gen_random_uuid\(\),repeat\('x',1024\) FROM channels c CROSS JOIN generate_series\(1,100\) n WHERE c\.organization_id='\1' AND c\.id=ANY\(ARRAY\[((?:'[0-9a-f-]{36}'::uuid,?)+)\]\);\n([\s\S]*)\nCOMMIT;$/.exec(input);
-  assert.ok(match, 'unexpected formal batch SQL');
-  const ids = [...match[2]!.matchAll(/'([0-9a-f-]{36})'::uuid/g)].map(id => id[1]!);
-  assert.equal(match[3], createLog(match[1]!, ids));
-  assert.doesNotMatch(input, /clock_timestamp/);
-}
 
 for (const [scenario, diagnostic] of [
   ['healthy', false], ['slow batch', false], ['slow Organization', false], ['healthy', true],
@@ -79,11 +70,10 @@ for (const [scenario, diagnostic] of [
       assert.deepEqual(args, [...originPsql, '-q', '-A', '-t']);
       assert.ok(raw.endsWith("\nSELECT 'db-end', round(extract(epoch FROM clock_timestamp()) * 1000, 3);"));
       // Every statement of the batch session logs one duration line; the DB log join expects exactly these.
-      assert.equal(raw.replace(/DO \$fixture_create_log\$[\s\S]*?END \$fixture_create_log\$;/, 'DO;').match(/;\s*(?=\n|$)/g)?.length, batchServerStatements.max);
+      assert.equal(raw.match(/;\s*(?=\n|$)/g)?.length, batchServerStatements.max);
     } else {
-      // Formal (and every non-batch) call is the origin/main command: same psql arguments, stdout ignored, same SQL.
+      // Formal calls keep the original psql arguments and ignore stdout.
       assert.deepEqual([args, stdio], [originPsql, ['pipe', 'ignore', 'inherit']]);
-      if (raw.startsWith('BEGIN;\nINSERT INTO messages(') && !raw.includes("'seed'")) assertOriginBatch(raw);
     }
     const input = timed ? raw.split('\n').slice(2, -1).join('\n') : raw;
     const before = now;
@@ -91,7 +81,7 @@ for (const [scenario, diagnostic] of [
       organizationIndex++;
       batchIndex = 0;
     }
-    if (input.startsWith('BEGIN;\nINSERT INTO messages(')) {
+    if (input.startsWith('INSERT INTO messages(')) {
       now += batchIndex === 0 ? 20_000 : scenario === 'slow batch' && organizationIndex === 1 && batchIndex === 1 ? 6_001 : 2_000;
       if (scenario === 'SQL failure' && organizationIndex === 1 && batchIndex === 1) {
         throw new Error('INSERT INTO account_sessions private-token');
@@ -102,7 +92,7 @@ for (const [scenario, diagnostic] of [
     } else {
       now++;
     }
-    for (const statement of input.matchAll(/INSERT INTO organizations\(|INSERT INTO messages\(|DO \$fixture_create_log\$|ANALYZE messages, channel_log;/g)) {
+    for (const statement of input.matchAll(/INSERT INTO organizations\(|INSERT INTO messages\(|ANALYZE messages, channel_log;/g)) {
       events.push(statement[0]);
     }
     if (input === 'VACUUM(ANALYZE);') events.push(input);
@@ -120,13 +110,13 @@ for (const [scenario, diagnostic] of [
     syncBuiltinESMExports();
   }
 
-  const batch = ['INSERT INTO messages(', 'DO $fixture_create_log$'];
+  const batch = 'INSERT INTO messages(';
   const organization = [
-    'INSERT INTO organizations(', ...batch, 'ANALYZE messages, channel_log;',
-    ...Array.from({ length: 200 }, () => batch).flat(),
+    'INSERT INTO organizations(', batch, 'ANALYZE messages, channel_log;',
+    ...Array.from({ length: 200 }, () => batch),
   ];
   const expected = scenario === 'healthy' ? [...organization, ...organization, ...organization, 'VACUUM(ANALYZE);']
-    : [...organization, ...(scenario === 'slow batch' ? organization.slice(0, 6) : scenario === 'SQL failure' ? organization.slice(0, 4) : organization)];
+    : [...organization, ...(scenario === 'slow batch' ? organization.slice(0, 4) : scenario === 'SQL failure' ? organization.slice(0, 3) : organization)];
   assert.deepEqual(events, expected);
 
   const path = join(output, 'seed-timing.jsonl');

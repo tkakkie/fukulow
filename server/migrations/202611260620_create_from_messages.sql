@@ -1,8 +1,7 @@
 -- Run as the owner with the app stopped. SQLx wraps the complete swap in one transaction.
 -- phase: lock
 SET LOCAL row_security = off;
-LOCK TABLE public.messages, public.channel_log IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.channel_message_sequences IN SHARE MODE;
+LOCK TABLE public.channel_message_sequences, public.messages, public.channel_log IN ACCESS EXCLUSIVE MODE;
 
 -- phase: validate
 DO $$

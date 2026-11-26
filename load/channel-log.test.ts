@@ -15,13 +15,17 @@ const files = (dir: string): string[] => readdirSync(dir).flatMap(name => {
   return statSync(path).isDirectory() ? files(path) : [path];
 });
 
-test('every replayable fixture that inserts Messages directly appends their Create log', () => {
+test('direct Message fixtures append Create rows only when supporting the legacy log schema', () => {
   const seeding = files(root).filter(path => /\.(ts|sql)$/.test(path) && !path.endsWith('.test.ts'))
     .map(path => relative(root, path)).filter(path => /INSERT INTO messages\s*\(/i.test(readFileSync(join(root, path), 'utf8')));
   const replayable = seeding.filter(path => !noReplay.some(prefix => path.startsWith(prefix)));
   assert.deepEqual(replayable.sort(), ['dms-formal-seed.ts', 'dms-history.ts', 'dms-seed.ts',
     'move/fixture.ts', 'slice5/fixture.ts']);
-  for (const path of replayable) assert.match(readFileSync(join(root, path), 'utf8'), /createLog\(org, /, path);
+  for (const path of replayable) {
+    const source = readFileSync(join(root, path), 'utf8');
+    if (path === 'dms-formal-seed.ts') assert.doesNotMatch(source, /createLog\(|INSERT INTO channel_log/i, path);
+    else assert.match(source, /createLog\(org, /, path);
+  }
 });
 
 test('createLog appends scoped positions only for the legacy log schema', () => {
