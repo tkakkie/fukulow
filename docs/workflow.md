@@ -48,7 +48,7 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 
 ## 4. Roles, models, effort
 - Principles (#638, #1035): no Fable; the orchestrator runs at `medium`, moving to a fresh session via a `handoff/` note after long work; `high` only for H1–H3 or security implementation, never `xhigh` or `max`; the reviewer is always a different vendor from the author; spread credit use across the three AIs.
-- Models: Claude `claude-opus-5-5`. Codex `gpt-6.2-sol`; `gpt-6.2-astra` only after two failed sol attempts (Failures below). Antigravity `gemini-4-neon-medium` and `gemini-4-neon-low`, `gemini-4-hydrogen-low` for chores; Neon `high`/`xhigh` unused.
+- Models: Claude `claude-opus-5-5`, round-2 reviews `claude-sonnet-5-5`. Codex `gpt-6.2-sol`; `gpt-6.2-astra` only after two failed sol attempts (Failures below). Antigravity `gemini-4-neon-medium` and `gemini-4-neon-low`, `gemini-4-hydrogen-low` for chores; Neon `high`/`xhigh` unused.
 - Choose in order; the first match decides.
   1. Risk: H1–H3 or security implementation -> sol `high`; quota labels never move it. Design, Issues and contract design for it still follow step 2 row 1. Judge from the whole Issue and touched files, never size alone. A worker finding H1–H3 or security relevance stops and reports without raising its effort; the orchestrator restarts with sol `high` (under `quota:codex-low`: `status:needs-decision`). H4–H6 stay `medium` with independent review. List H numbers (or "none") in the PR body.
      - H1 auth, permissions, Organization separation, sessions.
@@ -61,19 +61,20 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 
      | Row | Work | Owner |
      |---|---|---|
-     | 1 | design, Issues, API contract design (`openapi.json` stays generated from Rust), docs, measurement records | Claude |
+     | 1 | design, Issues, API contract design (`openapi.json` stays Rust-generated) | Claude |
      | 2 | Rust (server, DB, client-core) | Codex sol |
      | 3 | web (Svelte, state modules, E2E) | Antigravity Neon |
      | 4 | `load/` harness, cross-cutting test infrastructure, CI scripts | Codex sol |
-     | 5 | mechanical, behaviour-preserving CI, conflict and type fixes | Antigravity Hydrogen |
+     | 5 | docs, measurement records | Claude |
+     | 6 | mechanical, behaviour-preserving CI, conflict and type fixes | Antigravity Hydrogen |
   3. Effort: `low` only for behaviour-preserving work (wording or typo doc edits, copy, type and lint fixes, conflicts without logic changes, round-2 delta checks, Hydrogen chores). `medium` for everything else, including any edit to `docs/spec*`, `docs/decisions*` or `docs/invariants*`, and when unsure. Line or file counts never change effort; effort is fixed at launch.
-- Reviewers by author, round 1 `medium` / round 2 `low` (never `high`): Codex -> Neon, but H1 or security -> fresh Claude subagent (Opus, round 2 Sonnet); Antigravity -> sol; Claude -> Neon. The author's AI fixes findings. Round 2 stays with the round-1 reviewer's AI. The orchestrator may do round 2 itself for a small fix only when the author is not Claude.
+- Reviewers by author, round 1 `medium` / round 2 `low` (never `high`): Codex -> Neon, but H1 or security -> fresh Claude subagent; Antigravity -> sol; Claude -> Neon. The author's AI fixes findings. Round 2 stays with the round-1 reviewer's AI. The orchestrator may do round 2 itself for a small fix only when the author is not Claude.
 - A Claude reviewer is a fresh subagent given only the diff, Issue "Done when", relevant spec, decisions, invariants and approved criteria, never orchestrator conclusions or other reviews (#505). Sign `AI: Claude Code (subagent) / model: <id> / effort: <level>`.
 - Changes to `load/` measurement validity, judgement, gates or aggregation (not run procedure alone) get an extra review at the same efforts: Neon, or sol when the author is Antigravity. One review covers both when the two reviewers are the same AI.
 - Quota labels: the maintainer sets them (guide: under about 30% of the weekly allowance); AIs act on the labels only.
   - `quota:codex-low`: non-H Rust and row 4 -> Claude `medium`, reviewed by Neon `medium`.
   - `quota:agy-low`: web -> Claude `medium`, reviewed by sol `medium`; chores -> sol `low`.
-  - `quota:claude-low`: measurement and high-risk reviews -> Neon `medium`; docs and records -> sol `medium`; design stays with Claude.
+  - `quota:claude-low`: H1/security reviews -> Neon `medium`; docs and records -> sol `medium`; design stays with Claude.
   - Reviews never move to the author's vendor; the third vendor reviews then, even if labelled (reviews are the last work a low-credit AI keeps). Two labels: the remaining AI implements all non-H work. Three labels, or H1–H3 or security work under `quota:codex-low`: `status:needs-decision`.
 - Failures: a substantive attempt that misses "Done when"; one failing test or CI run does not count, and a stuck run (§7) is reported, not counted, unless restarted here. First failure -> same model and effort with the failure details. Second sol failure (any effort) -> astra `medium`, reason in the Issue. Astra failure -> `status:needs-decision`. Second Neon failure -> Claude `medium` (`status:needs-decision` under `quota:claude-low`). Second Hydrogen failure -> its rows 2–4 owner at `medium`. Second Claude failure, or a failure after any escalation -> `status:needs-decision`.
 - The comment that sets `status:ready` records `Assigned: <name> / model: <id> / effort: <level> / H: <numbers or none>`. The worker follows it and does not re-choose. A later quota label overrides it, and the orchestrator posts a new `Assigned:` line.
