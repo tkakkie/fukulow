@@ -17,6 +17,7 @@ import { clientScope, placementEnabled } from './revocation-holds-placement.ts';
 import { preflightLedgerPath, recordPreflight } from './revocation-holds-preflight-ledger.ts';
 import { preflightSession } from './revocation-holds-preflight-session.ts';
 import { collectSessionIdentity, type SessionIdentity } from './revocation-holds-provenance.ts';
+import { parseSendBuffer, SEND_BUFFER_ENV } from './revocation-measured-server.ts';
 
 const checkout = resolve(import.meta.dirname, '..');
 const binary = resolve(checkout, 'target/release/fukulow-server');
@@ -34,6 +35,7 @@ if (args.includes('--help')) {
     'Options after preflight: --out /absolute/new/dir --preflight-result /absolute/path/preflight.json [--session ID]',
     '  [--rehearsal | --overhead | --overhead-summary <summary.json>] [--cells ...] [--durations short,long]',
     'Use a clean checkout and the same server and stall-helper binaries on the same boot.',
+    `Set ${SEND_BUFFER_ENV} to the calibrated request in bytes for every stage.`,
     'Use the same host ledger across stages. The default is revocation-holds-preflights.<hostname>.ndjson beside the output directory. Override with --preflight-ledger /absolute/path.',
     'Use FUKULOW_LAUNCH_SESSION or choose a fresh --session ID for each measurement session.',
   ].join('\n'));
@@ -61,6 +63,7 @@ if (preflight && (!session || args.includes('--preflight-result'))) throw new Er
 const preflightFile = value('--preflight-result');
 const options = parseOptions(overhead ? [...args, '--rehearsal'] : args);
 const mode = preflight ? 'preflight' : overhead ? 'overhead' : options.rehearsal ? 'rehearsal' : 'formal';
+const sendBuffer = parseSendBuffer(process.env[SEND_BUFFER_ENV]);
 const linuxPlacement = placementEnabled(platform(), mode);
 const output = outsideCheckout(options.out);
 const host = hostname();
@@ -78,7 +81,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => {
 const readIdentity = async () => {
   if (process.version !== 'v26.13.1') throw new Error('Use Node 26.13.1');
   if (!existsSync(binary)) throw new Error('Build the release server first: cargo build --release --locked -p fukulow-server');
-  const identity = await collectSessionIdentity({ session, checkout, binary, helperBinary });
+  const identity = await collectSessionIdentity({ session, checkout, binary, helperBinary, sendBuffer });
   if (interrupted) throw new Error('Measurement interrupted');
   return identity;
 };
@@ -189,7 +192,7 @@ try {
   if (preflight) {
     const result = await recordPreflight(ledger, output, { hostname: host, session }, readIdentity, (identity, saveProgress) => {
       save('environment.json', environmentFor(identity));
-      const context = contextFor({ kind: 'preflight' });
+      const context = contextFor({ kind: 'preflight', sendBuffer });
       return preflightSession(identity, (trial, id) => {
         console.log(`#668 preflight ${id}`);
         return runAttempt({ ...context, preflightVolume: trial.volume }, trial.run, id);

@@ -1,4 +1,5 @@
 import * as api from './api'
+import { markChannelsRead } from './channels'
 import { createRequestDeadlines } from './request-deadlines'
 import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
 import type { createSync } from './sync'
@@ -12,12 +13,12 @@ export type { UnreadScope } from './unread-counts'
 
 type Sync = ReturnType<typeof createSync>
 export type UnreadApi = {
-  listChannels(signal?: AbortSignal): Promise<Result<ChannelList>>
+  listChannels(signal?: AbortSignal, readId?: string): Promise<Result<ChannelList>>
   markRead(scope: UnreadScope, body: MarkReadRequest): Promise<Result<ReadPosition>>
   getTopicSummary(channel: string, topic: string): Promise<Result<TopicSummaryResponse>>
 }
 export const unreadApi = (org: string, generation: () => string | undefined = () => undefined): UnreadApi => ({
-  listChannels: signal => api.listChannels(org, undefined, signal, { history_generation: generation() }),
+  listChannels: (signal, readId) => api.listChannels(org, undefined, signal, { history_generation: generation() }, readId),
   markRead: (s, body) => s.topicId === null ? api.markChannelRead(org, s.channel, body) : api.markTopicRead(org, s.channel, s.topicId, body),
   getTopicSummary: (c, t) => api.getTopicSummary(org, c, t, undefined, undefined, { history_generation: generation() }),
 })
@@ -204,7 +205,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const token = Symbol(), generation = epoch, number = ++issue
     list = token
     const tokens = new Map([...channels].filter(([id, c]) => eligible(id, c)).map(([id, c]) => [id, c.token]))
-    const r = await request(() => options.api.listChannels())
+    const r = await request(() => options.api.listChannels(undefined, markChannelsRead([discovering ? 'initial' : 'reconcile'])))
     if (!active() || generation !== epoch || list !== token) return
     list = undefined
     if (r.ok) {

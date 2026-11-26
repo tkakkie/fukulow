@@ -4,10 +4,12 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { acceptedPreflight, preflightIdentity as identity, preflightReadbackValue } from './revocation-holds-preflight-fixture.ts';
+import { acceptedPreflight, preflightIdentity as identity, preflightReadbackValue, preflightSendBuffer } from './revocation-holds-preflight-fixture.ts';
 import { preflightLedgerPath, recordPreflight } from './revocation-holds-preflight-ledger.ts';
 import { requirePreflight, SetupAbort } from './revocation-holds-setup.ts';
 import type { SessionIdentity } from './revocation-holds-provenance.ts';
+
+const expectedReadbacks = { receiveBuffer: preflightReadbackValue, sendBuffer: preflightSendBuffer };
 
 function outputs(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'revocation-ledger-'));
@@ -41,7 +43,7 @@ test('SA2 accepts an exact passing artifact only with a readable matching ledger
   assert.deepEqual(JSON.parse(data.toString('utf8')).identity, identity);
   assert.equal(entries().at(-1).status, 'passed');
   assert.equal(entries().at(-1).artifactSha256, hash('sha256', data));
-  assert.equal(readback(artifact), preflightReadbackValue);
+  assert.deepEqual(readback(artifact), expectedReadbacks);
   assert.throws(() => requirePreflight({ kind: 'measured', identity, ledger: `${ledger}.missing`, preflightFile: artifact }), SetupAbort);
   for (const patch of [{ bootId: 'rebooted' }, { serverSha256: 'c'.repeat(64) }, { stallHelperSha256: 'd'.repeat(64) }, { gitClean: false }]) {
     assert.throws(() => readback(artifact, { ...identity, ...patch }), SetupAbort, JSON.stringify(patch));
@@ -59,7 +61,7 @@ test('only the latest result for the same host and session can authorize SA2', a
   for (const [name, patch] of [['other-host', { hostname: 'second-host' }], ['other-session', { session: 'second-session' }]] as const) {
     const other = { ...identity, ...patch };
     await recordPreflight(ledger, stage(name).output, other, async () => other, fail);
-    assert.equal(readback(artifact), preflightReadbackValue, name);
+    assert.deepEqual(readback(artifact), expectedReadbacks, name);
   }
   const later = stage('later');
   await recordPreflight(ledger, later.output, identity, async () => identity, fail);
@@ -69,7 +71,7 @@ test('only the latest result for the same host and session can authorize SA2', a
 
   const fresh = stage('fresh');
   await recordPreflight(ledger, fresh.output, identity, async () => identity, pass);
-  assert.equal(readback(fresh.artifact), preflightReadbackValue);
+  assert.deepEqual(readback(fresh.artifact), expectedReadbacks);
   assert.throws(() => readback(artifact), SetupAbort, 'a newer passing artifact supersedes the old one');
 });
 

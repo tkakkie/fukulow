@@ -4,7 +4,7 @@ import { createReadStream, readFileSync } from 'node:fs';
 import { arch, cpus, hostname, platform, release, totalmem } from 'node:os';
 
 export type SessionIdentity = {
-  session: string; commit: string; node: string;
+  session: string; commit: string; node: string; sendBuffer: number;
   hostname: string; platform: string; arch: string; cpus: number; memoryBytes: number; release: string;
   gitClean: boolean; bootId: string; serverSha256: string; stallHelperSha256: string;
 };
@@ -30,7 +30,7 @@ async function binarySha256(path: string) {
 }
 
 export async function collectSessionIdentity(
-  { session, checkout, binary, helperBinary }: { session: string; checkout: string; binary: string; helperBinary: string },
+  { session, checkout, binary, helperBinary, sendBuffer }: { session: string; checkout: string; binary: string; helperBinary: string; sendBuffer: number },
   command = stdout,
 ): Promise<SessionIdentity> {
   if (command('git', ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'], checkout) !== '') {
@@ -41,14 +41,14 @@ export async function collectSessionIdentity(
   const bootId = readBootId(os);
   const [serverSha256, stallHelperSha256] = await Promise.all([binarySha256(binary), binarySha256(helperBinary)]);
   return {
-    session, commit, node: process.version, hostname: hostname(), platform: os, arch: arch(), cpus: cpus().length,
+    session, commit, node: process.version, sendBuffer, hostname: hostname(), platform: os, arch: arch(), cpus: cpus().length,
     memoryBytes: totalmem(), release: release(), gitClean: true, bootId, serverSha256, stallHelperSha256,
   };
 }
 
 export function sameSessionIdentity(saved: SessionIdentity, current: SessionIdentity): boolean {
   const keys = ['session', 'commit', 'node', 'hostname', 'platform', 'arch', 'cpus', 'memoryBytes', 'release',
-    'bootId', 'serverSha256', 'stallHelperSha256'] as const;
+    'bootId', 'serverSha256', 'stallHelperSha256', 'sendBuffer'] as const;
   return Boolean(current.session) && saved.gitClean === true && current.gitClean === true &&
     keys.every(key => saved[key] === current[key]);
 }

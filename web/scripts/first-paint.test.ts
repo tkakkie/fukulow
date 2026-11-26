@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { MiniDocument, MiniElement } from '../src/svelte-dom-test-helpers.ts'
+import * as firstPaintModule from './first-paint.ts'
 import {
   AUTHOR_LOOKUP_API_PATH,
   DIRECTORY_API_PATH,
@@ -16,6 +17,7 @@ import {
   type MilestoneProbe,
   type RunMetrics,
 } from './first-paint.ts'
+import { summarizeReportChannelReads } from './read-reasons.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 
@@ -67,18 +69,27 @@ function withProbeGlobals<T>(fn: (ctx: {
   g.MutationObserver = FakeMutationObserver
   g.PerformanceObserver = FakePerformanceObserver
   g.requestAnimationFrame = (cb: () => void) => { cb(); return 1 }
+  const restore = () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete g[k]
+      else g[k] = v
+    }
+  }
   try {
-    return fn({
+    const result = fn({
       doc,
       win,
       triggerMutation: () => { for (const cb of mutationCallbacks) cb() },
       mutationOptions,
     })
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete g[k]
-      else g[k] = v
+    if (result instanceof Promise) {
+      return result.finally(restore) as T
     }
+    restore()
+    return result
+  } catch (err) {
+    restore()
+    throw err
   }
 }
 
@@ -290,6 +301,14 @@ describe('first-paint measurement diagnostics (#954 R1)', () => {
       directoryStartMs: null,
       authorLookupStartMs: 190,
       apiCalls: [],
+      channelReads: {
+        valid: true,
+        status: 'valid',
+        invalidReasons: [],
+        reads: [],
+        countsByClass: { 'O5-only': 0, startup: 0, composite: 0, empty: 0, unknown: 0 },
+        countedReads: 0,
+      },
       timingChain: [],
     }
     const summary = summarizeCell('/', '/', 'throttled', 'cold', [baseRun])
@@ -351,5 +370,294 @@ describe('first-paint measurement diagnostics (#954 R1)', () => {
         checkoutSha,
       }),
     ).toBe(checkoutSha)
+  })
+
+  it('captures x-fukulow-read-id headers and pairs them one-to-one with fukulow:read:channels marks', async () => {
+    performance.clearMarks('fukulow:read:channels')
+    try {
+      await withProbeGlobals(({ win }) => (async () => {
+        installFirstPaintProbe({ expectedOrg: 'org-1', expectedChannel: 'ch-1' })
+        const fetchFn = win.fetch as typeof fetch
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-1', reasons: ['initial'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-1' } })
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-2', reasons: ['periodic'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels?history_generation=g1', { headers: { 'x-fukulow-read-id': 'ch-2' } })
+        // Archived channel list requests carry their own read id and mark and are classified too.
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-3', reasons: ['reconcile'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels?archived=true', { headers: { 'x-fukulow-read-id': 'ch-3' } })
+
+        const probe = win.__fp345 as Record<string, unknown>
+        Object.assign(probe, {
+          appMountMs: 100,
+          fcpMs: 90,
+          timelineVisibleMs: 200,
+          timelinePaintedMs: 210,
+          firstNamedRowMs: 220,
+          wsConnectStartMs: 110,
+          wsOpenMs: 120,
+          wsSubscribeSentMs: 125,
+          wsSubscribedMs: 140,
+        })
+        const page = {
+          waitForFunction: vi.fn(async () => undefined as never),
+          evaluate: vi.fn(async (fn: typeof extractRunMetricsInPage, arg: Parameters<typeof extractRunMetricsInPage>[0]) => {
+            return await fn(arg)
+          }),
+        }
+        const metrics = await collectRunMetrics(page as never, {
+          runNumber: 1,
+          expectedOrg: 'org-1',
+          expectedChannel: 'ch-1',
+          diagnosticTimeoutMs: 50,
+        })
+        expect(metrics.channelReads.valid).toBe(true)
+        expect(metrics.channelReads.countsByClass).toEqual({
+          'O5-only': 1,
+          startup: 2,
+          composite: 0,
+          empty: 0,
+          unknown: 0,
+        })
+        expect(metrics.channelReads.countedReads).toBe(2)
+        expect(metrics.channelReads.reads).toEqual([
+          { seq: 1, readId: 'ch-1', reasons: ['initial'], classification: 'startup', counted: true },
+          { seq: 2, readId: 'ch-2', reasons: ['periodic'], classification: 'O5-only', counted: false },
+          { seq: 3, readId: 'ch-3', reasons: ['reconcile'], classification: 'startup', counted: true },
+        ])
+      })())
+    } finally {
+      performance.clearMarks('fukulow:read:channels')
+    }
+  })
+
+  it('captures requests and marks at the same cutoff so a labelled read issued during the settle wait never becomes an orphan mark', async () => {
+    performance.clearMarks('fukulow:read:channels')
+    try {
+      await withProbeGlobals(({ win }) => (async () => {
+        let releaseSlowMembers!: () => void
+        const slowMembers = new Promise<Response>((resolve) => {
+          releaseSlowMembers = () => resolve(new Response('{}', { status: 200 }))
+        })
+        win.fetch = vi.fn(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith('/members')) return slowMembers
+          return new Response('{}', { status: 200 })
+        })
+        installFirstPaintProbe({ expectedOrg: 'org-1', expectedChannel: 'ch-1' })
+        const fetchFn = win.fetch as typeof fetch
+
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-1', reasons: ['initial'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-1' } })
+        // Start an in-flight /members request so extractRunMetricsInPage enters the settle wait.
+        const membersPromise = fetchFn('/api/v1/orgs/org-1/members')
+
+        const probe = win.__fp345 as Record<string, unknown>
+        Object.assign(probe, {
+          appMountMs: 100,
+          fcpMs: 90,
+          timelineVisibleMs: 200,
+          timelinePaintedMs: 210,
+          firstNamedRowMs: 220,
+          wsConnectStartMs: 110,
+          wsOpenMs: 120,
+          wsSubscribeSentMs: 125,
+          wsSubscribedMs: 140,
+        })
+        const page = {
+          waitForFunction: vi.fn(async () => undefined as never),
+          evaluate: vi.fn(async (fn: typeof extractRunMetricsInPage, arg: Parameters<typeof extractRunMetricsInPage>[0]) => {
+            const pending = fn(arg)
+            // Issue a labelled Channel list read during the settle wait, then let /members finish.
+            await Promise.resolve()
+            performance.mark('fukulow:read:channels', { detail: { id: 'ch-during-wait', reasons: ['periodic'] } })
+            await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-during-wait' } })
+            releaseSlowMembers()
+            await membersPromise
+            return await pending
+          }),
+        }
+        const metrics = await collectRunMetrics(page as never, {
+          runNumber: 1,
+          expectedOrg: 'org-1',
+          expectedChannel: 'ch-1',
+          diagnosticTimeoutMs: 500,
+        })
+        expect(metrics.channelReads.valid).toBe(true)
+        expect(metrics.channelReads.invalidReasons).toEqual([])
+        expect(metrics.channelReads.reads).toEqual([
+          { seq: 1, readId: 'ch-1', reasons: ['initial'], classification: 'startup', counted: true },
+        ])
+      })())
+    } finally {
+      performance.clearMarks('fukulow:read:channels')
+    }
+  })
+
+  it('keeps invalid run timings in the cell summary unchanged, marks cell and report invalid, and reports a 3-counted-read invalid run', () => {
+    const makeRun = (
+      run: number,
+      overrides: {
+        fcpMs: number
+        timelineVisibleMs: number
+        channelReads: RunMetrics['channelReads']
+      },
+    ): RunMetrics => ({
+      run,
+      ttfbMs: 10,
+      htmlEndMs: 20,
+      htmlTransferBytes: 1000,
+      fcpMs: overrides.fcpMs,
+      blankScreenMs: overrides.fcpMs,
+      jsEndMs: 100,
+      cssEndMs: 80,
+      wasmEndMs: 110,
+      assetsEndMs: 110,
+      assetsTransferBytes: 50000,
+      appMountMs: 150,
+      wsConnectStartMs: 160,
+      wsOpenMs: 180,
+      wsSubscribeSentMs: 185,
+      wsSubscribedMs: 210,
+      timelineVisibleMs: overrides.timelineVisibleMs,
+      timelinePaintedMs: overrides.timelineVisibleMs + 15,
+      firstNamedRowMs: overrides.timelineVisibleMs + 20,
+      directoryStartMs: 330,
+      authorLookupStartMs: 190,
+      apiCalls: [],
+      channelReads: overrides.channelReads,
+      timingChain: [],
+    })
+
+    const validRun = makeRun(1, {
+      fcpMs: 120,
+      timelineVisibleMs: 280,
+      channelReads: {
+        valid: true,
+        status: 'valid',
+        invalidReasons: [],
+        reads: [
+          { seq: 1, readId: 'ch-1', reasons: ['initial'], classification: 'startup', counted: true },
+          { seq: 2, readId: 'ch-2', reasons: ['reconcile'], classification: 'startup', counted: true },
+        ],
+        countsByClass: { 'O5-only': 0, startup: 2, composite: 0, empty: 0, unknown: 0 },
+        countedReads: 2,
+      },
+    })
+    const invalidRun = makeRun(2, {
+      fcpMs: 420,
+      timelineVisibleMs: 950,
+      channelReads: {
+        valid: false,
+        status: 'invalid',
+        invalidReasons: ['unmatched_request'],
+        reads: [
+          { seq: 1, readId: 'ch-3', reasons: ['initial'], classification: 'startup', counted: true },
+          { seq: 2, readId: 'ch-4', reasons: ['reconcile'], classification: 'startup', counted: true },
+          { seq: 3, readId: 'ch-5', reasons: null, classification: 'unknown', counted: true },
+        ],
+        countsByClass: { 'O5-only': 0, startup: 2, composite: 0, empty: 0, unknown: 1 },
+        countedReads: 3,
+      },
+    })
+
+    const validCell = summarizeCell('/', '/', 'unthrottled', 'cold', [validRun])
+    const invalidCell = summarizeCell('/', '/', 'throttled', 'cold', [validRun, invalidRun])
+
+    // (i) Invalid run's timings enter the cell summary unchanged.
+    expect(invalidCell.runs).toBe(2)
+    expect(invalidCell.fcpMs).toEqual({ p50: 120, p90: 420, p95: 420, max: 420 })
+    expect(invalidCell.timelineVisibleMs).toEqual({ p50: 280, p90: 950, p95: 950, max: 950 })
+
+    // (ii) Invalid run makes the cell and report invalid (never valid or inconclusive).
+    expect(invalidCell.channelReads.valid).toBe(false)
+    expect(invalidCell.channelReads.status).toBe('invalid')
+    expect(invalidCell.channelReads.validRuns).toBe(1)
+    expect(invalidCell.channelReads.invalidRuns).toBe(1)
+
+    // (iii) The 3-counted-read invalid run remains visible in cell and report summaries.
+    expect(invalidCell.channelReads.maxCountedReadsPerRun).toBe(3)
+    expect(invalidCell.channelReads.countsByClass).toEqual({
+      'O5-only': 0,
+      startup: 4,
+      composite: 0,
+      empty: 0,
+      unknown: 1,
+    })
+    expect(invalidCell.channelReads.invalidRunReasons).toEqual([
+      { run: 2, reasons: ['unmatched_request'], countedReads: 3 },
+    ])
+
+    const reportReads = summarizeReportChannelReads([
+      { cell: '/|unthrottled|cold', channelReads: validCell.channelReads },
+      { cell: '/|throttled|cold', channelReads: invalidCell.channelReads },
+    ])
+    expect(reportReads.valid).toBe(false)
+    expect(reportReads.status).toBe('invalid')
+    expect(reportReads.validCells).toBe(1)
+    expect(reportReads.invalidCells).toEqual([
+      {
+        cell: '/|throttled|cold',
+        invalidRuns: 1,
+        invalidRunReasons: [{ run: 2, reasons: ['unmatched_request'], countedReads: 3 }],
+      },
+    ])
+  })
+
+  it('measures each run once without re-measuring on invalid channel reads', async () => {
+    // (iv) No rerun helper or inconclusive/rerunAttempted state exists in first-paint.ts.
+    expect('measureRunWithInvalidityRerun' in firstPaintModule).toBe(false)
+    const source = readFileSync(resolve(root, 'web/scripts/first-paint.ts'), 'utf8')
+    expect(source).not.toContain('measureRunWithInvalidityRerun')
+    expect(source).not.toContain('rerunAttempted')
+    expect(source).not.toContain('inconclusive')
+
+    // Behavioral check: collectRunMetrics evaluates the page exactly once even when reads are invalid.
+    performance.clearMarks('fukulow:read:channels')
+    try {
+      await withProbeGlobals(({ win }) => (async () => {
+        installFirstPaintProbe({ expectedOrg: 'org-1', expectedChannel: 'ch-1' })
+        const fetchFn = win.fetch as typeof fetch
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-1', reasons: ['initial'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-1' } })
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-2', reasons: ['reconcile'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-2' } })
+        // Third request has no matching mark -> invalid run with 3 counted reads.
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-unpaired' } })
+
+        const probe = win.__fp345 as Record<string, unknown>
+        Object.assign(probe, {
+          appMountMs: 100,
+          fcpMs: 90,
+          timelineVisibleMs: 200,
+          timelinePaintedMs: 210,
+          firstNamedRowMs: 220,
+          wsConnectStartMs: 110,
+          wsOpenMs: 120,
+          wsSubscribeSentMs: 125,
+          wsSubscribedMs: 140,
+        })
+        const evaluate = vi.fn(async (fn: typeof extractRunMetricsInPage, arg: Parameters<typeof extractRunMetricsInPage>[0]) => {
+          return await fn(arg)
+        })
+        const page = {
+          waitForFunction: vi.fn(async () => undefined as never),
+          evaluate,
+        }
+        const metrics = await collectRunMetrics(page as never, {
+          runNumber: 1,
+          expectedOrg: 'org-1',
+          expectedChannel: 'ch-1',
+          diagnosticTimeoutMs: 50,
+        })
+        expect(evaluate).toHaveBeenCalledTimes(1)
+        expect(metrics.timelineVisibleMs).toBe(200)
+        expect(metrics.channelReads.valid).toBe(false)
+        expect(metrics.channelReads.status).toBe('invalid')
+        expect(metrics.channelReads.invalidReasons).toEqual(['unmatched_request'])
+        expect(metrics.channelReads.countedReads).toBe(3)
+      })())
+    } finally {
+      performance.clearMarks('fukulow:read:channels')
+    }
   })
 })
