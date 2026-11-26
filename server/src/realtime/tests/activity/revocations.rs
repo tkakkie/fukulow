@@ -14,6 +14,8 @@ use crate::{
 use futures_util::FutureExt;
 use std::{future::Future, pin::Pin, sync::Arc};
 
+mod admission;
+
 #[test]
 fn send_measurement_records_delivered_revocation_only() {
     // The production subscriber is process-wide. Other connection tests reach the same
