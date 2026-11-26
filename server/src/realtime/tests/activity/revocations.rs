@@ -46,8 +46,7 @@ fn send_measurement_records_delivered_revocation_only() {
 #[fukulow_test::test]
 #[ignore = "subprocess helper with a global measurement subscriber"]
 async fn send_measurement_child(pool: PgPool) {
-    let output = crate::observability::tests::Capture::default();
-    tracing::subscriber::set_global_default(output.measurement_subscriber()).unwrap();
+    let output = crate::observability::tests::Capture::install_global_measurement();
     let case = Case::new(&pool, false, Later::Regrant).await;
     let mut socket = connect(&case.f, &case.token).await;
     let sent = || {
