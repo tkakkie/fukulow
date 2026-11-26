@@ -85,7 +85,7 @@ try {
     competingContainers:docker('ps','--format','{{.Names}}\t{{.Image}}\t{{.Status}}'),
     postgres:db.sql('SELECT version();'),settings:JSON.parse(db.sql(`SELECT json_object_agg(name,setting) FROM pg_settings WHERE name IN ('shared_buffers','work_mem','jit','synchronous_commit','fsync','full_page_writes','max_connections','wal_level')`)),
     migrations:JSON.parse(db.sql('SELECT json_agg(t) FROM (SELECT version,encode(checksum,\'hex\') checksum FROM _sqlx_migrations ORDER BY version)t','base')),
-    sourceHashes:Object.fromEntries([...readdirSync('load/unread-init').filter(n=>/\.(ts|sql)$/.test(n)).map(n=>'load/unread-init/'+n),...readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).map(n=>'server/migrations/'+n),'server/src/messages/unread.rs','server/src/messages/topics/projection.rs'].map(n=>[n,createHash('sha256').update(readFileSync(n)).digest('hex')]))};
+    sourceHashes:Object.fromEntries([...readdirSync('load/unread-init').filter(n=>/\.(ts|sql)$/.test(n)).map(n=>'load/unread-init/'+n),...readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).map(n=>'server/migrations/'+n),'server/src/messages/unread/counts.rs','server/src/messages/topics/projection.rs'].map(n=>[n,createHash('sha256').update(readFileSync(n)).digest('hex')]))};
   save('metadata.json',metadata);
   for(let index=0;index<points.length;index++) {
     check();const p=points[index];console.log(`Point ${index+1}/${points.length}: ${JSON.stringify(p)}`);
