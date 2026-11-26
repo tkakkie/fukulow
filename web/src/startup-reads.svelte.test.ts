@@ -3,6 +3,7 @@ import { createActivity } from './activity'
 import { createAuth } from './auth.svelte'
 import { createDms } from './dms'
 import type { ChannelList, DmChanges, DmList, Identity, MemberList, SectionLayout, ServerEvent, TimelinePage } from './api'
+import { deferred } from './topic-test-helpers'
 
 const ORG = '00000000-0000-4000-8000-000000000001'
 const CHANNEL = '00000000-0000-4000-8000-000000000010'
@@ -260,6 +261,60 @@ describe('Cold / startup REST read counts (#980)', () => {
         members: expectedMembers,
       })
       expect(h.dmLanes).toEqual(['delta', 'coverage'])
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+
+  it.each([
+    { order: 'Channel list first', readyFirst: false, revoked: false },
+    { order: 'Ready first', readyFirst: true, revoked: false },
+    { order: 'Ready first with access revoked before Ready', readyFirst: true, revoked: true },
+  ])('projects the startup Timeline without waiting for a debounce: $order', async ({ readyFirst, revoked }) => {
+    const initial = deferred<Response>()
+    const replacement = deferred<Response>()
+    const snapshot = channelList()
+    snapshot.channels[0].visibility = 'private'
+    const h = installHarness({
+      onFetch(path, url) {
+        if (path === `/api/v1/orgs/${ORG}/channels` && !url.searchParams.has('archived')) {
+          return h.counts.channels === 1 ? initial.promise : replacement.promise
+        }
+      },
+    })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      const session = auth.session!
+      const socket = h.open(0)
+      const projection = session.topics(CHANNEL)
+      expect(h.counts.channels).toBe(1)
+      if (readyFirst) socket.emit({ type: 'activity_ready' })
+      expect(h.counts.channels).toBe(1)
+
+      initial.resolve(json(snapshot))
+      await flush()
+      if (readyFirst) {
+        expect(session.channels.state).toMatchObject({ selectedId: null, channels: [] })
+        expect(projection.state.lines).toEqual([])
+        expect(h.counts.channels).toBe(2)
+        replacement.resolve(json(revoked ? { ...snapshot, channels: [] } : snapshot))
+        await flush()
+      }
+
+      if (revoked) {
+        expect(session.channels.state).toMatchObject({ status: 'ready', selectedId: null, channels: [] })
+        expect(projection.state.lines).toEqual([])
+        expect(socket.sent.map(frame => JSON.parse(frame))).not.toContainEqual(expect.objectContaining({ type: 'subscribe', channel_id: CHANNEL }))
+      } else {
+        expect(session.channels.state.selectedId).toBe(CHANNEL)
+        expect(projection.state.lines).toMatchObject([{ kind: 'message', message: { id: 'm1' } }])
+      }
+
+      if (!readyFirst) socket.emit({ type: 'activity_ready' })
+      expect(h.counts.channels).toBe(readyFirst ? 2 : 1)
     } finally {
       auth.session?.close()
       auth.members?.close()
