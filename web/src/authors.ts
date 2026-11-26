@@ -18,8 +18,10 @@ export function createAuthors(
 ) {
   let identities: ReadonlyMap<string, DisplayIdentity> = new Map()
   let observed = new Set<string>()
+  let observedChannel: string | undefined
   let attempted = new Set<string>()
-  let pending = new Set<string>()
+  const pending = new Set<string>()
+  const retryAfterConfirmation = new Set<string>()
   // Retained deactivated identities stay visible across directory loads while eligible for refresh.
   let stale = new Set<string>()
   let generation = 0
@@ -43,7 +45,7 @@ export function createAuthors(
   async function request() {
     const current = generation
     const ids = [...observed].filter(id => (!identities.has(id) || stale.has(id)) && !attempted.has(id))
-    ids.forEach(id => { attempted.add(id); if (!identities.has(id)) pending.add(id) })
+    ids.forEach(id => { attempted.add(id); pending.add(id) })
     await Promise.all(Array.from({ length: Math.ceil(ids.length / 100) }, async (_, index) => {
       const batch = ids.slice(index * 100, (index + 1) * 100)
       try {
@@ -69,13 +71,22 @@ export function createAuthors(
         identities = next
       } finally {
         if (!closed && current === generation) {
-          batch.forEach(id => pending.delete(id))
+          for (const id of batch) {
+            pending.delete(id)
+            if (retryAfterConfirmation.delete(id) && (!identities.has(id) || stale.has(id))) {
+              attempted.delete(id)
+              schedule()
+            }
+          }
           notify()
         }
       }
     }))
   }
-  function stop() { unavailable = true; generation++; clearGateTimer(); pending.clear(); notify() }
+  function fence() { generation++; pending.clear(); retryAfterConfirmation.clear() }
+  function stop() { unavailable = true; fence(); clearGateTimer(); notify() }
+  /** Channel selection and resubscription retry unresolved ids, keeping known identities. */
+  function retry() { if (!closed && !unavailable) { fence(); attempted.clear(); notify(); schedule() } }
   return {
     get: () => identities,
     mentionName(id: string, fallback: string, mentions: Message['mentions']) {
@@ -107,7 +118,7 @@ export function createAuthors(
     /** #315 can refetch the Member list via load(); every success calls this hook. */
     replaceMembers(members: Member[]) {
       if (closed || unavailable) return
-      generation++
+      fence()
       const next = new Map<string, DisplayIdentity>(members.map(member => {
         rememberIdentityResponse(member)
         const identity = { id: member.id, name: member.name, deactivated: false }
@@ -122,15 +133,30 @@ export function createAuthors(
         }
       }
       identities = next
-      attempted = new Set()
-      pending = new Set()
+      attempted.clear()
       notify()
       schedule()
     },
-    watch(ids: Iterable<string>) { observed = new Set(ids); schedule() },
-    /** Channel selection and reconnect retry unresolved ids, keeping known identities. */
-    retry() { if (!closed && !unavailable) { generation++; attempted = new Set(); pending = new Set(); notify(); schedule() } },
+    watch(ids: Iterable<string>, channel?: string) {
+      observed = new Set(ids)
+      observedChannel = channel
+      schedule()
+    },
+    selectChannel(channel: string | null) {
+      if (channel !== observedChannel) observed.clear()
+      retry()
+    },
+    /** Initial confirmation retries omissions without replacing requests already in flight. */
+    confirmInitialSubscription() {
+      if (closed || unavailable) return
+      attempted = new Set(pending)
+      pending.forEach(id => retryAfterConfirmation.add(id))
+      notify()
+      schedule()
+    },
+    invalidate() { if (!closed && !unavailable) { fence(); notify() } },
+    retry,
     unavailable: stop,
-    close() { closed = true; generation++; clearGateTimer(); identities = new Map(); observed.clear(); pending.clear(); stale.clear(); listeners.clear() },
+    close() { closed = true; fence(); clearGateTimer(); identities = new Map(); observed.clear(); stale.clear(); listeners.clear() },
   }
 }
