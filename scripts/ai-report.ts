@@ -2,26 +2,31 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { parseArgs } from 'node:util'
 
+function parseAntigravityEvent(line: string) {
+  let record: unknown
+  try {
+    record = JSON.parse(line)
+  } catch {
+    // Antigravity writes stderr to the same log as its JSON events.
+    return undefined
+  }
+  if (record && typeof record === 'object' && 'event' in record && typeof record.event === 'string') return record
+}
+
 export function extractReport(source: string, isJsonLines = false): string {
-  for (const line of source.split(/\r?\n/).reverse()) {
-    let record: unknown
-    try {
-      record = JSON.parse(line.trim())
-    } catch {
-      // Antigravity writes stderr to the same log as its JSON events.
-      continue
-    }
-    if (!record || typeof record !== 'object' || !('event' in record) || typeof record.event !== 'string') continue
-    isJsonLines = true
-    if (record.event !== 'result') continue
+  const lines = source.split(/\r?\n/).map(line => line.trim())
+  if (!isJsonLines && !parseAntigravityEvent(lines.find(line => line.length > 0) ?? '')) return source
+
+  for (const line of lines.reverse()) {
+    const record = parseAntigravityEvent(line)
+    if (record?.event !== 'result') continue
     const result = 'result' in record ? record.result : undefined
     if (!result || typeof result !== 'object' || !('response' in result) || typeof result.response !== 'string') {
       throw new Error('Antigravity result event has no string response')
     }
     return result.response
   }
-  if (isJsonLines) throw new Error('Antigravity log has no result event')
-  return source
+  throw new Error('Antigravity log has no result event')
 }
 
 export function stripLocalLinks(report: string): string {
@@ -32,7 +37,7 @@ export function stripLocalLinks(report: string): string {
 }
 
 export function checkForLocalPaths(body: string): void {
-  if (/\/Users\/|\/home\/|file:\/\/|\/private\/tmp/.test(body)) {
+  if (/\/Users|\/home\/|file:\/\/|\/private\/tmp/.test(body)) {
     throw new Error('Refusing to publish a report containing a local path')
   }
 }
@@ -70,7 +75,7 @@ function main(args: string[]): void {
     throw new Error('Specify either --pr N or --issue N with a positive number')
   }
   if (!source) throw new Error('Specify --source FILE')
-  if (!signature || !/^AI: .+ \/ model: .+ \/ effort: .+$/.test(signature)) {
+  if (!signature || !/^AI: .*\S.* \/ model: .*\S.* \/ effort: .*\S.*$/.test(signature)) {
     throw new Error('Specify a single-line --signature "AI: <name> / model: <id> / effort: <level>"')
   }
   if (title !== undefined && /[\r\n]/.test(title)) throw new Error('--title must be a single line')
