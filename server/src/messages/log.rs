@@ -128,25 +128,22 @@ pub(super) async fn record_move(
     Ok(())
 }
 
-pub(super) async fn create(
-    tx: &mut PgConnection,
-    organization: Uuid,
-    message: &Message,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO channel_log (organization_id, channel_id, event_seq, kind, message_id, sender, client_message_id) \
-         VALUES ($1, $2, $3, 'create', $4, $5, $6)",
+// A suppressed Message insert leaves m empty, so there is no Create to append.
+pub(super) const CREATE_WITH_MESSAGE_SQL: &str = r#"
+    WITH m AS (
+        INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING
+        RETURNING organization_id, id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id, reply_root_id, created_at
+    ), l AS (
+        INSERT INTO channel_log (organization_id, channel_id, event_seq, kind, message_id, sender, client_message_id)
+        SELECT organization_id, channel_id, seq, 'create', id, sender, client_message_id FROM m
     )
-    .bind(organization)
-    .bind(message.channel_id)
-    .bind(message.created_seq)
-    .bind(message.id)
-    .bind(message.sender)
-    .bind(message.client_message_id)
-    .execute(tx)
-    .await?;
-    Ok(())
-}
+    SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id,
+           to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
+           '[]'::text AS mentions, $11::uuid AS history_generation
+    FROM m
+"#;
 
 // Limit positions before hydrating current state. LEFT JOIN keeps an unhydratable
 // position visible to validation instead of silently acknowledging past it.

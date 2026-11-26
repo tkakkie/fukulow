@@ -10,6 +10,13 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+mod c3_tests;
+
+#[cfg(test)]
+static RECEIPT_MISS: crate::test_support::Gates<Uuid, std::sync::OnceLock<bool>> =
+    crate::test_support::Gates::new();
+
 pub(in crate::messages) async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     organization_id: Uuid,
@@ -95,6 +102,13 @@ async fn persist_admitted(
             .await?
             .ok_or(MessageError::Database(sqlx::Error::RowNotFound));
     }
+    #[cfg(test)]
+    let write_probe = if let Some(gate) = RECEIPT_MISS.take(&input.client_message_id) {
+        gate.pause().await;
+        Some(gate)
+    } else {
+        None
+    };
     let targets = mentions::extract(&input.body);
     let accepted = if let Some((grants, accepted)) = channels::dms::send_locks(
         tx.connection()?,
@@ -182,18 +196,27 @@ async fn persist_admitted(
         .await?
     };
     let reply_root_id = parent.map(|(_, root)| root);
-    let message = sqlx::query(
-        "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
-         ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
-         RETURNING id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions, $11::uuid AS history_generation",
-    ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
-        .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).bind(history_generation).try_map(|row| message_from_row(&row))
-        .fetch_optional(tx.connection()?).await?;
+    let message = sqlx::query(log::CREATE_WITH_MESSAGE_SQL)
+        .bind(organization_id)
+        .bind(Uuid::new_v4())
+        .bind(channel_id)
+        .bind(seq)
+        .bind(sender)
+        .bind(input.client_message_id)
+        .bind(&input.body)
+        .bind(topic_id)
+        .bind(input.reply_to)
+        .bind(reply_root_id)
+        .bind(history_generation)
+        .try_map(|row| message_from_row(&row))
+        .fetch_optional(tx.connection()?)
+        .await?;
+    #[cfg(test)]
+    if let Some(gate) = write_probe {
+        gate.hook_state.set(message.is_none()).unwrap();
+    }
     if let Some(mut message) = message {
         search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
-        log::create(tx.connection()?, organization_id, &message).await?;
         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
         let notification = delivery
