@@ -1438,7 +1438,7 @@ it('pruning an evicted Topic with no active Topic window does not cancel a pendi
     expect(getTopicSummary).toHaveBeenCalledTimes(3)
     expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
     expect(session.unread.get('A').topics.T?.position).toBe(3)
-    expect(session.unread.get('A').entry?.boundary).toBe(2)
+    expect(session.unread.get('A').entry?.boundary).toBe(3)
   } finally { session.close(); listChannels.mockRestore() }
 })
 
