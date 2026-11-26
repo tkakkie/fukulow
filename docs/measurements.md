@@ -31,7 +31,7 @@ Reconnect uses `make load-record` (`load/record.ts`) and publishes after recover
 
 2026-11-11 JST. Initial drill **1.82 seconds** with a cached PostgreSQL 18.6 image and network-disabled tmpfs on Apple M5. The 133,556-byte dump held 2 Organizations, 2,000 Messages and 3 Sessions. Evidence for the [backup and restore procedure](spec/deployment.md#operations-backup-and-restore-198-c).
 
-Use `scripts/backup.ts` in a separate Compose project, then pass the dump to `scripts/restore-drill.ts`. Excludes production disk/outage steps. [Commands and record](../load/measurements-archive.md#backup-restore-drill-198-c)
+Commands: the procedure above, `scripts/backup.ts` then `scripts/restore-drill.ts`, in a separate Compose project. Excludes production disk/outage steps. [Full record](../load/measurements-archive.md#backup-restore-drill-198-c)
 
 ## Channel-list Unread ranges (#142)
 
