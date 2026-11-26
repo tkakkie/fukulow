@@ -1210,7 +1210,7 @@ mod roles;
 
 mod replies;
 
-pub(super) mod access_loss;
+mod access_loss;
 pub(super) mod hooks;
 
 mod account_security;
