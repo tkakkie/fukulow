@@ -3,6 +3,7 @@ import { requirementViolations, type HostRecord } from '../harness-core/host-rec
 import { tctl, type ThermalSample } from '../harness-core/thermal.ts';
 import type { Platform } from './platform.ts';
 import type { PolicySnapshot } from '../harness-core/cpu-policy.ts';
+import { formatHostBusy } from './host-busy.ts';
 import type { Job, Queue } from './queue.ts';
 
 // One measurement launcher for macOS and Linux (#867). It does the shared steps of every hand-written
@@ -419,7 +420,8 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     log(`queue ${q.name} (launch session ${launchSession}): ${q.jobs.map(j => `${j.name} (#${j.issue})`).join(', ')}; waiting for an idle host`);
     for (;;) {
       if (aborted) return stop(`${aborted} while waiting`);
-      if (busyReasons(d, q.hostBusy).length === 0 && d.claim(q.hostBusy, `${q.name}: ${q.jobs.map(j => j.name).join(', ')} ${d.now().toISOString()} session ${launchSession}\n`)) break;
+      if (busyReasons(d, q.hostBusy).length === 0 &&
+        d.claim(q.hostBusy, formatHostBusy(q.name, q.jobs.map(j => j.name), d.now(), launchSession))) break;
       await d.sleep(pollMs);
     }
     claimed = true;

@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { sets796 } from '../../harness-core/frequency-layout.ts';
+import { parseHostBusy } from '../../launcher/host-busy.ts';
 import { CommandTimeoutError, save } from '../bench.ts';
 import { resolveImage } from '../manifest.ts';
 import { ownershipLabel, refuseLeftovers, timeouts } from '../runtime.ts';
@@ -154,15 +155,16 @@ function stage1Noise(dir: string, judgement: Stage1Record, limited: boolean): St
   return {...judgement.noise, spreads, stage1: {kind: limited ? 'limited' : 'normal', shortfall: again.finish.shortfall, constraints: again.finish.stage2Constraints}};
 }
 
-// The HOST-BUSY the launcher claimed for this queue names this job (the launcher passes both). This stops an
+// The HOST-BUSY the launcher claimed for this queue names this job and carries the launch session. This stops an
 // accidental direct run, which has neither variable. It cannot stop a deliberate bypass: whatever the driver
 // can check locally can be written locally. Starting through the launcher (preflight, recorded go) is an
 // operator rule (maintainer decision on PR #871, extra round sol 1).
 function launchedJob(env: NodeJS.ProcessEnv) {
   const file = env.FUKULOW_HOST_BUSY, job = env.FUKULOW_LAUNCH_JOB;
   if (!file || !job || !existsSync(file)) return false;
-  const m = /^[^:]+: (.+) \S+$/.exec(readFileSync(file, 'utf8').split('\n')[0] ?? '');
-  return m !== null && m[1].split(', ').includes(job);
+  const marker = parseHostBusy(readFileSync(file, 'utf8'));
+  const session = env.FUKULOW_LAUNCH_SESSION;
+  return marker !== null && marker.jobs.includes(job) && (session === undefined || marker.session === session);
 }
 
 // §3 prerequisites and the stage's go, all checked before anything touches Docker or a database. Each
