@@ -1,6 +1,5 @@
 use crate::{engine::Step, merge::Source, *};
 use fukulow_api::MessagePage;
-use std::rc::Rc;
 
 pub(crate) enum HistoryPage {
     Messages(MessagePage),
@@ -170,96 +169,6 @@ impl Step<'_> {
         }
     }
 
-    pub(super) fn send_response(
-        &mut self,
-        request: Token,
-        result: Result<fukulow_api::Message, (Failure, Option<f64>, Option<String>)>,
-    ) {
-        if !matches!(self.core.requests.get(&request), Some(Request::Send { .. })) {
-            return;
-        }
-        let Some(Request::Send {
-            channel: id,
-            client_message_id,
-            stale,
-        }) = self.core.requests.remove(&request)
-        else {
-            return;
-        };
-        self.metadata_changed = true;
-        if stale {
-            if matches!(result, Err((Failure::Status(401), ..))) {
-                self.stop(true);
-            }
-            return;
-        }
-        if matches!(&result, Err((Failure::Status(409), _, Some(error))) if error == "history_generation_changed")
-        {
-            self.reset_history(None);
-            return;
-        }
-        self.channel(id);
-        match result {
-            Ok(message) => {
-                if !self.accept_generation(message.history_generation) {
-                    return;
-                }
-                self.merge(id, vec![message], Source::Ack);
-                self.reconcile(id, false);
-            }
-            Err((Failure::Status(401), ..)) => self.stop(true),
-            Err((status, delay, error)) => {
-                let c = self.channel(id);
-                let Some(index) = c
-                    .pending
-                    .iter()
-                    .position(|p| p.client_message_id == client_message_id && p.request == request)
-                else {
-                    return;
-                };
-                let mut pending = (*c.pending).clone();
-                let p = &mut pending[index];
-                if status == Failure::Status(429) {
-                    self.cancel(p.retry_wait);
-                    let n = self.token();
-                    let delay = delay
-                        .filter(|d| {
-                            d.is_finite()
-                                && d.fract() == 0.0
-                                && *d >= 1000.0
-                                && *d <= 9_007_199_254_740_991.0
-                        })
-                        .unwrap_or(1000.0) as u64;
-                    self.core.timers.insert(
-                        n,
-                        Timer {
-                            purpose: Purpose::SendRetry,
-                            channel: Some(id),
-                            client_message_id: Some(client_message_id),
-                        },
-                    );
-                    p.state = PendingState::Throttled;
-                    p.retry_wait = Some(n);
-                    self.out.effects.push(Effect::Wait {
-                        id: n,
-                        purpose: Purpose::SendRetry,
-                        channel: Some(id),
-                        delay_ms: Some(delay),
-                        attempt: None,
-                    });
-                } else {
-                    p.state =
-                        if matches!(status, Failure::Status(400 | 403 | 404 | 409 | 413 | 415)) {
-                            PendingState::Failed
-                        } else {
-                            PendingState::Unknown
-                        };
-                    p.failure_code = error;
-                }
-                self.channel(id).pending = Rc::new(pending);
-            }
-        }
-    }
     pub(super) fn timer_elapsed(&mut self, id: Token) {
         let Some(t) = self.core.timers.remove(&id) else {
             return;
@@ -272,22 +181,10 @@ impl Step<'_> {
             self.core.session.reconnect_wait = None;
             self.connect();
         } else if let Some(channel) = t.channel {
-            let c = self.channel(channel);
             if t.purpose == Purpose::SendRetry {
-                if c.state != Availability::Unavailable
-                    && let Some(p) = c
-                        .pending
-                        .iter()
-                        .find(|p| {
-                            Some(p.client_message_id) == t.client_message_id
-                                && p.retry_wait == Some(id)
-                                && p.state == PendingState::Throttled
-                        })
-                        .cloned()
-                {
-                    self.attempt(channel, p);
-                }
+                self.send_retry_elapsed(channel, id, t.client_message_id);
             } else {
+                let c = self.channel(channel);
                 if c.wait != Some(id) {
                     return;
                 }
