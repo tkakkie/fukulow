@@ -59,9 +59,9 @@ let cleaned = false;
 
 async function sample(state: keyof typeof rows) {
   progress.enter(state);
+  progress.startSampling();
   const code = await workload.sample(state, samplesPerState);
   rows[state] = readSamples(readFileSync(join(out!, `${state}.jsonl`), 'utf8'));
-  if (rows[state].length) progress.startSampling();
   if (code !== 0 || rows[state].length !== samplesPerState || rows[state].some(row => !row.ok)) {
     throw new Error(`${state} sampler failed or returned incomplete samples. See sampler.log`);
   }

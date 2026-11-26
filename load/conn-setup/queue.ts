@@ -29,7 +29,7 @@ const queue: Queue = {
     name, issue: 1066, go: { quote, date }, worktree, commit, out,
     command: ['node', 'load/conn-setup/run.ts', `--${stage}`, '--out', out],
     image: postgresImage(), minFreeGiB: 20, workloadLabel, postgresLogLabel,
-    requireHost: { boost: '1', policyBoost: '1', platformProfile: 'performance' },
+    requireHost: { boost: '0', policyBoost: '0', platformProfile: 'performance' },
   }],
 };
 const json = JSON.stringify(queue, null, 2) + '\n';
