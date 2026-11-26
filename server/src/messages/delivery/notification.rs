@@ -1,6 +1,7 @@
 use super::super::ChannelEvent;
 #[cfg(test)]
 use super::super::log;
+use super::super::{MessageError, commit};
 #[cfg(test)]
 use super::publication::PUBLICATION_GATES;
 use super::{
@@ -151,6 +152,25 @@ impl Drop for Notification {
 }
 
 impl Delivery {
+    pub(in crate::messages) async fn commit_for_publication(
+        &self,
+        tx: commit::Transaction,
+        key: Uuid,
+        organization: Uuid,
+        channel: Uuid,
+        seq: i64,
+    ) -> Result<Notification, MessageError> {
+        // Arm before COMMIT so an uncertain outcome or cancellation signals replay.
+        let mut notification = self.notification(organization, channel, seq);
+        if let Err(error) = commit::finish(tx, key).await {
+            if commit::definitely_rolled_back(&error) {
+                notification.complete();
+            }
+            return Err(error.into());
+        }
+        Ok(notification)
+    }
+
     pub(in crate::messages) fn notification(
         &self,
         organization: Uuid,
