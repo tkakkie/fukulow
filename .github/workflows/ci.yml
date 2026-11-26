@@ -75,13 +75,42 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
-          cargo build --release --locked
+  load-transport:
+    runs-on: ubuntu-latest
+    # Backstop for the cold release build plus the 240s test timeout.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [uncapped, capped]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version }
+      - run: rustup toolchain install --profile minimal
+      - name: Build the release stall helper for the transport regression
+        working-directory: load/harness-core/stall-helper
+        run: cargo build --release --locked
+      # A release cache would compete with existing caches at the 10 GB repository limit.
       - name: Build the release server for the transport regression
         run: mkdir -p web/dist && cargo build --release --locked -p fukulow-server
       - name: Revocation transport regression at k60 Hcap
+        shell: bash
+        env:
+          ARM: ${{ matrix.arm }}
         run: |
+          set -euo pipefail
           ulimit -n 65536
-          node --test load/revocation-holds-sndbuf.integration.ts
+          test_name="#668 Linux k60 Hcap control $ARM"
+          tap="$RUNNER_TEMP/load-transport.tap"
+          node --test --test-reporter=tap --test-name-pattern="^${test_name}$" \
+            load/revocation-holds-sndbuf.integration.ts | tee "$tap"
+          # With no match, Node can report a passing file entry. Require the named test's TAP result.
+          if ! grep -Fxq "ok 1 - \\${test_name}" "$tap" ||
+             ! grep -Fxq '# pass 1' "$tap" || ! grep -Fxq '# skipped 0' "$tap"; then
+            echo "Expected exactly one passing, unskipped transport test ($test_name)." >&2
+            exit 1
+          fi
   # server-tests and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
   # The server tests run as 4 nextest slices in parallel; every test still runs on every PR.
   server-tests:
