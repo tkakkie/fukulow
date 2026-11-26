@@ -1,4 +1,5 @@
 //! #196 A: socket caps, control-frame budget, duplicate subscribe.
+use super::isolated_test::run_isolated_test;
 use super::*;
 use crate::realtime::{Budget, SocketGate, SocketLimits};
 
@@ -83,15 +84,12 @@ async fn text(client: &mut Client, text: &str) {
 fn socket_admission_and_close_counters_follow_production_paths() {
     // Process-global counters need an isolated test process for exact increments,
     // so parallel tests cannot hide omitted or duplicate instrumentation.
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "realtime::tests::limits::socket_counter_scenario",
-            "--ignored",
-            "--nocapture",
-        ])
-        .output()
-        .unwrap();
+    let output = run_isolated_test(&[
+        "--exact",
+        "realtime::tests::limits::socket_counter_scenario",
+        "--ignored",
+        "--nocapture",
+    ]);
     assert!(
         output.status.success(),
         "{}{}",
