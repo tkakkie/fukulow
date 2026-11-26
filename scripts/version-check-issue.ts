@@ -44,6 +44,10 @@ if (import.meta.main) {
   const repo = process.env.GITHUB_REPOSITORY
   if (!path || !repo) throw new Error('Expected a report path and GITHUB_REPOSITORY')
   const report = JSON.parse(readFileSync(path, 'utf8')) as VersionReport
+  // A malformed report must fail the job, not read as all-clear and close the Issue.
+  if (typeof report.actionable !== 'boolean' || typeof report.body !== 'string') {
+    throw new Error(`malformed version report: ${path}`)
+  }
   const gh: Gh = (args, input) => execFileSync('gh', args, { encoding: 'utf8', input, maxBuffer: 64 * 1024 * 1024 })
   syncVersionIssue(gh, repo, report)
 }
