@@ -10,8 +10,7 @@ Raw logs, artifacts and paths outside Git may be gone. [2026-11-18 check](../loa
 ## Measurement hosts (#796)
 
 - **Mac (M5):** development; #689, #519, #426 B7 and Mac-approved plans keep Mac conditions.
-- **Ubuntu (Zen 5/Zen 5c):** formal and default for new series since #796 PASS. No Mac comparison or gate.
-- **Ubuntu:** AC, masked sleep, performance governor, held updates, HOST-BUSY, fixed CPU sets, pre/post records. Boost on except #796 cooling.
+- **Ubuntu (Zen 5/Zen 5c):** formal, default for new series since #796 PASS, no Mac comparison or gate. AC, masked sleep, performance governor, held updates, HOST-BUSY, fixed CPU sets, pre/post records. Boost on except #796 cooling.
 - **#796 PASS:** 3/3 formal runs valid at `2b441bd9`; spread TPS ≤ 0.68 % (limit 5 %), WAL/send ≤ 0.29 % (limit 2 %). [Full record](../load/measurements-archive.md#ubuntu-host-qualification-796-2026-11-25) · [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
 - Move series only with fresh Ubuntu baselines and criteria fixed first, never for Mac failures. First: #515.
 
@@ -103,8 +102,6 @@ Overnight on an idle Mac with Node 26.13.1 run `node load/search-m1.ts --out <ne
 
 At the pinned source, run `node load/search-engines/d3r/run.ts --from-backfill=<dir> --out=<new-dir>`.
 
-The 2026-11-23 JST **rehearsal** recorded 299,830,174 term rows, 28.5 GB `message_search_terms` table, 34.8 GB lookup index, 2.3 GB maintenance index, 1.69 TB backfill WAL and 67.5 GB `pg_basebackup` archive. [Rehearsal record](https://github.com/tkakkie/fukulow/issues/689#issuecomment-7089274722)
-
 ## Channel log design evidence (#160)
 
 2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17, 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `load/log-compare/run.ts --diagnose --settle-fixture`. Both workloads at 50/250 ops/s include host-to-psql transport.
@@ -119,8 +116,6 @@ Build, then run each night: `node load/slice5/run.ts --help`.
 
 Mac diagnostics only. Night 3 stands (3 FAIL, 1 INVALID). Replay SQL (2026-11-22 JST) put A's page statement +0.38–0.53 ms p50 over B. App path (2026-11-23 JST) put A − B HTTP p50 at 0.48–0.58 ms, almost all in the component sum. [515-replay steps](../load/sql-probes/515-replay/README.md#run) · [515-app steps](../load/sql-probes/515-app/README.md#run) · [SQL result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7071300064) · [App result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7089274168) · [§14 record](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7196020425) · [F1 archive](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
 
-Raw data not stored (R2 not set up). SHA-256 and retention end n/a.
-
 ## Unread candidate bounds (#355)
 
 2026-11-16 JST (PR #448). Against `1662d5d`, Auto execution fell 0.178 → 0.117 ms for visible list and 5.477 → 3.677 ms for counts. Evidence for [bounding the grant lookup and materializing Topic candidates](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
@@ -130,8 +125,6 @@ Use `load/hot-plans/seed.sql` and `EXPLAIN (ANALYZE, BUFFERS)` on the before/aft
 ## Unread counts probe (#519 A3, Mac, diagnostic)
 
 2026-11-23 JST. Stop rule only (no gate). Step 1 read p95 (current → final, ms) was 5.701 → 2.104 at cut 75, 9.155 → 2.439 at 150, 18.453 → 2.818 at 575 and 58.435 → 5.130 at 2150. Sends STOP. Median tps ratios were 0.898 send-only and 0.806 with the #820 UPDATE-first migration (limit 0.90). Median WAL/send ratios were 1.190 and 1.125 (limit 1.20). [Harness steps](../load/sql-probes/519-unread-counts/README.md#10-step-1-final-design-finalts) · [§14 record](https://github.com/tkakkie/fukulow/issues/519#issuecomment-7196020998) · [Ubuntu continuation](https://github.com/tkakkie/fukulow/issues/519#issuecomment-7117805873)
-
-Raw data not stored (R2 not set up). SHA-256 and retention end n/a.
 
 ## Bounded fan-out candidates (#354)
 
@@ -168,6 +161,12 @@ Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-a
 2026-11-23 JST, server `b4796346`, harness `4e4b4b8b`: **aggregate PASS** (A0, B1–B5, C1, C2 ×3). One IP, 16 wrong passwords at 3 window opens: 5×401 each, 3 waiters on X's row (4 once, within 1 ms log stamps), waits 12.6–60.8 ms. Owner password change/revoke-others 39/39 204, ≤ 105.3 ms (C2 bound ≥ 205.9). 90/91 B1 owner sign-ins 429 (#757). Limits: no multi-IP attack, one Mac, 3 runs, clock ≤ ±1.52 ms, 10 ms `deadlock_timeout` logging; rehearsal B4 miss is no evidence.
 
 Run `node load/signin-owner-burst.ts --recorded` ×3 and its `-aggregate.ts`. [Record](../load/measurements-archive.md#sign-in-burst-owner-impact-756-359-2026-11-23-jst-mac)
+
+## Readiness connection setup (#1066)
+
+2026-11-26 Ubuntu, `b730f181`: 1,000 empty-pool acquisitions per state (TCP+SCRAM+startup). p50/p99.9/max 3.04/4.69/5.34 ms idle, 3.16/4.75/4.82 ms under #351 light load: option 3 ([accepted limit](decisions/process.md#product-stack-and-delivery)). VPS: #431.
+
+Run `load/conn-setup/queue.ts`, then `load/launch.ts`. [Record](../load/measurements-archive.md#readiness-connection-setup-1066-2026-11-26-ubuntu)
 
 ## Archived only
 
