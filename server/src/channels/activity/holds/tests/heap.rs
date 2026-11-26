@@ -73,6 +73,7 @@ async fn retained_bytes(pool: &PgPool, limit: usize) -> usize {
             organization,
             member: (id, 0),
             hash: vec![0; 32],
+            notice_queries: activity.notice_queries.clone(),
             buffer: Mutex::default(),
             wake: Notify::new(),
         });
