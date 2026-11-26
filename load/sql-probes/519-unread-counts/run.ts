@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
-import { bindLiterals, channels, checksumSql, extractListCounts, member, organization, pgbench, planSummary, quantile, timings, type Arm } from './probe.ts';
+import { bindLiterals, channels, checksumSql, listCountsAtCommit, member, organization, pgbench, planSummary, quantile, timings, type Arm } from './probe.ts';
 
 // DIAGNOSTIC only: no PASS/FAIL. Reproduces the #519 A3 prototype comment on the commit it was measured at.
 const usage = 'node load/sql-probes/519-unread-counts/run.ts (--smoke | --diagnostic) --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
@@ -40,7 +40,7 @@ const container = 'fk519p-' + randomUUID();
 // Migrations, role scripts and the counts SQL come from the pinned commit; probe SQL from this checkout.
 run('sh', ['-c', `git archive ${commit} server/migrations deploy/db-roles.sql deploy/db-grants.sql | tar -x -C "$1"`, 'sh', work]);
 cpSync(join(root, 'load/sql-probes/519-unread-counts/sql'), join(work, 'sql'), { recursive: true });
-writeFileSync(join(work, 'sql/current.sql'), extractListCounts(git('show', `${commit}:server/src/messages/unread.rs`)) + '\n');
+writeFileSync(join(work, 'sql/current.sql'), listCountsAtCommit(git, commit) + '\n');
 const migrations = readdirSync(join(work, 'server/migrations')).filter(f => f.endsWith('.sql')).sort();
 
 const psql = (db: string, script: string, user = 'postgres') =>

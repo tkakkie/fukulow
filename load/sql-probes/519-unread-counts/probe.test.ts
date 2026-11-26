@@ -5,8 +5,10 @@ import { bindLiterals, extractListCounts, pgbench, quantile, timings } from './p
 test('extracts LIST_COUNTS_SQL exactly once and refuses other shapes', () => {
   const source = 'x\npub(super) const LIST_COUNTS_SQL: &str = r#"\nSELECT $1\n"#;\nrest';
   assert.equal(extractListCounts(source), 'SELECT $1');
+  const splitSource = source.replace('pub(super)', 'pub(in crate::messages)');
+  assert.equal(extractListCounts(splitSource), 'SELECT $1');
   assert.throws(() => extractListCounts('no constant'));
-  assert.throws(() => extractListCounts(source + source));
+  assert.throws(() => extractListCounts(source + splitSource));
 });
 
 test('binds only $1..$4 and rejects any other parameter', () => {
