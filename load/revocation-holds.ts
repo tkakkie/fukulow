@@ -34,7 +34,7 @@ if (args.includes('--help')) {
     'Options after preflight: --out /absolute/new/dir --preflight-result /absolute/path/preflight.json [--session ID]',
     '  [--rehearsal | --overhead | --overhead-summary <summary.json>] [--cells ...] [--durations short,long]',
     'Use a clean checkout and the same server and stall-helper binaries on the same boot.',
-    'Every stage uses one host ledger: by default ${XDG_STATE_HOME:-$HOME/.local/state}/fukulow/revocation-holds-preflights.<hostname>.ndjson, or --preflight-ledger /absolute/path. A later stage refuses a ledger other than the one its preflight.json records.',
+    'Every stage uses one host ledger: by default <passwd home>/.local/state/fukulow/revocation-holds-preflights.<hostname>.ndjson (XDG_STATE_HOME and HOME are ignored), or --preflight-ledger /absolute/path. A later stage refuses a ledger other than the one its preflight.json records.',
     'Use FUKULOW_LAUNCH_SESSION or choose a fresh --session ID for each measurement session.',
   ].join('\n'));
   process.exit(0);

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { hash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { acceptedPreflight, preflightIdentity as identity, preflightReadbackValue } from './revocation-holds-preflight-fixture.ts';
@@ -13,7 +13,7 @@ import type { SessionIdentity } from './revocation-holds-provenance.ts';
 function outputs(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'revocation-ledger-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const ledger = preflightLedgerPath(identity.hostname, undefined, { XDG_STATE_HOME: join(root, 'state') });
+  const ledger = preflightLedgerPath(identity.hostname, undefined, join(root, 'home'));
   mkdirSync(join(root, 'evidence'));
   const stage = (name: string) => {
     const output = join(root, name);
@@ -28,17 +28,40 @@ function outputs(t: TestContext) {
 const pass = async (identity: SessionIdentity) => acceptedPreflight(identity);
 const fail = async (identity: SessionIdentity) => ({ ...acceptedPreflight(identity), passed: false, readback: null });
 
-test('the host ledger is one fixed state path per host unless configured', () => {
+test('the host ledger is one fixed state path per host and OS user unless configured', () => {
   const configured = '/shared/host-ledger.ndjson';
-  assert.equal(preflightLedgerPath('first-host', undefined, { XDG_STATE_HOME: '/state' }, '/home/m'),
-    '/state/fukulow/revocation-holds-preflights.first-host.ndjson');
-  for (const env of [{}, { XDG_STATE_HOME: '' }, { XDG_STATE_HOME: 'relative/state' }]) {
-    assert.equal(preflightLedgerPath('first-host', undefined, env, '/home/m'),
-      '/home/m/.local/state/fukulow/revocation-holds-preflights.first-host.ndjson', JSON.stringify(env));
-  }
-  assert.equal(preflightLedgerPath('second host', undefined, {}, '/home/m'),
+  assert.equal(preflightLedgerPath('first-host', undefined, '/home/m'),
+    '/home/m/.local/state/fukulow/revocation-holds-preflights.first-host.ndjson');
+  assert.equal(preflightLedgerPath('second host', undefined, '/home/m'),
     '/home/m/.local/state/fukulow/revocation-holds-preflights.second%20host.ndjson');
-  assert.equal(preflightLedgerPath('first-host', configured, { XDG_STATE_HOME: '/state' }), configured);
+  assert.equal(preflightLedgerPath('first-host', configured, '/home/m'), configured);
+  assert.equal(preflightLedgerPath('first-host'),
+    join(userInfo().homedir, '.local/state/fukulow/revocation-holds-preflights.first-host.ndjson'));
+});
+
+test('changing XDG_STATE_HOME or HOME between preflight and a later stage cannot hide a failed preflight', async t => {
+  const saved = { XDG_STATE_HOME: process.env.XDG_STATE_HOME, HOME: process.env.HOME };
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const root = mkdtempSync(join(tmpdir(), 'revocation-ledger-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const underEnv = (name: string) => {
+    process.env.XDG_STATE_HOME = join(root, name, 'state');
+    process.env.HOME = join(root, name, 'home');
+    return { fixed: preflightLedgerPath(identity.hostname), ledger: preflightLedgerPath(identity.hostname, undefined, join(root, 'passwd-home')) };
+  };
+  const first = underEnv('first');
+  const later = underEnv('later');
+  assert.equal(later.fixed, first.fixed);
+  assert.equal(later.fixed, preflightLedgerPath(identity.hostname, undefined, userInfo().homedir));
+  assert.equal(later.ledger, first.ledger);
+  const output = (name: string) => { const dir = join(root, name); mkdirSync(dir); return dir; };
+  await recordPreflight(first.ledger, output('pass'), identity, async () => identity, pass);
+  await recordPreflight(later.ledger, output('fail'), identity, async () => identity, fail);
+  assert.throws(() => requirePreflight({ kind: 'measured', identity, ledger: first.ledger, preflightFile: join(root, 'pass', 'preflight.json') }), SetupAbort);
 });
 
 test('stages with different --out parents share the fixed ledger, so a later failed preflight blocks the earlier pass', async t => {

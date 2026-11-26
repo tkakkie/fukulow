@@ -1,7 +1,7 @@
 import { hash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { userInfo } from 'node:os';
+import { dirname, join } from 'node:path';
 import { sameSessionIdentity, type SessionIdentity } from './revocation-holds-provenance.ts';
 
 type HostSession = Pick<SessionIdentity, 'hostname' | 'session'>;
@@ -9,10 +9,10 @@ type Status = 'started' | 'failed' | 'passed';
 type Entry = HostSession & { id: string; status: Status; at: string; artifactSha256?: string };
 type Result = { passed: boolean; readback: number | null };
 
-// One ledger per host, whatever --out each stage uses, so a later failed preflight is never missed.
-export function preflightLedgerPath(hostname: string, configured?: string, env = process.env, home = homedir()) {
-  const state = env.XDG_STATE_HOME && isAbsolute(env.XDG_STATE_HOME) ? env.XDG_STATE_HOME : join(home, '.local/state');
-  return configured ?? join(state, 'fukulow', `revocation-holds-preflights.${encodeURIComponent(hostname)}.ndjson`);
+// One ledger per host and OS user, whatever --out, XDG_STATE_HOME or HOME each stage uses, so a later failed
+// preflight is never missed: the passwd home ignores both variables (decision on PR #1032).
+export function preflightLedgerPath(hostname: string, configured?: string, home = userInfo().homedir) {
+  return configured ?? join(home, '.local/state', 'fukulow', `revocation-holds-preflights.${encodeURIComponent(hostname)}.ndjson`);
 }
 
 // A later stage must read the ledger its preflight wrote to, or it could miss a newer failure.
