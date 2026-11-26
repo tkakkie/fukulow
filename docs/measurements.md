@@ -29,7 +29,7 @@ Reconnect uses `make load-record` (`load/record.ts`) and publishes after recover
 
 ## Backup restore drill (#198 C)
 
-2026-11-11 JST. Initial drill **1.82 seconds** with a cached PostgreSQL 18.6 image and network-disabled tmpfs on Apple M5. The 133,556-byte dump held 2 Organizations, 2,000 Messages and 3 Sessions. Evidence for the [backup and restore procedure](spec/deployment.md#operations-backup-and-restore-198-c).
+2026-11-11 JST. Initial drill **1.82 seconds** on Apple M5 with cached PostgreSQL 18.6 and network-disabled tmpfs. The 133,556-byte dump held 2 Organizations, 2,000 Messages and 3 Sessions. [Procedure](spec/deployment.md#operations-backup-and-restore-198-c)
 
 Commands: the procedure above, `scripts/backup.ts` then `scripts/restore-drill.ts`, in a separate Compose project. Excludes production disk/outage steps. [Full record](../load/measurements-archive.md#backup-restore-drill-198-c)
 
@@ -87,15 +87,23 @@ Run `node load/invite-scan.ts` (Node, Docker, sqlx CLI, Rust). Warm shared Mac, 
 
 ## Search engine and quality comparison (#153)
 
-2026-11-18 JST, frozen v2 at `df13a2c` (#510, #518). At 1,000,000 Messages, 5 concurrent searches and 28 classes, P2 PGroonga passed the measured subset (worst class p95 309.9 ms). pg_trgm and pg_bigm missed latency at 2568.7 and 1154.9 ms. Quality micro F1 was 0.830 for split-query, 0.829 for kana-query and 0.639 for literal modes.
+2026-11-18 JST, frozen v2 at `df13a2c` (#510, #518). At 1,000,000 Messages, 5 concurrent searches and 28 classes, P2 PGroonga passed the measured subset (worst p95 309.9 ms). pg_trgm and pg_bigm missed latency (2568.7 / 1154.9 ms). Micro F1 for split-query/kana-query/literal was 0.830 / 0.829 / 0.639.
 
-Run `node load/search-engines/run.ts`, then `node load/search-engines/quality/run.ts` at the frozen manifest. The [selection gate](decisions/process.md#rules-ci-and-ai-process) stays open for P2 security, DMs and deploy/restore. [Full record](../load/measurements-archive.md#search-engine-comparison-p2-definer-at-1m-153-2026-11-18-jst-mac)
+Run `node load/search-engines/run.ts` and `node load/search-engines/quality/run.ts` at the frozen manifest. The [selection gate](decisions/process.md#rules-ci-and-ai-process) stays open for P2 security, DMs and deploy/restore. [Full record](../load/measurements-archive.md#search-engine-comparison-p2-definer-at-1m-153-2026-11-18-jst-mac)
 
 ## PGroonga Message-send write cost (#153 M1)
 
-2026-11-20 JST at `31118ce`, Mac. **No material impact** in `many` and `hot` under the fixed #153 criteria: B sustained 50–250/s in all three pairs, A sustained each of those steps, and the median A/B send p95 ratio was at most 1.13 (+0.26 ms). Recorded only, at 250/s: WAL/send +26–29 %, DB growth ~2.5×, DB CPU peak ~1.8×, app CPU unchanged. Input for F1 only; PGroonga adoption stays on hold. Limiter raised in both arms; search latency not measured; outside #431. [Method and result](../load/measurements-archive.md#pgroonga-message-send-write-cost-153-m1-2026-11-20-jst-mac)
+2026-11-20 JST at `31118ce`, Mac. **No material impact** in `many` or `hot` under #153 criteria. All three pairs sustained 50–250/s. Median A/B send p95 ratio ≤ 1.13 (+0.26 ms). At 250/s, WAL/send rose 26–29 %, DB growth ~2.5× and peak DB CPU ~1.8×. App CPU stayed flat. Limiter raised in both arms. F1 input only, outside #431. Search latency unmeasured. Adoption on hold. [Full record](../load/measurements-archive.md#pgroonga-message-send-write-cost-153-m1-2026-11-20-jst-mac)
 
-Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.ts --out /absolute/new/artifact-directory` (`--smoke`: B, `many`, 50/s for 10 s, never judged); regenerate with `node load/search-m1-report.ts /absolute/new/artifact-directory`.
+Overnight on an idle Mac with Node 26.13.1 run `node load/search-m1.ts --out <new-absolute-dir>` and `node load/search-m1-report.ts <dir>`. Smoke mode is unjudged.
+
+## d3r Message search (#689)
+
+2026-11-24 JST, Mac, source `293c6d4f`, manifest `d096806e…`. **Formal PASS at 1M Messages**, worst p95 203.5 ms. Completeness, denials and RLS passed. A custom fixture dump restored to a clean database with matching checksums and verified grants, RLS and terms. Production search stays disabled. The rise in p95 across rounds is tracked under #870. [Formal record](https://github.com/tkakkie/fukulow/issues/689#issuecomment-7119457760)
+
+At the pinned source, run `node load/search-engines/d3r/run.ts --from-backfill=<dir> --out=<new-dir>`.
+
+The 2026-11-23 JST **rehearsal** recorded 299,830,174 term rows, 28.5 GB `message_search_terms` table, 34.8 GB lookup index, 2.3 GB maintenance index, 1.69 TB backfill WAL and 67.5 GB `pg_basebackup` archive. [Rehearsal record](https://github.com/tkakkie/fukulow/issues/689#issuecomment-7089274722)
 
 ## Channel log design evidence (#160)
 
@@ -165,10 +173,7 @@ Run `node load/signin-owner-burst.ts --recorded` ×3 and its `-aggregate.ts`. [R
 
 - [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
-- Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs (quality scores reproduced).
-- [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
 - [Unread Topic-count index bound under RLS (#356)](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst) — superseded by #519 A3 (guard `unread_list_counts_never_read_messages_in_any_plan_mode`).
-- [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
 - Channel log [smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) (functional only) and [full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) (INVALID for the gate).
