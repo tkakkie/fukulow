@@ -17,6 +17,18 @@ const clockStart=`SELECT clock_timestamp() AS started \\gset`;
 const clockEnd=`SELECT json_build_object('latency_ms',extract(epoch FROM clock_timestamp()-:'started'::timestamptz)*1000);`;
 type Stats=Record<string,Record<string,number>>;
 export async function measure(db:Database,name:string,p:Point,variant:string,repeat:number) {
+  // Preserve an actual COMMIT baseline without deleting a retained creation or rewinding its counter.
+  const baselineName = name + '_baseline';
+  db.clone(baselineName, name);
+  const baseline = new Session(db.name, baselineName);
+  let senderBaselineMs: number;
+  try {
+    const output = documents(await baseline.query(`${clockStart}\n${begin}${sender} COMMIT;\n${clockEnd}`));
+    senderBaselineMs = (output.at(-1) as { latency_ms: number }).latency_ms;
+  } finally {
+    await baseline.close();
+    db.drop(baselineName);
+  }
   const writer=new Session(db.name,name),send=new Session(db.name,name),observer=new Session(db.name,name,'postgres');
   const reads:ReadSample[]=[]; const readPlans:unknown[]=[];
   try {
@@ -25,13 +37,6 @@ export async function measure(db:Database,name:string,p:Point,variant:string,rep
     if(role.user!=='fukulow_app'||role.bypass||role.super||Number(role.owns)!==0)throw new Error('app role is privileged');
     // Fail-closed RLS control before any context is supplied.
     if(await writer.query('SELECT count(*) FROM channels;')!=='0')throw new Error('RLS missing-context failure');
-    const baselineOut=documents(await send.query(`${clockStart}\n${begin}${sender.replaceAll('sender-probe','baseline-probe')} COMMIT;\n${clockEnd}`));
-    const senderBaselineMs=(baselineOut.at(-1) as {latency_ms:number}).latency_ms;
-    // Compare against an uncontended COMMIT, then restore fixture state outside
-    // the metric window. Sending itself never advances any read position.
-    await send.query(`${begin} DELETE FROM messages WHERE organization_id=${org} AND id=md5('baseline-probe')::uuid;
-      UPDATE channel_message_sequences SET seq=seq-1 WHERE organization_id=${org} AND channel_id=${channel};
-      COMMIT; SELECT pg_stat_force_next_flush();`);
     const before=JSON.parse(await observer.query(stats)) as Stats;
     const bufferBefore=JSON.parse(await observer.query(`SELECT json_build_object('hit',blks_hit,'read',blks_read) FROM pg_stat_database WHERE datname=current_database();`)) as {hit:number;read:number};
     const lsn=await observer.query('SELECT pg_current_wal_lsn();');

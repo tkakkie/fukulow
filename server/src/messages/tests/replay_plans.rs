@@ -1,4 +1,4 @@
-use super::{channel, member, organization, seed_channel_log};
+use super::{channel, member, organization};
 use crate::messages::{REPLAY_PAGE_SIZE, log};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -19,7 +19,7 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
         channel(&pool, org, id, sender, false).await;
         sqlx::query(
             "INSERT INTO messages (organization_id, channel_id, sender, id, seq, client_message_id, body) \
-             SELECT $1, $2, $3, md5($2::uuid::text || ':' || n)::uuid, n, gen_random_uuid(), 'plan' \
+             SELECT $1, $2, $3, md5($2::uuid::text || ':' || n)::uuid, 2*n-1, gen_random_uuid(), 'plan' \
              FROM generate_series(1, $4::bigint) n",
         )
         .bind(org)
@@ -30,6 +30,16 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
         .await
         .unwrap();
     }
+    // Interleave equally large creation and mutation ranges to exercise both indexes.
+    sqlx::query(
+        "INSERT INTO channel_log (organization_id, channel_id, event_seq, kind, message_id, sender, operation_id, destination_topic_id)
+         SELECT organization_id, channel_id, seq+1, 'move', id, sender, gen_random_uuid(), gen_random_uuid()
+         FROM messages WHERE organization_id=$1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
     // Every Message carries a Mention, so an Organization-wide Mention scan
     // shows up as rows beyond the page in either plan mode.
     sqlx::query(
@@ -40,7 +50,6 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    seed_channel_log(&pool).await;
     sqlx::query("ANALYZE messages, channel_log, channels, users, message_mentions")
         .execute(&pool)
         .await
@@ -50,7 +59,8 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
     let authorized = crate::database::organization_statement_sql(&log::authorized_page_sql());
     let gap = crate::database::organization_statement_sql(&log::replay_page_sql());
     let mut failures = Vec::new();
-    for (id, tip) in channels {
+    for (id, size) in channels {
+        let tip = 2 * size;
         for (depth, after) in [("deep", tip / 2), ("recent", tip - 60)] {
             for mode in ["force_generic_plan", "force_custom_plan"] {
                 for (path, sql, limit) in [
@@ -148,54 +158,57 @@ fn check_page_work(root: &Value, case: &str, limit: i64, failures: &mut Vec<Stri
             ));
         }
     }
-    let ([log], [message]) = (log.as_slice(), messages.as_slice()) else {
+    let ([log], [first, second]) = (log.as_slice(), messages.as_slice()) else {
         failures.push(format!(
-            "{case}: expected one scan each of channel_log and messages: {root}"
+            "{case}: expected two range scans plus one hydration probe: {root}"
         ));
         return;
     };
+    let index = |node: &Value| node["Index Cond"].as_str().unwrap_or_default().to_owned();
+    let (create, state) = if index(first).contains("seq > ") {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    for (node, key, index_name) in [
+        (log, "event_seq", "channel_log_pkey"),
+        (create, "seq", "messages_organization_id_channel_id_seq_key"),
+    ] {
+        let condition = index(node);
+        if !["organization_id = ", "channel_id = "]
+            .iter()
+            .all(|key| condition.contains(key))
+            || !condition.contains(&format!("{key} > "))
+            || !condition.contains(&format!("{key} <= "))
+            || node["Index Name"] != index_name
+            || node["Actual Loops"] != 1
+            || node["Actual Rows"]
+                .as_f64()
+                .is_none_or(|rows| rows == 0.0 || rows > (limit + 1) as f64)
+        {
+            failures.push(format!("{case}: unbounded position read for {key}: {node}"));
+        }
+    }
 
-    let log_index = log["Index Cond"].as_str().unwrap_or_default();
-    let message_index = message["Index Cond"].as_str().unwrap_or_default();
-    let positions = log["Actual Rows"].as_f64().unwrap();
-    let rows = message["Actual Rows"].as_f64().unwrap();
-    let loops = message["Actual Loops"].as_f64().unwrap();
-    let total = rows * loops;
+    let state_index = index(state);
+    let rows = state["Actual Rows"].as_f64().unwrap();
+    let loops = state["Actual Loops"].as_f64().unwrap();
     // The root includes child buffers, so summing all nodes would double-count.
     let buffers =
         root["Shared Hit Blocks"].as_i64().unwrap() + root["Shared Read Blocks"].as_i64().unwrap();
     let temp_read = root["Temp Read Blocks"].as_i64().unwrap();
     let temp_write = root["Temp Written Blocks"].as_i64().unwrap();
-    // Allow headroom for extra index levels and the access and Mention reads.
     let buffer_cap = 32 * limit;
-    eprintln!(
-        "{case}: {positions} positions, Message rows {rows} x {loops} = {total}, shared buffers {buffers}, temp blocks {temp_read}/{temp_write}"
-    );
     let checks = [
         (
-            positions == limit as f64 && log["Actual Loops"] == 1,
-            format!(
-                "expected {limit} log positions in one scan, got {positions} x {}",
-                log["Actual Loops"]
-            ),
-        ),
-        (
-            log_index.contains("event_seq > ") && log_index.contains("event_seq <= "),
-            format!("missing sequence bounds in channel_log Index Cond: {log_index}"),
-        ),
-        (
-            ["organization_id", "channel_id", "id"]
+            ["organization_id", "channel_id", "seq"]
                 .iter()
-                .all(|column| message_index.contains(&format!("({column} = "))),
-            format!("missing Message key columns in messages Index Cond: {message_index}"),
+                .all(|column| state_index.contains(&format!("({column} = "))),
+            format!("missing Message key columns in hydration Index Cond: {state_index}"),
         ),
         (
-            rows <= 1.0,
-            format!("Message rows per loop {rows} exceed 1"),
-        ),
-        (
-            total <= positions,
-            format!("total Message rows {total} exceed {positions} page positions"),
+            rows <= 1.0 && loops <= limit as f64,
+            format!("Message hydration read {rows} rows in {loops} loops for {limit} positions"),
         ),
         (
             buffers < buffer_cap,
@@ -230,7 +243,6 @@ async fn authorized_page_plans_generically_without_leaking_the_setting(pool: PgP
         )
         .bind(org).bind(id).bind(sender).execute(&pool).await.unwrap();
     }
-    seed_channel_log(&pool).await;
     let app = crate::test_app_pool(pool.clone()).await;
     // One connection, so every check below observes the page's own backend.
     let single = sqlx::postgres::PgPoolOptions::new()
@@ -297,7 +309,6 @@ async fn authorized_page_denies_a_removal_committed_between_parse_and_execution(
          SELECT $1, $2, $3, gen_random_uuid(), n, gen_random_uuid(), 'parse' FROM generate_series(1, 3) n",
     )
     .bind(org).bind(private).bind(sender).execute(&pool).await.unwrap();
-    seed_channel_log(&pool).await;
     let grant = async || {
         sqlx::query("INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $2, $3)")
             .bind(org).bind(private).bind(reader).execute(&pool).await.unwrap();

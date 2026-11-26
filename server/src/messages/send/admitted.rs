@@ -193,7 +193,6 @@ async fn persist_admitted(
         .fetch_optional(tx.connection()?).await?;
     if let Some(mut message) = message {
         search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
-        log::create(tx.connection()?, organization_id, &message).await?;
         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave

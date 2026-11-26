@@ -71,7 +71,6 @@ async fn skewed(pool: &PgPool) -> Skewed {
     .execute(pool)
     .await
     .unwrap();
-    seed_channel_log(pool).await;
     sqlx::query("ANALYZE messages, channel_log, channels, users, message_mentions")
         .execute(pool)
         .await

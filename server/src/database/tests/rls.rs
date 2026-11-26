@@ -69,11 +69,11 @@ async fn tenant_base(admin: &PgPool) -> Tenant {
         "INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $3, $2, 'Member', 'owner')",
         "INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $4, 'general', 'public')",
         "INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $4, $3)",
-        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 1)",
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 2)",
         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) VALUES ($1, $4, $5, 'topic', 1, 1, 1)",
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id) VALUES ($1, gen_random_uuid(), $4, 1, $3, gen_random_uuid(), 'hello', $5)",
         "INSERT INTO message_search_terms (organization_id, channel_id, term, created_at, message_id) SELECT $1,$4,'he',created_at,id FROM messages WHERE organization_id=$1 AND channel_id=$4",
-        "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$4",
+        "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,operation_id,destination_topic_id) SELECT organization_id,channel_id,2,'move',id,sender,gen_random_uuid(),$5 FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO operation_receipts (organization_id,actor,operation_id,kind,channel_id,target_id,intent_digest,outcome_version,outcome_deleted) SELECT $1,$3,gen_random_uuid(),'edit',$4,id,sha256('intent'::bytea),1,false FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$4,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$4",
         // message_append_counts rows come from the Message trigger; a correction needs a Move or Delete.
@@ -217,15 +217,24 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
             Some(expected),
             "{table}: UPDATE move: {moved}"
         );
-        if table == "channel_log" {
-            continue; // UPDATE/DELETE are privilege-denied even within the tenant.
-        }
-        database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
-            for sql in [
-                format!("UPDATE {table} SET organization_id = organization_id WHERE organization_id = $1"),
+        let statements = match table {
+            "channel_log" => continue, // UPDATE/DELETE are denied even within the tenant.
+            "messages" => {
+                vec!["UPDATE messages SET body = body WHERE organization_id = $1".to_owned()]
+            }
+            _ => vec![
+                format!(
+                    "UPDATE {table} SET organization_id = organization_id WHERE organization_id = $1"
+                ),
                 format!("DELETE FROM {table} WHERE organization_id = $1"),
-            ] {
-                let affected = sqlx::query(&sql).bind(b.organization).execute(&mut *tx).await?;
+            ],
+        };
+        database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
+            for sql in statements {
+                let affected = sqlx::query(&sql)
+                    .bind(b.organization)
+                    .execute(&mut *tx)
+                    .await?;
                 assert_eq!(affected.rows_affected(), 0, "{table}: {sql}");
             }
             Ok::<_, sqlx::Error>(())
@@ -258,13 +267,21 @@ async fn rls_without_context_reads_nothing_and_writes_nothing(pool: PgPool) {
             format!("DELETE FROM {table}"),
         ] {
             let result = sqlx::query(&sql).execute(&mut *connection).await;
-            if *table == "channel_log" {
+            if matches!(*table, "channel_log" | "messages") {
                 assert_eq!(sqlstate(&result.unwrap_err()).as_deref(), Some("42501"));
             } else {
                 assert_eq!(result.unwrap().rows_affected(), 0, "{table}: {sql}");
             }
         }
     }
+    assert_eq!(
+        sqlx::query("UPDATE messages SET body = body")
+            .execute(&mut *connection)
+            .await
+            .unwrap()
+            .rows_affected(),
+        0
+    );
     drop(connection);
     // Copy as the owner-visible row: INSERT without context fails WITH CHECK.
     for table in TABLES {

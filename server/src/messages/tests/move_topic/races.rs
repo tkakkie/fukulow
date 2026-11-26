@@ -100,7 +100,9 @@ async fn move_ambiguous_commit_recovers_by_same_key_without_reallocating(pool: P
         Some(2)
     );
     let after = state(&pool, f.org, f.channel).await;
-    assert_eq!(after[3].as_array().unwrap().len(), 2);
+    assert_eq!(after[0]["seq"], 2);
+    assert_eq!(after[3].as_array().unwrap().len(), 1);
+    assert_eq!(after[3][0]["event_seq"], 2);
     assert_eq!(after[4].as_array().unwrap().len(), 1);
 }
 

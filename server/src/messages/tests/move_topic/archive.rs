@@ -76,8 +76,17 @@ async fn assert_both_commit_orders(pool: &PgPool, writer: Writer) {
     );
     let outcome = body(response).await;
     assert_eq!(archive_task.await.unwrap().status(), StatusCode::NO_CONTENT);
+    let check_positions = |snapshot: &Value| {
+        let (messages, mutations) = match writer {
+            Writer::Send(_) => (2, 0),
+            Writer::Move(_) => (1, 1),
+        };
+        assert_eq!(snapshot[0]["seq"], 2);
+        assert_eq!(snapshot[1].as_array().unwrap().len(), messages);
+        assert_eq!(snapshot[3].as_array().map_or(0, Vec::len), mutations);
+    };
     let committed = state(pool, f.org, f.channel).await;
-    assert_eq!(committed[3].as_array().unwrap().len(), 2);
+    check_positions(&committed);
     assert_eq!(body(write(&f, root, writer).await).await, outcome);
     assert_eq!(state(pool, f.org, f.channel).await, committed);
 
@@ -126,13 +135,7 @@ async fn assert_both_commit_orders(pool: &PgPool, writer: Writer) {
         StatusCode::NO_CONTENT
     );
     assert!(write(&f, root, writer).await.status().is_success());
-    assert_eq!(
-        state(pool, f.org, f.channel).await[3]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    check_positions(&state(pool, f.org, f.channel).await);
 }
 
 #[fukulow_test::test]

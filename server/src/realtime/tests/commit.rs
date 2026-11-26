@@ -63,11 +63,18 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
             _ = waiting_for_commit(&pool, pid) => {},
             stale = event(&mut between) => panic!("handoff before COMMIT resolved: {stale}"),
         }
-        let visible =
-            messages::replay_page(&pool, f.organization, f.channel, initial_seq, i64::MAX)
-                .await
-                .unwrap();
-        assert!(visible.is_empty());
+        // A page claiming the pending position as committed must fail closed.
+        assert!(matches!(
+            messages::replay_page(
+                &pool,
+                f.organization,
+                f.channel,
+                initial_seq,
+                initial_seq + 1
+            )
+            .await,
+            Err(sqlx::Error::RowNotFound)
+        ));
 
         // A concurrent same-key retry must wait for the original outcome, then use its row.
         let app = f.app.clone();
@@ -144,12 +151,10 @@ async fn ambiguous_commit_rollback_allows_gap_free_same_key_retry(pool: PgPool) 
     tx.rollback().await.unwrap();
     ready(&mut between, f.channel, 0).await;
     silent(&mut between).await;
-    assert!(
-        messages::replay_page(&pool, f.organization, f.channel, 0, i64::MAX)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(matches!(
+        messages::replay_page(&pool, f.organization, f.channel, 0, 1).await,
+        Err(sqlx::Error::RowNotFound)
+    ));
     let canonical = send(&f, &f.token, f.channel, key, "rolled back").await;
     assert_eq!(canonical["created_seq"], 1);
     assert_eq!(event(&mut between).await["message"], canonical);
@@ -469,12 +474,10 @@ async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(po
         started.elapsed().as_millis()
     );
     ready(&mut between, channel, 0).await;
-    assert!(
-        messages::replay_page(&pool, f.organization, channel, 0, i64::MAX)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(matches!(
+        messages::replay_page(&pool, f.organization, channel, 0, 1).await,
+        Err(sqlx::Error::RowNotFound)
+    ));
     sqlx::query("DROP TRIGGER sleep_commit ON messages")
         .execute(&pool)
         .await

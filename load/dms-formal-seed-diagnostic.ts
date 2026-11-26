@@ -77,7 +77,7 @@ export function serverDurations(dbLog: string) {
 }
 
 // Duration lines one diagnostic batch session logs inside its clock window: the start clock query, the Message INSERT
-// and the three Channel log statements (PREPARE, EXECUTE, DEALLOCATE) always; the SET before the start clock and the
+// with BEGIN, the schema-aware fixture DO and COMMIT always; the SET before the start clock and the
 // end clock query only when their whole-millisecond log time falls on a window edge. The seed test checks the count
 // against the batch SQL.
 export const batchServerStatements = { min: 5, max: 7 } as const;

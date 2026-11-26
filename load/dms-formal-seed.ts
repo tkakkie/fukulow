@@ -159,8 +159,10 @@ INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${
       const startedAtMs = trace ? Date.now() : 0;
       if (trace) Object.assign(trace, { batchIndex, baselineMs: batchBaselineMs ?? null, startedAtMs });
       const ids = batchPairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
-      batchSql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
-${createLog(org, ids)}`);
+      batchSql(`BEGIN;
+INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
+${createLog(org, ids)}
+COMMIT;`);
       const durationMs = performance.now() - batchStart;
       const endedAtMs = trace ? Date.now() : 0;
       recordTiming({ kind: 'batch', organization: o, batchIndex, durationMs, ...(trace ? { startedAtMs, endedAtMs, ...diagnosticClock() } : {}) });

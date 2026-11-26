@@ -126,9 +126,15 @@ async fn send_receipt_is_immutable_and_versions_never_decrease_for_runtime_role(
         "id",
     );
     let app_pool = crate::test_app_pool(pool.clone()).await;
-    for sql in [
-        "UPDATE messages SET send_digest = sha256('forged'::bytea) WHERE organization_id=$1 AND id=$2",
-        "UPDATE messages SET version = 0 WHERE organization_id=$1 AND id=$2",
+    for (sql, denied_codes) in [
+        (
+            "UPDATE messages SET send_digest = sha256('forged'::bytea) WHERE organization_id=$1 AND id=$2",
+            &["42501"][..],
+        ),
+        (
+            "UPDATE messages SET version = 0 WHERE organization_id=$1 AND id=$2",
+            &["P0001", "23514"][..],
+        ),
     ] {
         let error =
             crate::database::organization(&app_pool, org, async |tx: &mut sqlx::PgConnection| {
@@ -138,7 +144,8 @@ async fn send_receipt_is_immutable_and_versions_never_decrease_for_runtime_role(
             .unwrap_err();
         let code = error.as_database_error().unwrap().code();
         assert!(
-            matches!(code.as_deref(), Some("P0001" | "23514")),
+            code.as_deref()
+                .is_some_and(|code| denied_codes.contains(&code)),
             "{sql}: {error}"
         );
     }
@@ -205,6 +212,7 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
     .bind(org).bind(channel).bind(sender).bind(root).bind(reply).bind(main).bind(topic)
     .bind(main_reply)
     .execute(&pool).await.unwrap();
+    seed_legacy_creates(&pool, org, &[channel]).await;
     // Sends commit the counter with the Message; #519's backfill check requires it.
     sqlx::query(
         "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1,$2,4) \

@@ -564,6 +564,7 @@ async fn a3_migration_backfill_keeps_counts_of_a_populated_database(pool: PgPool
             .any(|row| row[3] > row[2] && row[5] > 0),
         "fixture needs Topic Unread and Mentions: {before:?}"
     );
+    seed_legacy_creates(&pool, world.org, &world.channels).await;
     sqlx::migrate!().run(&pool).await.unwrap();
     assert_check(&pool, world.org, "after backfill").await;
     assert_eq!(

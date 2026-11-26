@@ -1,8 +1,14 @@
 use super::*;
 
 async fn positions(pool: &PgPool, org: Uuid, channel: Uuid) -> Vec<i64> {
-    sqlx::query_scalar("SELECT event_seq FROM channel_log WHERE organization_id=$1 AND channel_id=$2 ORDER BY event_seq")
-        .bind(org).bind(channel).fetch_all(pool).await.unwrap()
+    sqlx::query_scalar(
+        "SELECT seq FROM messages WHERE organization_id=$1 AND channel_id=$2 ORDER BY seq",
+    )
+    .bind(org)
+    .bind(channel)
+    .fetch_all(pool)
+    .await
+    .unwrap()
 }
 
 #[fukulow_test::test]
@@ -34,22 +40,25 @@ async fn channel_log_concurrent_sends_and_duplicate_retries_append_exactly_once(
         positions(&pool, org, channel).await,
         (1..=17).collect::<Vec<_>>()
     );
-    let matching: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM channel_log l JOIN messages m ON m.organization_id=l.organization_id AND m.id=l.message_id \
-         WHERE l.organization_id=$1 AND l.channel_id=$2 AND l.kind='create' AND l.event_seq=m.seq \
-         AND l.channel_id=m.channel_id AND l.sender=m.sender AND l.client_message_id=m.client_message_id",
-    ).bind(org).bind(channel).fetch_one(&pool).await.unwrap();
-    assert_eq!(matching, 17);
+    let mutations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM channel_log WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(org)
+    .bind(channel)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mutations, 0);
 }
 
 #[fukulow_test::test]
 async fn channel_log_failure_rolls_back_message_counter_and_topic(pool: PgPool) {
     let (app, org, _, channel, token) = fixture(&pool).await;
     sqlx::raw_sql(
-        "CREATE FUNCTION fail_log_commit() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN RAISE EXCEPTION 'injected failure after log insertion'; END $$;
-         CREATE CONSTRAINT TRIGGER fail_log_commit AFTER INSERT ON channel_log
-         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_log_commit();",
+        "CREATE FUNCTION fail_create_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected failure after Message insertion'; END $$;
+         CREATE CONSTRAINT TRIGGER fail_create_commit AFTER INSERT ON messages
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_create_commit();",
     )
     .execute(&pool)
     .await
@@ -72,7 +81,7 @@ async fn channel_log_failure_rolls_back_message_counter_and_topic(pool: PgPool) 
         .unwrap();
         assert_eq!(count, 0, "{table}");
     }
-    sqlx::query("DROP TRIGGER fail_log_commit ON channel_log")
+    sqlx::query("DROP TRIGGER fail_create_commit ON messages")
         .execute(&pool)
         .await
         .unwrap();
@@ -119,7 +128,7 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(positions(&pool, org, channel).await, [1, 2, 3]);
+    assert_eq!(positions(&pool, org, channel).await, [1, 3]);
     assert!(matches!(
         replay_page(&app_pool, org, channel, 0, 3).await,
         Err(sqlx::Error::RowNotFound)
@@ -146,11 +155,15 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
 async fn channel_log_runtime_denies_update_delete_and_truncate_with_read_insert_controls(
     pool: PgPool,
 ) {
-    let (app, org, _, channel, token) = fixture(&pool).await;
+    let (app, org, sender, channel, token) = fixture(&pool).await;
     sent(&app, &token, channel, input(Uuid::new_v4(), "control")).await;
     let app_pool = crate::test_app_pool(pool.clone()).await;
     crate::database::organization(&app_pool, org, async |tx: &mut sqlx::PgConnection| {
-        assert_eq!(positions_connection(tx, org, channel).await?, [1]);
+        sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,operation_id,destination_topic_id)
+                     SELECT organization_id,channel_id,2,'move',id,sender,gen_random_uuid(),gen_random_uuid()
+                     FROM messages WHERE organization_id=$1 AND channel_id=$2 AND sender=$3")
+            .bind(org).bind(channel).bind(sender).execute(&mut *tx).await?;
+        assert_eq!(mutation_positions(tx, org, channel).await?, [2]);
         Ok::<_, sqlx::Error>(())
     })
     .await
@@ -193,10 +206,14 @@ async fn channel_log_runtime_denies_update_delete_and_truncate_with_read_insert_
     })
     .await
     .unwrap();
-    assert_eq!(positions(&pool, org, channel).await, [1]);
+    let mut owner = pool.acquire().await.unwrap();
+    assert_eq!(
+        mutation_positions(&mut owner, org, channel).await.unwrap(),
+        [2]
+    );
 }
 
-async fn positions_connection(
+async fn mutation_positions(
     tx: &mut sqlx::PgConnection,
     org: Uuid,
     channel: Uuid,
@@ -229,7 +246,11 @@ async fn channel_log_migration_backfills_existing_messages_and_scopes_foreign_ke
     .execute(&pool)
     .await
     .unwrap();
-    assert_eq!(positions(&pool, org, channel).await, [1, 2, 3]);
+    let mut owner = pool.acquire().await.unwrap();
+    assert_eq!(
+        mutation_positions(&mut owner, org, channel).await.unwrap(),
+        [1, 2, 3]
+    );
     let mismatch: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM messages m FULL JOIN channel_log l ON l.organization_id=m.organization_id AND l.channel_id=m.channel_id AND l.event_seq=m.seq \
          WHERE m.id IS DISTINCT FROM l.message_id OR l.kind IS DISTINCT FROM 'create' OR m.sender IS DISTINCT FROM l.sender OR m.client_message_id IS DISTINCT FROM l.client_message_id",
@@ -267,7 +288,6 @@ async fn channel_event_pages_are_bounded_exclusive_and_hydrate_current_state(poo
     let (app, org, sender, channel, token) = fixture(&pool).await;
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,version,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,n,$3,gen_random_uuid(),'original' FROM generate_series(1,205) n")
         .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
-    seed_channel_log(&pool).await;
     sqlx::query(
         "INSERT INTO channel_message_sequences (organization_id,channel_id,seq) VALUES ($1,$2,205)",
     )
@@ -310,7 +330,7 @@ async fn channel_event_pages_are_bounded_exclusive_and_hydrate_current_state(poo
             assert_eq!(event["message"]["body"], "current");
         }
     }
-    // Orphan state cannot turn a missing event into a creation-ordered gap fill.
+    // Directly inserted state beyond the captured watermark is not replayable yet.
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,version,sender,client_message_id,body) VALUES ($1,gen_random_uuid(),$2,206,206,$3,gen_random_uuid(),'not logged')")
         .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
     let page = body(event_response(&app, &token, channel, "?after_seq=205").await).await;
@@ -405,19 +425,13 @@ async fn channel_event_pages_fail_closed_on_missing_log_positions(pool: PgPool) 
     for _ in 0..3 {
         sent(&app, &token, channel, input(Uuid::new_v4(), "original")).await;
     }
-    // The owner-only fault injection bypasses append-only triggers for corrupt-log probes.
-    sqlx::query("ALTER TABLE channel_log DISABLE TRIGGER USER")
+    // The owner removes the final position while leaving W at 3.
+    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=3")
+        .bind(org)
+        .bind(channel)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "DELETE FROM channel_log WHERE organization_id=$1 AND channel_id=$2 AND event_seq=2",
-    )
-    .bind(org)
-    .bind(channel)
-    .execute(&pool)
-    .await
-    .unwrap();
     assert_error(
         event_response(&app, &token, channel, "?after_seq=0").await,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -449,8 +463,6 @@ async fn channel_event_pages_exclude_uncommitted_tail_until_shared_watermark_adv
         let tx = if seq == 10 { &mut lower } else { &mut upper };
         sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,version,sender,client_message_id,body) VALUES ($1,$2,$3,$4,$4,$5,$6,'tail')")
             .bind(org).bind(id).bind(channel).bind(seq).bind(sender).bind(key).execute(&mut **tx).await.unwrap();
-        sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) VALUES ($1,$2,$3,'create',$4,$5,$6)")
-            .bind(org).bind(channel).bind(seq).bind(id).bind(sender).bind(key).execute(&mut **tx).await.unwrap();
         upper.commit().await.unwrap();
     }
     // Position 11 is visible first, but the committed-prefix watermark remains 9.
@@ -690,4 +702,100 @@ async fn channel_event_pages_recheck_extracted_authorization_after_access_and_me
             StatusCode::OK
         );
     }
+}
+
+#[fukulow_test::test]
+async fn replay_detects_duplicate_at_page_boundary(pool: PgPool) {
+    let (app, org, sender, channel, token) = fixture(&pool).await;
+    sqlx::query("INSERT INTO messages (organization_id,channel_id,id,seq,sender,client_message_id,body)
+                 SELECT $1,$2,gen_random_uuid(),n,$3,gen_random_uuid(),'create' FROM generate_series(1,50) n")
+        .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1,$2,50)")
+        .bind(org).bind(channel).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,operation_id,destination_topic_id)
+                 SELECT $1,$2,50,'move',id,$3,gen_random_uuid(),gen_random_uuid()
+                 FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=1")
+        .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
+    let restricted = crate::test_app_pool(pool.clone()).await;
+    assert!(matches!(
+        replay_page(&restricted, org, channel, 0, 50).await,
+        Err(sqlx::Error::RowNotFound)
+    ));
+    assert!(matches!(
+        authorized_replay_page(&restricted, org, (sender, 0), channel, 0, 50).await,
+        Err(MessageError::Database(sqlx::Error::RowNotFound))
+    ));
+    assert_error(
+        event_response(&app, &token, channel, "?after_seq=0&limit=49").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .await;
+}
+
+#[fukulow_test::test]
+async fn messages_runtime_can_mutate_state_but_cannot_erase_or_renumber_creations(pool: PgPool) {
+    let (app, org, _, channel, token) = fixture(&pool).await;
+    sent(&app, &token, channel, input(Uuid::new_v4(), "control")).await;
+    let restricted = crate::test_app_pool(pool.clone()).await;
+    for sql in [
+        "DELETE FROM messages",
+        "TRUNCATE messages CASCADE",
+        "UPDATE messages SET organization_id=organization_id",
+        "UPDATE messages SET channel_id=channel_id",
+        "UPDATE messages SET seq=seq",
+        "UPDATE messages SET id=id",
+        "UPDATE messages SET sender=sender",
+        "UPDATE messages SET client_message_id=client_message_id",
+        "UPDATE messages SET send_digest=send_digest",
+    ] {
+        let error =
+            crate::database::organization(&restricted, org, async |tx: &mut sqlx::PgConnection| {
+                sqlx::query(sql).execute(tx).await
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("42501"),
+            "{sql}"
+        );
+    }
+    for column in [
+        "organization_id",
+        "channel_id",
+        "id",
+        "sender",
+        "client_message_id",
+        "seq",
+    ] {
+        let value = if column == "seq" {
+            "seq+1"
+        } else {
+            "gen_random_uuid()"
+        };
+        let error = sqlx::query(&format!("UPDATE messages SET {column}={value}"))
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("P0001"),
+            "{column}"
+        );
+    }
+    crate::database::organization(&restricted, org, async |tx: &mut sqlx::PgConnection| {
+        sqlx::query(
+            "UPDATE messages SET body='', deleted=true WHERE organization_id=$1 AND channel_id=$2",
+        )
+        .bind(org)
+        .bind(channel)
+        .execute(tx)
+        .await
+    })
+    .await
+    .unwrap();
+    let page = replay_page(&restricted, org, channel, 0, 1).await.unwrap();
+    assert!(page[0].message().deleted);
+    assert!(page[0].message().body.is_none());
+    assert!(page[0].message().mentions.is_none());
 }

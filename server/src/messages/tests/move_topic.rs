@@ -303,3 +303,66 @@ async fn move_from_main_to_new_topic_uses_access_baseline_and_creation_positions
     assert_eq!(after["channels"][0]["unread_count"], 1);
     assert_eq!(after["channels"][0]["mention_unread_count"], 1);
 }
+
+#[fukulow_test::test]
+async fn mixed_replay_pages_keep_tombstones_move_positions_and_current_versions(pool: PgPool) {
+    let f = Fixture::new(&pool).await;
+    let root = f.root().await;
+    let tombstone = f.post(&f.token, reply(Uuid::new_v4(), &root)).await;
+    mark_tombstone(&pool, &f, &tombstone).await;
+    let intent = named(2, "Destination");
+    let outcome =
+        moved(move_request(&f.app, &f.token, f.channel, id(&root), intent.clone()).await).await;
+    assert_eq!(outcome.move_seq, Some(3));
+    assert_eq!(
+        moved(move_request(&f.app, &f.token, f.channel, id(&root), intent).await)
+            .await
+            .move_seq,
+        Some(3)
+    );
+    assert!(
+        moved(
+            move_request(
+                &f.app,
+                &f.token,
+                f.channel,
+                id(&root),
+                named(3, "Destination")
+            )
+            .await
+        )
+        .await
+        .move_seq
+        .is_none()
+    );
+    assert_eq!(f.root().await["created_seq"], 4);
+
+    let page = async |after: u64, limit: u64| {
+        let path = format!(
+            "/api/v1/channels/{}/events?after_seq={after}&limit={limit}",
+            f.channel
+        );
+        let response = request(&f.app, "GET", &path, &f.token, Value::Null).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body(response).await
+    };
+    let first = page(0, 1).await;
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["events"][0]["message"]["version"], 3);
+    let mixed = page(1, 2).await;
+    assert_eq!(mixed["has_more"], true);
+    assert_eq!(mixed["events"][0]["seq"], 2);
+    assert_eq!(mixed["events"][0]["message"]["version"], 3);
+    assert_eq!(mixed["events"][0]["message"]["deleted"], true);
+    assert!(mixed["events"][0]["message"].get("body").is_none());
+    assert!(mixed["events"][0]["message"].get("mentions").is_none());
+    assert_eq!(mixed["events"][1]["kind"], "move");
+    assert_eq!(mixed["events"][1]["seq"], 3);
+    assert_eq!(
+        mixed["events"][1]["operation_id"],
+        json!(outcome.operation_id)
+    );
+    let last = page(3, 2).await;
+    assert_eq!(last["has_more"], false);
+    assert_eq!(last["events"][0]["message"]["created_seq"], 4);
+}
