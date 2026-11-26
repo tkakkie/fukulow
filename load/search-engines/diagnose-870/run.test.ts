@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { measuredSetsArg, sets796 } from '../../harness-core/frequency-layout.ts';
+import { formatHostBusy } from '../../launcher/host-busy.ts';
 import { rawIo, type Io } from './io.ts';
 import { qualifiedCpuSets } from './qualification.ts';
 import { stage1, type Measurement } from './judge.ts';
@@ -14,12 +15,14 @@ import { approvalFor, finishRecords, limitedExitCode, main, options, parseCount,
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
 const swapped = 'client=2,4,6,10,12,14;server=1,3,5,9,11,13;housekeeping=0,7,8,15';
+const launchSession = 'session-870';
 const json = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value));
 
 function host() {
   const dir = mkdtempSync(join(tmpdir(), 'diag870-'));
   const busy = join(dir, 'HOST-BUSY');
-  writeFileSync(busy, 'q870: smoke-870, stage1-870, stage2-870 2026-11-24T00:00:00.000Z\n');
+  writeFileSync(busy, formatHostBusy('q870', ['smoke-870', 'stage1-870', 'stage2-870'],
+    new Date('2026-11-24T00:00:00.000Z'), launchSession));
   const qualification = join(dir, 'qualification.json');
   const reportPath = join(dir, 'formal-report.json');
   const verdict = {result: 'PASS', reasons: [], runs: [1, 2, 3].map(i => ({name: `formal-${i}`, valid: true}))};
@@ -27,7 +30,8 @@ function host() {
   const formalReport = {path: reportPath, sha256: createHash('sha256').update(readFileSync(reportPath)).digest('hex')};
   const record = {issue: 796, result: 'PASS', cpuSets: sets, formalReport};
   json(qualification, record);
-  return {dir, busy, qualification, record, verdict, env: {FUKULOW_HOST_BUSY: busy, FUKULOW_LAUNCH_JOB: 'stage1-870'}};
+  return {dir, busy, qualification, record, verdict, env: {
+    FUKULOW_HOST_BUSY: busy, FUKULOW_LAUNCH_JOB: 'stage1-870', FUKULOW_LAUNCH_SESSION: launchSession}};
 }
 // The maintainer's go for one stage, as the operator records it before queueing the job.
 function approval(dir: string, stage: string, over: Record<string, unknown> = {}) {
@@ -84,10 +88,22 @@ test('the diagnosis runs only on Linux, with the #796 CPU sets and qualification
 test('a run must be started by the launcher: HOST-BUSY held and naming this job', () => {
   const h = host();
   const args = options(argv(h, 'smoke'), 'linux');
-  assert.doesNotThrow(() => prerequisites(args, hash, {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870'}, 16));
+  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870'};
+  assert.doesNotThrow(() => prerequisites(args, hash, env, 16));
+  assert.doesNotThrow(() => prerequisites(args, hash, {...env, FUKULOW_LAUNCH_SESSION: undefined}, 16));
   assert.throws(() => prerequisites(args, hash, {}, 16), /HOST-BUSY is not held/);
-  assert.throws(() => prerequisites(args, hash, {...h.env, FUKULOW_LAUNCH_JOB: 'other'}, 16), /HOST-BUSY is not held/);
-  assert.throws(() => prerequisites(args, hash, {...h.env, FUKULOW_HOST_BUSY: join(h.dir, 'missing')}, 16), /HOST-BUSY is not held/);
+  assert.throws(() => prerequisites(args, hash, {...env, FUKULOW_LAUNCH_JOB: 'smoke'}, 16), /HOST-BUSY is not held/);
+  assert.throws(() => prerequisites(args, hash, {...env, FUKULOW_HOST_BUSY: join(h.dir, 'missing')}, 16), /HOST-BUSY is not held/);
+  assert.throws(() => prerequisites(args, hash, {...env, FUKULOW_LAUNCH_SESSION: 'other'}, 16), /HOST-BUSY is not held/);
+});
+
+test('the #870 smoke accepts the launcher HOST-BUSY line with a session', t => {
+  const h = host();
+  t.after(() => rmSync(h.dir, {recursive: true}));
+  const session = '12345678-1234-4234-8234-123456789abc';
+  writeFileSync(h.busy, 'q870: smoke-870 2026-11-26T00:00:00.000Z session 12345678-1234-4234-8234-123456789abc\n');
+  const args = options(argv(h, 'smoke'), 'linux');
+  assert.doesNotThrow(() => prerequisites(args, hash, {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870', FUKULOW_LAUNCH_SESSION: session}, 16));
 });
 
 test('swapped CPU sets or a qualification that is not PASS on the #796 sets are refused', () => {
@@ -222,7 +238,7 @@ function preflightFixture(t: TestContext) {
   const h = host();
   t.after(() => rmSync(h.dir, {recursive: true}));
   const args = argv(h, 'smoke');
-  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870', FUKULOW_LAUNCH_SESSION: 'session-870',
+  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870',
     FUKULOW_LAUNCH_GATE_LOG: join(h.dir, 'smoke-870-gate.log')};
   const calls: string[] = [];
   const io = Object.fromEntries(Object.keys(rawIo).map(name => [name, () => {
