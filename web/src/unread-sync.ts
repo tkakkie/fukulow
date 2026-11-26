@@ -8,7 +8,7 @@ export function createUnreadSync(options: SyncOptions & { unreadApi?: UnreadApi;
   composition: { sync: ReturnType<typeof createSync>; topics: Topics } = createTopicSync(options)) {
   const { sync, topics } = composition
   const unread = createUnread(sync, { topics, readTopicSummary: options.readTopicSummary, api: options.unreadApi ?? unreadApi(options.organizationId ?? ''),
-    onSessionEnded: options.onSessionEnded, requestTimeoutMs: options.requestTimeoutMs, refreshList: options.refreshList, ensureList: options.ensureList, refreshArchived: options.refreshArchived, refreshDms: options.refreshDms, isDm: options.isDm })
+    requestTimeoutMs: options.requestTimeoutMs, refreshList: options.refreshList, ensureList: options.ensureList, refreshArchived: options.refreshArchived, refreshDms: options.refreshDms, isDm: options.isDm })
   return { topics, unread, sync: { ...sync,
     replaceSession(selfId: string) { unread.replaceSession(); return sync.replaceSession(selfId) },
     async close() { unread.close(); await sync.close() },

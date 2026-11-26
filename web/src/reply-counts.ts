@@ -15,7 +15,7 @@ const empty: Readonly<Record<string, number | null>> = Object.freeze({})
 
 /** I/O only: Rust owns authority, deduplication, floors and per-root generations. */
 export function createReplyCounts(sync: Sync, sources: { replies: Replies; topics?: Pick<Topics, 'countMessages' | 'subscribe'> }, options: {
-  api: ReplyCountsApi; onSessionEnded?: () => void; requestTimeoutMs?: number; random?: () => number
+  api: ReplyCountsApi; requestTimeoutMs?: number; random?: () => number
 }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
@@ -106,8 +106,10 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       .then(result => {
         // C6: cancellation/timeout/unwatch does not hide a same-Account-Session late 401.
         if (account !== session) return
-        if (!result.ok && result.kind === 'http' && result.status === 401) { void sync.close(); options.onSessionEnded?.(); return }
-        if (!closed && api.isOrganizationUnavailable(result)) { void sync.unavailable(); return }
+        if (!result.ok && result.kind === 'http' && (result.status === 401 || (!closed && api.isOrganizationUnavailable(result)))) {
+          sync.reportAccess(result, sync)
+          return
+        }
         if (!current()) return
         if (result.ok && !sync.observeHistoryGeneration(result.data.history_generation)) return
         if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }

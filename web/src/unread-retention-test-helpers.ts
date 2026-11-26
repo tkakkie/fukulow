@@ -3,6 +3,7 @@ import type { createSync } from './sync'
 import type { Topics } from './topics'
 import type { TopicBaseline, TopicLine } from './topic-selectors'
 import { initialState } from './protocol-driver'
+import { standaloneAccess } from './sync-test-helpers'
 import { createUnread, type UnreadApi, type UnreadScope } from './unread'
 import { flush, msg, ok, row, summary } from './unread-test-helpers'
 
@@ -27,7 +28,7 @@ export function retentionClient() {
   }
   // Only the upstream observations/lifecycle used by Unread are implemented by this test double.
   const sync = { observeHistoryGeneration: (generation: string) => { state = { ...state, historyGeneration: generation }; return true }, request: (id: number) => state.requests[id], timer: (id: number) => state.timers[id], get: () => state, subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l) } },
-    close: async () => {}, unavailable: async () => {} } as unknown as ReturnType<typeof createSync>
+    close: async () => {}, unavailable: async () => {}, reportAccess: standaloneAccess().reportSyncAccess } as unknown as ReturnType<typeof createSync>
   const topics = { subscribe(l: () => void) { topicListeners.add(l); return () => { topicListeners.delete(l) } },
     get: () => ({ unavailable: false, lines: projectionRows.map(message => ({ kind: 'message', message })), topics: topicLines(),
       main: { asOfSeq: through, hasMore: false },

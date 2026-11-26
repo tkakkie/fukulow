@@ -9,7 +9,7 @@ import { record } from './protocol-test-helpers'
 export { deferred, ok } from './topic-test-helpers'
 export { flush } from './sync-test-helpers'
 import { ok } from './topic-test-helpers'
-import { flush } from './sync-test-helpers'
+import { flush, standaloneAccess } from './sync-test-helpers'
 export const msg = (seq: number, topic: string | null = null, sender = 'other', channel = 'A'): Message => ({ ...record(seq, channel), topic_id: topic, sender })
 export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ history_generation: '00000000-0000-4000-8000-000000000515', mention_unread_count: 0, main_mention_unread_count: 0, id: 'A', kind: 'channel', archived: false, name: 'A', visibility: 'public',
   capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false }, can_rename: { allowed: false }, can_archive: { allowed: false } },
@@ -39,6 +39,7 @@ export function unreadClient(sendMessage?: TimelineApi['sendMessage']) {
   }
   const onSessionEnded = vi.fn()
   const c = createUnreadSync({ selfId: 'me', organizationId: 'org', unreadApi, topicsApi, requestTimeoutMs: 1000, onSessionEnded,
+    ...standaloneAccess(onSessionEnded),
     random: () => 0.5,
     api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }), sendMessage: sendMessage ?? (async () => ({ ok: false, kind: 'network' })) },
     connect(h) { handlers.push(h); return { send() {}, close() {} } },

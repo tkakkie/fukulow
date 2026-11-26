@@ -47,7 +47,7 @@ type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
 
 /** Session-owned projection windows around the existing unfiltered sync controller. No protocol state is copied. */
 // Compose only via createTopicSync, or call replaceSession/close on topics before sync with a test.
-export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnded?: () => void; requestTimeoutMs?: number; activity?: Activity; initialTimeline?: InitialTimeline; isDm?(channel: string): boolean }) {
+export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeoutMs?: number; activity?: Activity; initialTimeline?: InitialTimeline; isDm?(channel: string): boolean }) {
   const canonical = (channel: string, held: Message | undefined, incoming: Message) =>
     knownMessageState(sync.get().channels[channel], held, incoming)
   const windows = new Map<string, Window>()
@@ -268,9 +268,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const session = sessionToken
     const operation = (reuse ? Promise.resolve(prefetched) : Promise.resolve().then(() => { startedAt = stampTopicEvidence(); return run() })).catch((): Result<T> => ({ ok: false, kind: 'network' }))
     void operation.then(r => {
-      if (!r.ok && r.kind === 'http' && r.status === 401 && session === sessionToken) {
-        void sync.close(); options.onSessionEnded?.()
-      } else if (api.isOrganizationUnavailable(r) && session === sessionToken) void sync.unavailable()
+      if (session === sessionToken) sync.reportAccess(r, sync)
     })
     const deadline = withTimeout || signal ? deadlines.start<Result<T>>({ ok: false, kind: 'network' }, {
       timeoutMs: withTimeout ? options.requestTimeoutMs ?? 30_000 : undefined,
@@ -426,7 +424,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         withSync(channel, () => { void sync.settleHistory(channel, response.topics.map(t => t.latest_message)) })
         notify(channel)
       },
-      error: r => { if (r.kind === 'http' && r.status === 401) options.onSessionEnded?.(); else if (api.isOrganizationUnavailable(r)) void sync.unavailable(); else if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && r.error !== 'topic_not_found'))) void sync.channelUnavailable(channel) },
+      error: r => {
+        if (!api.isOrganizationUnavailable(r) && r.kind === 'http' &&
+          (r.status === 403 || (r.status === 404 && r.error !== 'topic_not_found'))) void sync.channelUnavailable(channel)
+      },
       terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
       timeoutMs: options.requestTimeoutMs,
     })

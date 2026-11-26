@@ -40,7 +40,7 @@ type Channel = ReturnType<typeof channelState>
 type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; presented: Set<number>; covered: Coverage[]; needsPresentation: boolean; firstUnread?: UnreadRecord }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
-export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; readTopicSummary?: Topics['readTopicSummary']; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; ensureList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
+export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; readTopicSummary?: Topics['readTopicSummary']; requestTimeoutMs?: number; refreshList?: () => Promise<void>; ensureList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -158,9 +158,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const operation = Promise.resolve().then(run).catch((): Result<T> => ({ ok: false, kind: 'network' }))
     // Authentication failures outlive data authority; the old Organization's sync alone receives C10.
     void operation.then(r => {
-      if (account !== session) return
-      if (!r.ok && r.kind === 'http' && r.status === 401) { void sync.close(); options.onSessionEnded?.() }
-      else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
+      if (account === session) sync.reportAccess(r, sync)
     })
     const historyEpoch = sync.get().historyEpoch
     const deadline = deadlines.start<Result<T>>({ ok: false, kind: 'network' }, { channel, timeoutMs: options.requestTimeoutMs ?? 30_000 })
