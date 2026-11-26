@@ -32,6 +32,7 @@ export function createActivityTarget<T>(options: {
   const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
   let inFlightEpoch: number | null = null, inFlightGen = -1, acceptedEpoch: number | null = null
+  let readyReplacementGen = -1
   let noticePending = false, servingNotice = false
   const pendingReasons = new Set<ReadReason>()
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -60,6 +61,11 @@ export function createActivityTarget<T>(options: {
       void pending.finally(() => { if (running === pending) running = undefined }).catch(() => {})
     }
     return pending
+  }
+  function replaceFencedRead() {
+    if (!dirty || retry) return
+    if (readyReplacementGen === generation) void run()
+    else schedule(200)
   }
   async function execute() {
     if (closed || !dirty) return
@@ -94,7 +100,7 @@ export function createActivityTarget<T>(options: {
       if (own !== generation) {
         if (wasServingNotice) noticePending = true
         if (dirty) for (const r of reasons) pendingReasons.add(r)
-        if (dirty && !retry) schedule(200)
+        replaceFencedRead()
         return
       }
       const covered = options.covers?.(result.data) !== false
@@ -121,7 +127,7 @@ export function createActivityTarget<T>(options: {
       } else if (own !== generation) {
         if (wasServingNotice) noticePending = true
         if (dirty) for (const r of reasons) pendingReasons.add(r)
-        if (dirty) schedule(200)
+        replaceFencedRead()
       } else { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true }
     } } finally { options.settled?.() }
   }
@@ -149,9 +155,16 @@ export function createActivityTarget<T>(options: {
     ready() {
       const epoch = options.connectionEpoch?.() ?? null
       if (closed || epoch === null) return false
-      if (inFlight && inFlightGen === generation && inFlightEpoch === epoch) {
-        options.hide?.('reconcile')
-        return true
+      if (inFlight && inFlightGen === generation) {
+        if (inFlightEpoch === epoch) {
+          options.hide?.('reconcile')
+          return true
+        }
+        if (inFlightEpoch === null) {
+          invalidate('reconcile')
+          readyReplacementGen = generation
+          return true
+        }
       }
       if (acceptedEpoch === epoch) {
         options.onReadyCovered?.()
