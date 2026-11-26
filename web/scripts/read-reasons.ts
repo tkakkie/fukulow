@@ -6,8 +6,12 @@ export const CHANNEL_READ_MARK_NAME = 'fukulow:read:channels'
 
 export type ReadReason = 'initial' | 'notice' | 'access' | 'reconcile' | 'periodic'
 export type ChannelReadClass = 'O5-only' | 'startup' | 'composite' | 'empty' | 'unknown'
+export type ChannelReadMeasurementStatus = 'valid' | 'inconclusive'
 export type InvalidRunReason =
   | 'marks_unavailable'
+  | 'missing_or_malformed_request_id'
+  | 'unmatched_request'
+  | 'malformed_mark_reasons'
   | 'duplicate_request_id'
   | 'duplicate_mark_id'
   | 'unmatched_mark'
@@ -35,6 +39,8 @@ export type ClassifiedChannelRead = {
 
 export type ChannelReadSummary = {
   valid: boolean
+  status?: ChannelReadMeasurementStatus
+  rerunAttempted?: boolean
   invalidReasons: InvalidRunReason[]
   reads: ClassifiedChannelRead[]
   countsByClass: Record<ChannelReadClass, number>
@@ -42,20 +48,32 @@ export type ChannelReadSummary = {
 }
 
 export type CellChannelReadSummary = {
+  valid: boolean
+  status: ChannelReadMeasurementStatus
   validRuns: number
   invalidRuns: number
-  invalidRunReasons: Array<{ run: number; reasons: InvalidRunReason[] }>
+  invalidRunReasons: Array<{ run: number; reasons: InvalidRunReason[]; persistedAfterRerun?: boolean }>
   countsByClass: Record<ChannelReadClass, number>
   maxCountedReadsPerValidRun: number | null
+}
+
+export type ReportChannelReadSummary = {
+  valid: boolean
+  status: ChannelReadMeasurementStatus
+  validCells: number
+  invalidCells: Array<{
+    cell: string
+    invalidRuns: number
+    invalidRunReasons: CellChannelReadSummary['invalidRunReasons']
+  }>
+  countsByClass: Record<ChannelReadClass, number>
 }
 
 const VALID_REASONS = new Set<string>(['initial', 'notice', 'access', 'reconcile', 'periodic'])
 const READ_ID_PATTERN = /^[A-Za-z0-9._-]+$/
 
-export function isStartupChannelListRequest(req: Pick<CapturedChannelRequest, 'method' | 'path' | 'search'>): boolean {
-  if (req.method.toUpperCase() !== 'GET' || req.path !== CHANNELS_API_PATH) return false
-  const params = new URLSearchParams(req.search ?? '')
-  return params.get('archived') !== 'true'
+export function isChannelListRequest(req: Pick<CapturedChannelRequest, 'method' | 'path'>): boolean {
+  return req.method.toUpperCase() === 'GET' && req.path === CHANNELS_API_PATH
 }
 
 export function parseReadId(raw: unknown): string | null {
@@ -91,12 +109,12 @@ function emptyCounts(): Record<ChannelReadClass, number> {
   return { 'O5-only': 0, startup: 0, composite: 0, empty: 0, unknown: 0 }
 }
 
-/** Pairs each startup Channel list request one-to-one with its performance mark by read id. */
+/** Pairs each Channel list request one-to-one with its performance mark by read id. */
 export function classifyChannelReads(
   requests: readonly CapturedChannelRequest[],
   marks: readonly CapturedReadMark[] | null,
 ): ChannelReadSummary {
-  const channelRequests = requests.filter(isStartupChannelListRequest)
+  const channelRequests = requests.filter(isChannelListRequest)
   const invalidReasons = new Set<InvalidRunReason>()
   const countsByClass = emptyCounts()
 
@@ -134,13 +152,18 @@ export function classifyChannelReads(
       duplicateMarkIds.add(id)
       continue
     }
-    marksById.set(id, parseReasons(mark.reasons))
+    const parsedReasons = parseReasons(mark.reasons)
+    if (parsedReasons === null) invalidReasons.add('malformed_mark_reasons')
+    marksById.set(id, parsedReasons)
   }
 
   const requestIdCounts = new Map<string, number>()
   for (const req of channelRequests) {
     const id = parseReadId(req.readId)
-    if (id === null) continue
+    if (id === null) {
+      invalidReasons.add('missing_or_malformed_request_id')
+      continue
+    }
     const next = (requestIdCounts.get(id) ?? 0) + 1
     requestIdCounts.set(id, next)
     if (next > 1) invalidReasons.add('duplicate_request_id')
@@ -148,6 +171,10 @@ export function classifyChannelReads(
 
   for (const markId of marksById.keys()) {
     if (!requestIdCounts.has(markId)) invalidReasons.add('unmatched_mark')
+  }
+
+  for (const reqId of requestIdCounts.keys()) {
+    if (!marksById.has(reqId)) invalidReasons.add('unmatched_request')
   }
 
   const reads: ClassifiedChannelRead[] = channelRequests.map((req) => {
@@ -191,7 +218,7 @@ export function summarizeCellChannelReads(
   runs: ReadonlyArray<{ run: number; channelReads: ChannelReadSummary }>,
 ): CellChannelReadSummary {
   const countsByClass = emptyCounts()
-  const invalidRunReasons: Array<{ run: number; reasons: InvalidRunReason[] }> = []
+  const invalidRunReasons: CellChannelReadSummary['invalidRunReasons'] = []
   let validRuns = 0
   let maxCountedReadsPerValidRun: number | null = null
 
@@ -206,15 +233,54 @@ export function summarizeCellChannelReads(
           ? r.channelReads.countedReads
           : Math.max(maxCountedReadsPerValidRun, r.channelReads.countedReads)
     } else {
-      invalidRunReasons.push({ run: r.run, reasons: r.channelReads.invalidReasons })
+      invalidRunReasons.push({
+        run: r.run,
+        reasons: r.channelReads.invalidReasons,
+        ...(r.channelReads.rerunAttempted ? { persistedAfterRerun: true } : {}),
+      })
     }
   }
 
+  const valid = invalidRunReasons.length === 0
   return {
+    valid,
+    status: valid ? 'valid' : 'inconclusive',
     validRuns,
     invalidRuns: invalidRunReasons.length,
     invalidRunReasons,
     countsByClass,
     maxCountedReadsPerValidRun,
+  }
+}
+
+export function summarizeReportChannelReads(
+  cells: ReadonlyArray<{ cell: string; channelReads: CellChannelReadSummary }>,
+): ReportChannelReadSummary {
+  const countsByClass = emptyCounts()
+  const invalidCells: ReportChannelReadSummary['invalidCells'] = []
+  let validCells = 0
+
+  for (const c of cells) {
+    for (const key of Object.keys(countsByClass) as ChannelReadClass[]) {
+      countsByClass[key] += c.channelReads.countsByClass[key]
+    }
+    if (c.channelReads.valid) {
+      validCells++
+    } else {
+      invalidCells.push({
+        cell: c.cell,
+        invalidRuns: c.channelReads.invalidRuns,
+        invalidRunReasons: c.channelReads.invalidRunReasons,
+      })
+    }
+  }
+
+  const valid = invalidCells.length === 0
+  return {
+    valid,
+    status: valid ? 'valid' : 'inconclusive',
+    validCells,
+    invalidCells,
+    countsByClass,
   }
 }

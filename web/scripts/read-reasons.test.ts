@@ -3,10 +3,11 @@ import {
   CHANNELS_API_PATH,
   classifyChannelReads,
   classifyReasons,
+  isChannelListRequest,
   isCountedClass,
-  isStartupChannelListRequest,
   parseReadId,
   summarizeCellChannelReads,
+  summarizeReportChannelReads,
   type CapturedChannelRequest,
   type CapturedReadMark,
 } from './read-reasons.ts'
@@ -74,7 +75,7 @@ describe('read-reasons classification (#983)', () => {
     expect(result.countedReads).toBe(1)
   })
 
-  it('counts unknown reads (no header, unparsable header, or no mark for the id)', () => {
+  it('counts unknown reads AND marks the run invalid on missing/malformed headers or missing marks', () => {
     const result = classifyChannelReads(
       [
         req(1, null),
@@ -84,18 +85,35 @@ describe('read-reasons classification (#983)', () => {
       ],
       [],
     )
-    expect(result.valid).toBe(true)
+    expect(result.valid).toBe(false)
+    expect(new Set(result.invalidReasons)).toEqual(new Set(['missing_or_malformed_request_id', 'unmatched_request']))
     expect(result.reads.map((r) => r.classification)).toEqual(['unknown', 'unknown', 'unknown', 'unknown'])
     expect(result.reads.every((r) => r.counted)).toBe(true)
     expect(result.countsByClass).toEqual({ 'O5-only': 0, startup: 0, composite: 0, empty: 0, unknown: 4 })
     expect(result.countedReads).toBe(4)
+
+    const missingIdOnly = classifyChannelReads([req(1, null)], [])
+    expect(missingIdOnly.valid).toBe(false)
+    expect(missingIdOnly.invalidReasons).toEqual(['missing_or_malformed_request_id'])
+    expect(missingIdOnly.countedReads).toBe(1)
+
+    const unmatchedReqOnly = classifyChannelReads([req(1, 'ch-missing')], [])
+    expect(unmatchedReqOnly.valid).toBe(false)
+    expect(unmatchedReqOnly.invalidReasons).toEqual(['unmatched_request'])
+    expect(unmatchedReqOnly.countedReads).toBe(1)
+
+    const malformedReasons = classifyChannelReads([req(1, 'ch-bad')], [mark('ch-bad', ['bogus'])])
+    expect(malformedReasons.valid).toBe(false)
+    expect(malformedReasons.invalidReasons).toEqual(['malformed_mark_reasons'])
+    expect(malformedReasons.reads[0]?.classification).toBe('unknown')
+    expect(malformedReasons.countedReads).toBe(1)
   })
 
-  it('pairs strictly one-to-one by id regardless of order and excludes ?archived=true and non-channel paths', () => {
+  it('pairs strictly one-to-one by id regardless of order and classifies ?archived=true while ignoring non-channel paths', () => {
     const result = classifyChannelReads(
       [
         req(1, 'ch-2', '?history_generation=g1'),
-        req(2, null, '?archived=true'),
+        req(2, 'ch-archived', '?archived=true'),
         { seq: 3, method: 'POST', path: CHANNELS_API_PATH, readId: null },
         { seq: 4, method: 'GET', path: '/api/v1/orgs/{org}/members', readId: null },
         req(5, 'ch-1'),
@@ -105,15 +123,17 @@ describe('read-reasons classification (#983)', () => {
         mark('ch-1', ['initial']),
         mark('ch-3', ['periodic']),
         mark('ch-2', ['reconcile']),
+        mark('ch-archived', ['reconcile']),
       ],
     )
     expect(result.valid).toBe(true)
     expect(result.reads).toEqual([
       { seq: 1, readId: 'ch-2', reasons: ['reconcile'], classification: 'startup', counted: true },
+      { seq: 2, readId: 'ch-archived', reasons: ['reconcile'], classification: 'startup', counted: true },
       { seq: 5, readId: 'ch-1', reasons: ['initial'], classification: 'startup', counted: true },
       { seq: 6, readId: 'ch-3', reasons: ['periodic'], classification: 'O5-only', counted: false },
     ])
-    expect(result.countedReads).toBe(2)
+    expect(result.countedReads).toBe(3)
   })
 
   it('marks a run invalid when a mark id matches no request', () => {
@@ -157,28 +177,53 @@ describe('read-reasons classification (#983)', () => {
     expect(result.countedReads).toBe(2)
   })
 
-  it('summarizes cell channel reads and reports invalid runs separately', () => {
+  it('summarizes cell and report channel reads and marks persistent invalidity as inconclusive', () => {
     const run1 = classifyChannelReads(
       [req(1, 'ch-1'), req(2, 'ch-2'), req(3, 'ch-3')],
       [mark('ch-1', ['initial']), mark('ch-2', ['reconcile']), mark('ch-3', ['periodic'])],
     )
-    const run2 = classifyChannelReads([req(1, 'ch-4')], null)
-    const summary = summarizeCellChannelReads([
+    const run2 = { ...classifyChannelReads([req(1, 'ch-4')], null), rerunAttempted: true, status: 'inconclusive' as const }
+    const cellSummary = summarizeCellChannelReads([
       { run: 1, channelReads: run1 },
       { run: 2, channelReads: run2 },
     ])
-    expect(summary).toEqual({
+    expect(cellSummary).toEqual({
+      valid: false,
+      status: 'inconclusive',
       validRuns: 1,
       invalidRuns: 1,
-      invalidRunReasons: [{ run: 2, reasons: ['marks_unavailable'] }],
+      invalidRunReasons: [{ run: 2, reasons: ['marks_unavailable'], persistedAfterRerun: true }],
       countsByClass: { 'O5-only': 1, startup: 2, composite: 0, empty: 0, unknown: 1 },
       maxCountedReadsPerValidRun: 2,
     })
+
+    const validCell = summarizeCellChannelReads([{ run: 1, channelReads: run1 }])
+    expect(validCell.valid).toBe(true)
+    expect(validCell.status).toBe('valid')
+
+    const reportSummary = summarizeReportChannelReads([
+      { cell: '/|unthrottled|cold', channelReads: validCell },
+      { cell: '/|throttled|cold', channelReads: cellSummary },
+    ])
+    expect(reportSummary).toEqual({
+      valid: false,
+      status: 'inconclusive',
+      validCells: 1,
+      invalidCells: [
+        {
+          cell: '/|throttled|cold',
+          invalidRuns: 1,
+          invalidRunReasons: [{ run: 2, reasons: ['marks_unavailable'], persistedAfterRerun: true }],
+        },
+      ],
+      countsByClass: { 'O5-only': 2, startup: 4, composite: 0, empty: 0, unknown: 1 },
+    })
   })
 
-  it('exposes exact helpers for request filtering, id parsing, and class counting', () => {
-    expect(isStartupChannelListRequest({ method: 'GET', path: CHANNELS_API_PATH, search: '' })).toBe(true)
-    expect(isStartupChannelListRequest({ method: 'GET', path: CHANNELS_API_PATH, search: '?archived=true' })).toBe(false)
+  it('exposes exact helpers for request matching, id parsing, and class counting', () => {
+    expect(isChannelListRequest({ method: 'GET', path: CHANNELS_API_PATH })).toBe(true)
+    expect(isChannelListRequest({ method: 'POST', path: CHANNELS_API_PATH })).toBe(false)
+    expect(isChannelListRequest({ method: 'GET', path: '/api/v1/orgs/{org}/members' })).toBe(false)
     expect(parseReadId('ch-42')).toBe('ch-42')
     expect(parseReadId('')).toBeNull()
     expect(parseReadId('has space')).toBeNull()
