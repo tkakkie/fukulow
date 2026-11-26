@@ -9,8 +9,7 @@ use uuid::Uuid;
 
 use super::{
     ListMessagesQuery, MessageError, MessagePage, ValidateListMessages, history, mentions,
-    message_from_row, no_store_json, page::DirectionalPage, require_visible,
-    require_visible_scoped, watermark,
+    message_from_row, no_store_json, page::DirectionalPage,
 };
 use crate::{
     AppState,
@@ -43,49 +42,44 @@ pub async fn list_messages(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization_id = auth.identity.organization.organization_id;
-    require_visible_scoped(
-        &state.pool,
-        organization_id,
-        (auth.identity.member.id, auth.membership_revision),
+    let snapshot = history::prepare_snapshot(
+        &state,
+        &auth,
         channel_id,
+        query.history_generation,
+        query.as_of_seq,
+        async |_| {
+            #[cfg(test)]
+            super::tests::membership::pause_history(channel_id).await;
+            Ok(())
+        },
+        async |tx: &mut sqlx::PgConnection, history_generation, w| {
+            let page = DirectionalPage::new(&query, limit);
+            let sql = if page.ascending {
+                "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+                 to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+                 FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
+                 ORDER BY seq ASC LIMIT $4"
+            } else {
+                "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+                 to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+                 FROM messages WHERE organization_id = $1 AND channel_id = $2 \
+                   AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
+            };
+            let sql = mentions::page_sql(sql, if page.ascending { "p.seq ASC" } else { "p.seq DESC" });
+            let messages = sqlx::query(&sql)
+                .bind(organization_id)
+                .bind(channel_id)
+                .bind(page.cursor)
+                .bind(page.fetch_limit())
+                .bind(w)
+                .try_map(|row| message_from_row(&row))
+                .fetch_all(&mut *tx)
+                .await?;
+            let (messages, has_more) = page.finish(messages);
+            Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
+        },
     )
     .await?;
-    watermark::read(&state, organization_id, channel_id).await?;
-    crate::database::organization_read_only(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
-        require_visible(
-            &mut *tx,
-            organization_id,
-            (auth.identity.member.id, auth.membership_revision),
-            channel_id,
-        )
-        .await?;
-        #[cfg(test)]
-        super::tests::membership::pause_history(channel_id).await;
-        let (history_generation, w) = history::page(tx, organization_id, channel_id, query.history_generation, query.as_of_seq).await?;
-        let page = DirectionalPage::new(&query, limit);
-        let sql = if page.ascending {
-            "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
-             ORDER BY seq ASC LIMIT $4"
-        } else {
-            "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-             FROM messages WHERE organization_id = $1 AND channel_id = $2 \
-               AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
-        };
-        let sql = mentions::page_sql(sql, if page.ascending { "p.seq ASC" } else { "p.seq DESC" });
-        let messages = sqlx::query(&sql)
-            .bind(organization_id)
-            .bind(channel_id)
-            .bind(page.cursor)
-            .bind(page.fetch_limit())
-            .bind(w)
-            .try_map(|row| message_from_row(&row))
-            .fetch_all(&mut *tx)
-            .await?;
-        let (messages, has_more) = page.finish(messages);
-        Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
-    })
-    .await
+    snapshot.await
 }

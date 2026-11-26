@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { measuredSetsArg, matches796, measurementSlice, sets796 } from '../../harness-core/frequency-layout.ts';
 import { parseCpuSets } from '../../harness-core/cpusets.ts';
+import { containerCpuArgs } from '../../harness-core/frequency-container-args.ts';
 import { hostAffinityProblems, readHostAffinity } from './frequency-host-affinity.ts';
-import { containerCpuArgs, containerCpuReadback } from './frequency-containers.ts';
+import { containerCpuReadback, frequencyServerArgs, probeImage, probeSocket, serverImageArgs } from './frequency-containers.ts';
 import { policy, session } from './frequency-fixture.ts';
 
 function fixture() {
@@ -150,4 +151,14 @@ test('both Docker cpusets use their own measured CPUs under the workload slice',
   assert.deepEqual(containerCpuReadback(`${id} 123`, 'server', read), { cgroup, effective: sets796.server });
   assert.throws(() => containerCpuReadback(`${id} 123`, 'client', read), /client container effective cpuset/);
   assert.throws(() => containerCpuReadback(`${id} 123`, 'server', () => '0::/system.slice/docker.scope'), /outside fukulow796.slice/);
+});
+
+test('#519 puts the PostgreSQL image between Docker options and its pinned command', () => {
+  assert.deepEqual(frequencyServerArgs(), [
+    '--cgroup-parent', measurementSlice, '--cpuset-cpus', '2,4,6,10,12,14',
+    '--entrypoint', 'taskset', probeImage, '-c', '2,4,6,10,12,14', 'docker-entrypoint.sh', 'postgres',
+    '-c', `unix_socket_directories=/var/run/postgresql,${probeSocket}`,
+  ]);
+  assert.deepEqual(serverImageArgs([2]), ['--entrypoint', 'taskset', probeImage, '-c', '2', 'docker-entrypoint.sh', 'postgres']);
+  assert.deepEqual(serverImageArgs(), [probeImage]);
 });

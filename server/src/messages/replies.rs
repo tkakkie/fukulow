@@ -113,58 +113,48 @@ pub async fn reply_chain(
     }
     let auth = auth.ok_or(MessageError::OrganizationUnavailable)?;
     let organization = auth.identity.organization.organization_id;
-    let member = (auth.identity.member.id, auth.membership_revision);
-    require_visible_scoped(&state.pool, organization, member, channel).await?;
-    admission::within_work_deadline(async {
-        watermark::read(&state, organization, channel).await?;
-        crate::database::organization_read_only(
-            &state.pool,
-            organization,
-            async |tx: &mut sqlx::PgConnection| {
-                require_visible(&mut *tx, organization, member, channel).await?;
-                let (history_generation, w) = history::page(
-                    tx,
-                    organization,
-                    channel,
-                    query.history_generation,
-                    query.as_of_seq,
-                )
-                .await?;
-                let root_id: Uuid = sqlx::query_scalar(
-                    "SELECT COALESCE(reply_root_id,id) FROM messages \
+    let snapshot = history::prepare_snapshot(
+        &state,
+        &auth,
+        channel,
+        query.history_generation,
+        query.as_of_seq,
+        async |_| Ok(()),
+        async |tx: &mut sqlx::PgConnection, history_generation, w| {
+            let root_id: Uuid = sqlx::query_scalar(
+                "SELECT COALESCE(reply_root_id,id) FROM messages \
          WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq<=$4",
-                )
+            )
+            .bind(organization)
+            .bind(channel)
+            .bind(anchor)
+            .bind(w)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(MessageError::ReplyChainNotFound)?;
+            let chain_version = chain_version(tx, organization, channel, root_id, w).await?;
+            let mut messages = sqlx::query(&mentions::page_sql(PAGE_SQL, "p.seq"))
                 .bind(organization)
                 .bind(channel)
-                .bind(anchor)
+                .bind(root_id)
+                .bind(after)
+                .bind(i64::from(limit) + 1)
                 .bind(w)
-                .fetch_optional(&mut *tx)
-                .await?
-                .ok_or(MessageError::ReplyChainNotFound)?;
-                let chain_version = chain_version(tx, organization, channel, root_id, w).await?;
-                let mut messages = sqlx::query(&mentions::page_sql(PAGE_SQL, "p.seq"))
-                    .bind(organization)
-                    .bind(channel)
-                    .bind(root_id)
-                    .bind(after)
-                    .bind(i64::from(limit) + 1)
-                    .bind(w)
-                    .try_map(|row| message_from_row(&row))
-                    .fetch_all(&mut *tx)
-                    .await?;
-                let has_more = messages.len() > usize::from(limit);
-                messages.truncate(usize::from(limit));
-                Ok(no_store_json(ReplyChainPage {
-                    history_generation,
-                    as_of_seq: w,
-                    root_id,
-                    chain_version,
-                    messages,
-                    has_more,
-                }))
-            },
-        )
-        .await
-    })
-    .await
+                .try_map(|row| message_from_row(&row))
+                .fetch_all(&mut *tx)
+                .await?;
+            let has_more = messages.len() > usize::from(limit);
+            messages.truncate(usize::from(limit));
+            Ok(no_store_json(ReplyChainPage {
+                history_generation,
+                as_of_seq: w,
+                root_id,
+                chain_version,
+                messages,
+                has_more,
+            }))
+        },
+    )
+    .await?;
+    admission::within_work_deadline(snapshot).await
 }

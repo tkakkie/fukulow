@@ -69,6 +69,19 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
+      - name: Native stall helper checks with a local TCP listener
+        working-directory: load/harness-core/stall-helper
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --release --locked
+      - name: Build the release server for the transport regression
+        run: mkdir -p web/dist && cargo build --release --locked -p fukulow-server
+      - name: Revocation transport regression at k60 Hcap
+        run: |
+          ulimit -n 65536
+          node --test load/revocation-holds-sndbuf.integration.ts
   # server-tests and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
   # The server tests run as 4 nextest slices in parallel; every test still runs on every PR.
   server-tests:
