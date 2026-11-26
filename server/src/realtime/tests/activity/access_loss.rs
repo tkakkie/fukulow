@@ -1,34 +1,9 @@
 use super::*;
+use crate::auth::hook_decorator::{ActivityHooks, ChangeHooks, Decorator, RecheckHooks};
 
 #[fukulow_test::test]
 async fn delete_grant_reports_revocation_with_and_without_an_active_subscription(pool: PgPool) {
-    use crate::auth::{SubscriptionRecheck, SubscriptionScope};
     use crate::channels::activity::pause_member;
-
-    struct RecheckBeforePublication {
-        access: crate::channels::AccessChanges,
-        // Not an array: the module-direction driver ICEs on array lengths in local items.
-        gates: Vec<Arc<Gate>>,
-    }
-    impl SubscriptionRecheck for RecheckBeforePublication {
-        fn check<'a>(
-            &'a self,
-            pool: &'a PgPool,
-            scope: SubscriptionScope,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
-        {
-            Box::pin(async move {
-                let result = self.access.check(pool, scope).await;
-                for gate in &self.gates {
-                    gate.release();
-                }
-                result
-            })
-        }
-        fn failed(&self, scope: SubscriptionScope) {
-            self.access.failed(scope);
-        }
-    }
 
     async fn frames(f: &Fixture, socket: &mut Client) -> Vec<Value> {
         f.state
@@ -85,11 +60,19 @@ async fn delete_grant_reports_revocation_with_and_without_an_active_subscription
         // Hold the target's list handoff so its two directory publications
         // coalesce before collection, independent of socket scheduling.
         let handoff = pause_member(f.organization, Uuid::nil(), "handoff", Some(target));
+        let recheck_gates = vec![gate.clone(), member_gate];
         f.state
             .session_changes
-            .set_subscription_recheck(Arc::new(RecheckBeforePublication {
-                access: f.state.message_delivery.channel_access.clone(),
-                gates: vec![gate.clone(), member_gate],
+            .set_subscription_recheck(Arc::new(Decorator {
+                inner: f.state.message_delivery.channel_access.clone(),
+                hooks: RecheckHooks {
+                    after_recheck: Some(Box::new(move |_| {
+                        for gate in &recheck_gates {
+                            gate.release();
+                        }
+                    })),
+                    ..RecheckHooks::default()
+                },
             }));
         let response = request(
             &f.app,
@@ -363,53 +346,6 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
 
 #[fukulow_test::test]
 async fn socket_registered_after_access_removal_receives_no_old_revocation(pool: PgPool) {
-    use crate::auth::activity::{
-        ActivityChange, ActivityChanges, Capture, ChangeScope, ChannelChange,
-    };
-    struct DelayedChanges {
-        activity: crate::channels::activity::Activity,
-        gate: Arc<Gate>,
-    }
-    struct DelayedChange {
-        change: Box<dyn ActivityChange>,
-        gate: Arc<Gate>,
-    }
-    impl ActivityChanges for DelayedChanges {
-        fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
-            self.activity.channel(pool, organization, change);
-        }
-        fn capture<'a>(
-            &'a self,
-            tx: &'a mut sqlx::PgConnection,
-            organization: Uuid,
-            target: Uuid,
-            scope: ChangeScope,
-        ) -> Capture<'a> {
-            Box::pin(async move {
-                Ok(Box::new(DelayedChange {
-                    change: self
-                        .activity
-                        .capture(tx, organization, target, scope)
-                        .await?,
-                    gate: self.gate.clone(),
-                }) as Box<dyn ActivityChange>)
-            })
-        }
-        fn directory(&self, pool: PgPool, organization: Uuid, target: Uuid) {
-            self.activity.directory(pool, organization, target);
-        }
-    }
-    impl ActivityChange for DelayedChange {
-        fn retire(&mut self) {
-            self.change.retire();
-        }
-        fn committed(self: Box<Self>, pool: PgPool) {
-            tokio::spawn(async move {
-                self.gate.pause().await;
-                self.change.committed(pool);
-            });
-        }
-    }
     let f = fixture(&pool).await;
     owner(&pool, &f).await;
     let (target, token) = member(&pool, f.organization).await;
@@ -417,13 +353,26 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
     grant(&pool, &f, private, target).await;
     let mut before = connect(&f, &token).await;
     let mut control = connect(&f, &f.token).await;
-    let delayed = Arc::new(Gate::default());
-    f.state
-        .session_changes
-        .set_activity(std::sync::Arc::new(DelayedChanges {
-            activity: f.state.message_delivery.channel_access.activity.clone(),
-            gate: delayed.clone(),
-        }));
+    let delayed = Arc::new(Gate::<()>::default());
+    let gate = delayed.clone();
+    f.state.session_changes.set_activity(Arc::new(Decorator {
+        inner: f.state.message_delivery.channel_access.activity.clone(),
+        hooks: ActivityHooks {
+            after_capture: Some(Box::new(move |_| {
+                let gate = gate.clone();
+                Some(ChangeHooks {
+                    skip_retire: false,
+                    commit: Box::new(move |change, pool| {
+                        tokio::spawn(async move {
+                            gate.pause().await;
+                            change.committed(pool);
+                        });
+                    }),
+                })
+            })),
+            ..ActivityHooks::default()
+        },
+    }));
     let response = request(
         &f.app,
         "DELETE",
