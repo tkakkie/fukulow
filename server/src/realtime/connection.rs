@@ -1,3 +1,5 @@
+mod heartbeat;
+
 #[cfg(test)]
 use super::tests::hooks::{self, Phase};
 use super::{CLOSE_QUEUE_OVERFLOW, ClientMessage, ServerEvent};
@@ -8,8 +10,8 @@ use crate::{
     messages::{self, LIVE_QUEUE_CAPACITY, LiveQueue, MessageError},
 };
 use axum::extract::ws::{Message as Frame, WebSocket};
+use heartbeat::Heartbeat;
 use std::{collections::HashMap, time::Duration};
-use tokio::time::{Instant, MissedTickBehavior};
 use uuid::Uuid;
 
 const MAX_SUBSCRIPTIONS: usize = 256;
@@ -532,10 +534,7 @@ impl<'a> Connection<'a> {
         )
         .await;
         Self::event(socket, ServerEvent::ActivityReady).await?;
-        let mut ping_sent_at: Option<Instant> = None;
-        let mut next_ping = Instant::now() + lifecycle.ping_interval;
-        let mut heartbeat = tokio::time::interval_at(next_ping, lifecycle.ping_interval);
-        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut heartbeat = Heartbeat::new(lifecycle);
         loop {
             let frame = tokio::select! {
                 biased;
@@ -546,17 +545,13 @@ impl<'a> Connection<'a> {
                 },
                 frame = socket.recv() => frame,
                 _ = heartbeat.tick() => {
-                    if ping_sent_at.is_some_and(|sent| sent.elapsed() >= lifecycle.idle_timeout) {
+                    if heartbeat.idle_expired() {
                         // Replay may have delayed reading a queued pong or other client frame.
                         tokio::time::timeout(Duration::ZERO, socket.recv())
                             .await.map_err(|_| 1001u16)?
                     } else {
                         Self::send(socket, Frame::Ping(Default::default())).await?;
-                        let sent = Instant::now();
-                        // Replay/live work can delay this tick: grace starts only after a Ping.
-                        let first_ping = *ping_sent_at.get_or_insert(sent);
-                        next_ping = sent + lifecycle.ping_interval;
-                        heartbeat.reset_at(next_ping.min(first_ping + lifecycle.idle_timeout));
+                        heartbeat.ping_sent();
                         continue;
                     }
                 },
@@ -566,8 +561,7 @@ impl<'a> Connection<'a> {
                 },
             };
             if matches!(frame, Some(Ok(_))) {
-                ping_sent_at = None;
-                heartbeat.reset_at(next_ping);
+                heartbeat.frame_received();
             }
             if matches!(frame, Some(Ok(Frame::Text(_) | Frame::Binary(_)))) && !self.permit.charge()
             {
