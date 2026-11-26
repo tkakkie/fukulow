@@ -6,7 +6,7 @@ export const CHANNEL_READ_MARK_NAME = 'fukulow:read:channels'
 
 export type ReadReason = 'initial' | 'notice' | 'access' | 'reconcile' | 'periodic'
 export type ChannelReadClass = 'O5-only' | 'startup' | 'composite' | 'empty' | 'unknown'
-export type ChannelReadMeasurementStatus = 'valid' | 'inconclusive'
+export type ChannelReadMeasurementStatus = 'valid' | 'invalid'
 export type InvalidRunReason =
   | 'marks_unavailable'
   | 'missing_or_malformed_request_id'
@@ -39,8 +39,7 @@ export type ClassifiedChannelRead = {
 
 export type ChannelReadSummary = {
   valid: boolean
-  status?: ChannelReadMeasurementStatus
-  rerunAttempted?: boolean
+  status: ChannelReadMeasurementStatus
   invalidReasons: InvalidRunReason[]
   reads: ClassifiedChannelRead[]
   countsByClass: Record<ChannelReadClass, number>
@@ -52,9 +51,9 @@ export type CellChannelReadSummary = {
   status: ChannelReadMeasurementStatus
   validRuns: number
   invalidRuns: number
-  invalidRunReasons: Array<{ run: number; reasons: InvalidRunReason[]; persistedAfterRerun?: boolean }>
+  invalidRunReasons: Array<{ run: number; reasons: InvalidRunReason[]; countedReads: number }>
   countsByClass: Record<ChannelReadClass, number>
-  maxCountedReadsPerValidRun: number | null
+  maxCountedReadsPerRun: number | null
 }
 
 export type ReportChannelReadSummary = {
@@ -132,6 +131,7 @@ export function classifyChannelReads(
     })
     return {
       valid: false,
+      status: 'invalid',
       invalidReasons: [...invalidReasons],
       reads,
       countsByClass,
@@ -205,8 +205,10 @@ export function classifyChannelReads(
     }
   })
 
+  const valid = invalidReasons.size === 0
   return {
-    valid: invalidReasons.size === 0,
+    valid,
+    status: valid ? 'valid' : 'invalid',
     invalidReasons: [...invalidReasons],
     reads,
     countsByClass,
@@ -220,23 +222,23 @@ export function summarizeCellChannelReads(
   const countsByClass = emptyCounts()
   const invalidRunReasons: CellChannelReadSummary['invalidRunReasons'] = []
   let validRuns = 0
-  let maxCountedReadsPerValidRun: number | null = null
+  let maxCountedReadsPerRun: number | null = null
 
   for (const r of runs) {
     for (const key of Object.keys(countsByClass) as ChannelReadClass[]) {
       countsByClass[key] += r.channelReads.countsByClass[key]
     }
+    maxCountedReadsPerRun =
+      maxCountedReadsPerRun === null
+        ? r.channelReads.countedReads
+        : Math.max(maxCountedReadsPerRun, r.channelReads.countedReads)
     if (r.channelReads.valid) {
       validRuns++
-      maxCountedReadsPerValidRun =
-        maxCountedReadsPerValidRun === null
-          ? r.channelReads.countedReads
-          : Math.max(maxCountedReadsPerValidRun, r.channelReads.countedReads)
     } else {
       invalidRunReasons.push({
         run: r.run,
         reasons: r.channelReads.invalidReasons,
-        ...(r.channelReads.rerunAttempted ? { persistedAfterRerun: true } : {}),
+        countedReads: r.channelReads.countedReads,
       })
     }
   }
@@ -244,12 +246,12 @@ export function summarizeCellChannelReads(
   const valid = invalidRunReasons.length === 0
   return {
     valid,
-    status: valid ? 'valid' : 'inconclusive',
+    status: valid ? 'valid' : 'invalid',
     validRuns,
     invalidRuns: invalidRunReasons.length,
     invalidRunReasons,
     countsByClass,
-    maxCountedReadsPerValidRun,
+    maxCountedReadsPerRun,
   }
 }
 
@@ -278,7 +280,7 @@ export function summarizeReportChannelReads(
   const valid = invalidCells.length === 0
   return {
     valid,
-    status: valid ? 'valid' : 'inconclusive',
+    status: valid ? 'valid' : 'invalid',
     validCells,
     invalidCells,
     countsByClass,
