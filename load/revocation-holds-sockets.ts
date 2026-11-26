@@ -22,6 +22,10 @@ function stage(subscription: TargetSubscription, name: Stage, reason?: string) {
   subscription.stages.push({ stage: name, atMs: performance.now(), reason });
 }
 
+function targetReason({ socket, memberId, channelId }: TargetSubscription, reason: string) {
+  return `socket ${socket}, Member ${memberId}, Channel ${channelId}: ${reason}`;
+}
+
 export async function openSockets(
   active: { sockets?: WebSocket[] }, fixture: Fixture, run: PlannedRun, appPort: number, proxyPorts: number[],
   recordSubscriptions: (subscriptions: TargetSubscription[]) => void,
@@ -42,12 +46,38 @@ export async function openSockets(
     socket, memberId: fixture.targets[socketAccount(socket)].id, channelId: fixture.stallChannel,
     stages: [{ stage: 'queued', atMs: performance.now() }],
   }));
+  let settingUp = true;
+  let setupFailure: string | undefined;
+  let failBatch: ((reason: string) => void) | undefined;
+  const failSubscribed = (subscription: TargetSubscription, reason: string) => {
+    if (!settingUp || setupFailure !== undefined) return;
+    setupFailure = targetReason(subscription, reason);
+    failBatch?.(setupFailure);
+  };
+  const requireTargetsOpen = () => {
+    if (!settingUp) return;
+    if (setupFailure !== undefined) throw new SetupAbort(`target WebSocket setup: ${setupFailure}`);
+    for (const subscription of subscriptions) {
+      const { readyState } = sockets[subscription.socket];
+      if (readyState !== WebSocket.OPEN) {
+        const reason = targetReason(subscription, `not open after subscribed (readyState ${readyState})`);
+        throw new SetupAbort(`target WebSocket setup: ${reason}`);
+      }
+    }
+  };
+  const endSetup = () => {
+    requireTargetsOpen();
+    settingUp = false;
+  };
+
   try {
     for (let first = 0; first < subscriptions.length; first += TARGET_BATCH_SIZE) {
+      if (setupFailure !== undefined) throw new SetupAbort(`target WebSocket setup: ${setupFailure}`);
       const batch = subscriptions.slice(first, first + TARGET_BATCH_SIZE);
       await new Promise<void>((resolve, reject) => {
         const pending = new Set(batch);
         const fail = (reason: string) => {
+          failBatch = undefined;
           clearTimeout(timer);
           for (const subscription of pending) stage(subscription, 'failed', reason);
           pending.clear();
@@ -57,12 +87,13 @@ export async function openSockets(
           const missing = [...pending].map(row => row.socket).join(', ');
           fail(`Channel ${fixture.stallChannel} missing subscribed acknowledgment after ${TARGET_BATCH_TIMEOUT_MS} ms for sockets ${missing}`);
         }, TARGET_BATCH_TIMEOUT_MS);
+        failBatch = fail;
         for (const subscription of batch) {
           const i = subscription.socket;
           const target: TargetSocket = { account: socketAccount(i), ready: false, subscribed: false, stall: { reads: [], closes: [], pausedAt: [], resumedAt: [] }, stallMessages: [] };
           targets.push(target);
           const failSocket = (reason: string) => {
-            if (pending.has(subscription)) fail(`socket ${i}, Member ${subscription.memberId}, Channel ${subscription.channelId}: ${reason}`);
+            if (pending.has(subscription)) fail(targetReason(subscription, reason));
           };
           stage(subscription, 'opening');
           try {
@@ -79,6 +110,7 @@ export async function openSockets(
                 target.subscribed = true;
                 stage(subscription, 'subscribed');
                 if (pending.size === 0) {
+                  failBatch = undefined;
                   clearTimeout(timer);
                   resolve();
                 }
@@ -91,15 +123,20 @@ export async function openSockets(
               }
             }, code => {
               target.close = { at: performance.now(), code };
-              failSocket(`closed before subscribed (code ${code})`);
+              if (target.subscribed) failSubscribed(subscription, `closed after subscribed (code ${code})`);
+              else failSocket(`closed before subscribed (code ${code})`);
             });
-            socket.onerror = () => failSocket('WebSocket error before subscribed');
+            socket.onerror = () => {
+              if (target.subscribed) failSubscribed(subscription, 'WebSocket error after subscribed');
+              else failSocket('WebSocket error before subscribed');
+            };
           } catch {
             failSocket('could not open WebSocket');
             break;
           }
         }
       });
+      if (setupFailure !== undefined) throw new SetupAbort(`target WebSocket setup: ${setupFailure}`);
     }
   } finally {
     recordSubscriptions(subscriptions);
@@ -111,5 +148,5 @@ export async function openSockets(
     }, () => { state.bystanderCloses.push(performance.now()); });
     if (sockets.length % 100 === 0) await new Promise(resolve => setTimeout(resolve, 100)); // match #592 upgrade pacing
   }
-  return { targets, notices, state };
+  return { targets, notices, state, requireTargetsOpen, endSetup };
 }

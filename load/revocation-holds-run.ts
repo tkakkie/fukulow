@@ -228,6 +228,7 @@ async function prepare(ctx: Context, run: PlannedRun, dir: string, expected: Ret
   const calibrate = () => calibrateClock(base, log.clock, log.clockWall).catch(error => { calibrationErrors.push((error as Error).message); return undefined; });
   const clockStart = await calibrate();
   const helperStart = await startStall(() => helper.calibrate());
+  sockets.requireTargetsOpen();
   const rss: { at: number; kb: number }[] = [];
   const sampler = startRssSampler(started.server, async signal => Number((await exec('ps', ['-o', 'rss=', '-p', String(started.server.pid)], { signal })).stdout.trim()), rss);
   ctx.active.stopSampling = sampler.stop;
@@ -236,6 +237,7 @@ async function prepare(ctx: Context, run: PlannedRun, dir: string, expected: Ret
   ctx.active.sessions = [probes.session, control];
   ctx.active.stopProbes = () => { void probes.stop(); };
   const pass = await findPass(relay);
+  sockets.endSetup();
   return { started, fixture, helper, helperStart, stallReadbacks, effectiveSendBuffer, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass, rss, sampler };
 }
 

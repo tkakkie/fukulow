@@ -19,10 +19,15 @@ function fakeSockets(t: TestContext, run: PlannedRun) {
   };
   const opened: FakeWebSocket[] = [];
   class FakeWebSocket {
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
     readonly port: number;
     readonly sent: unknown[] = [];
+    readyState = FakeWebSocket.OPEN;
     onmessage?: (event: { data: string }) => void;
     onclose?: (event: { code: number }) => void;
+    onerror?: () => void;
 
     constructor(url: string) {
       this.port = Number(new URL(url).port);
@@ -31,12 +36,32 @@ function fakeSockets(t: TestContext, run: PlannedRun) {
 
     send(data: string) { this.sent.push(JSON.parse(data)); }
     receive(event: object) { this.onmessage?.({ data: JSON.stringify(event) }); }
-    close(code: number) { this.onclose?.({ code }); }
+    close(code: number) {
+      this.readyState = FakeWebSocket.CLOSED;
+      this.onclose?.({ code });
+    }
+    error() { this.onerror?.(); }
   }
   const originalWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
   t.after(() => { globalThis.WebSocket = originalWebSocket; });
-  return { fixture, appPort, proxyPorts, opened };
+  const subscribeBatch = (first: number) => {
+    for (const socket of opened.slice(first, first + 4)) {
+      socket.receive({ type: 'activity_ready' });
+      socket.receive({ type: 'subscribed', channel_id: fixture.stallChannel });
+    }
+  };
+  const openAll = async () => {
+    const setup = openSockets({}, fixture, run, appPort, proxyPorts, () => {});
+    void setup.catch(() => {});
+    for (let first = 0; first < count; first += 4) {
+      await setImmediate();
+      assert.equal(opened.length, first + 4);
+      subscribeBatch(first);
+    }
+    return setup;
+  };
+  return { fixture, appPort, proxyPorts, opened, subscribeBatch, openAll };
 }
 
 test('all 96 target subscriptions acknowledge in batches before bystanders and baseline', { timeout: 1_000 }, async t => {
@@ -107,4 +132,52 @@ test('a target closing before acknowledgment aborts setup and records its stages
   assert.deepEqual(stages.map(stage => stage.stage), ['queued', 'opening', 'activity_ready', 'subscribe_sent', 'failed']);
   const times = stages.map(stage => stage.atMs);
   assert.deepEqual(times, times.toSorted((a, b) => a - b));
+});
+
+test('a subscribed target closing in batch 2 aborts without waiting for its acknowledgments', { timeout: 1_000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { fixture, appPort, proxyPorts, opened, subscribeBatch } = fakeSockets(t, slot);
+  const setup = openSockets({}, fixture, slot, appPort, proxyPorts, () => {});
+  const rejected = assert.rejects(setup, (error: unknown) =>
+    error instanceof SetupAbort && /socket 0, Member member-0, Channel stall: closed after subscribed \(code 1011\)/.test(error.message));
+  subscribeBatch(0);
+  await setImmediate();
+  assert.deepEqual(opened.map(socket => socket.port), proxyPorts.slice(0, 8));
+  opened[0].close(1011);
+  await rejected;
+  assert.equal(opened.length, 8);
+});
+
+test('a subscribed target closing after the batches aborts at the setup handoff', { timeout: 1_000 }, async t => {
+  const { opened, openAll } = fakeSockets(t, slot);
+  const { endSetup } = await openAll();
+  opened[0].close(1011);
+  assert.throws(endSetup, (error: unknown) =>
+    error instanceof SetupAbort && /socket 0, Member member-0, Channel stall: closed after subscribed \(code 1011\)/.test(error.message));
+});
+
+test('a subscribed target error aborts the setup handoff even if the socket still reports open', { timeout: 1_000 }, async t => {
+  const { opened, openAll } = fakeSockets(t, slot);
+  const { endSetup } = await openAll();
+  opened[0].error();
+  assert.throws(endSetup, (error: unknown) =>
+    error instanceof SetupAbort && /socket 0, Member member-0, Channel stall: WebSocket error after subscribed/.test(error.message));
+});
+
+test('the setup handoff detects a target already closing before its close event', { timeout: 1_000 }, async t => {
+  const { opened, openAll } = fakeSockets(t, slot);
+  const { endSetup } = await openAll();
+  opened[0].readyState = WebSocket.CLOSING;
+  assert.throws(endSetup, (error: unknown) =>
+    error instanceof SetupAbort && /socket 0, Member member-0, Channel stall: not open after subscribed \(readyState 2\)/.test(error.message));
+});
+
+test('a target close after setup is recorded without aborting', { timeout: 1_000 }, async t => {
+  const { opened, openAll } = fakeSockets(t, slot);
+  const { endSetup, targets } = await openAll();
+  endSetup();
+  assert.doesNotThrow(() => opened[0].close(1011));
+  assert.equal(targets[0].close?.code, 1011);
+  assert.ok(Number.isFinite(targets[0].close?.at));
+  assert.doesNotThrow(endSetup);
 });
