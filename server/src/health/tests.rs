@@ -27,6 +27,16 @@ async fn assert_ready(router: &Router) {
     assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "ok");
 }
 
+/// Opens the next pool connection outside readiness. On an empty pool, readiness'
+/// 200 ms acquisition bound also covers connection setup (TCP, startup, SCRAM),
+/// which CI load can push past the bound (#1047). Recovery assertions after a
+/// test emptied the pool therefore check readiness, not connection latency.
+async fn reconnect(pool: &PgPool) {
+    assert_eq!(pool.size(), 0);
+    pool.acquire().await.unwrap().return_to_pool().await;
+    assert_eq!(pool.num_idle(), 1);
+}
+
 async fn assert_not_ready(router: &Router) {
     let response = request(router, "/api/v1/ready").await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -92,6 +102,7 @@ async fn readiness_query_timeout_releases_slot_limits_flood_and_recovers(pool: P
             "query timeout must release the pool slot"
         );
         relay.hold.send(false).unwrap();
+        reconnect(&relay.pool).await;
         assert_ready(&router).await;
         relay.pool.close().await;
     })
@@ -155,6 +166,7 @@ async fn readiness_bounds_return_ping_without_accumulating_connections(pool: PgP
             check.await.unwrap();
             assert_eq!(relay.pool.size(), 0, "stalled returns must not accumulate");
             relay.hold.send(false).unwrap();
+            reconnect(&relay.pool).await;
         }
         assert_ready(&router).await;
         relay.pool.close().await;
@@ -182,6 +194,7 @@ async fn readiness_cancelled_query_detaches_connection(pool: PgPool) {
             "cancelled query must detach immediately"
         );
         relay.hold.send(false).unwrap();
+        reconnect(&relay.pool).await;
         assert!(database::ready(&relay.pool).await);
         relay.pool.close().await;
     })
@@ -207,6 +220,7 @@ async fn readiness_cancelled_return_releases_connection(pool: PgPool) {
             "cancelled return must release immediately"
         );
         relay.hold.send(false).unwrap();
+        reconnect(&relay.pool).await;
         assert!(database::ready(&relay.pool).await);
         relay.pool.close().await;
     })
@@ -236,6 +250,7 @@ async fn readiness_query_error_detaches_connection(pool: PgPool) {
             0,
             "query errors must detach synchronously"
         );
+        reconnect(&relay.pool).await;
         assert!(database::ready(&relay.pool).await);
         relay.pool.close().await;
     })
