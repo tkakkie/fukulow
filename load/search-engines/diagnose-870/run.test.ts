@@ -1,29 +1,33 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
-import { measuredSetsArg, measurementSlice } from '../../harness-core/frequency-layout.ts';
-import { qualifiedCpuSets } from './cluster.ts';
+import test, { type TestContext } from 'node:test';
+import { measuredSetsArg, sets796 } from '../../harness-core/frequency-layout.ts';
+import { rawIo, type Io } from './io.ts';
+import { qualifiedCpuSets } from './qualification.ts';
 import { stage1, type Measurement } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
-import { finishRecords, limitedExitCode, options, parseCount, prerequisites as checkPrerequisites, readCounterWaitMs, readsDelta, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
+import { approvalFor, finishRecords, limitedExitCode, main, options, parseCount, prerequisites, readCounterWaitMs, readsDelta, signalStop, stopExitCode, workerGate } from './run.ts';
 
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
-const swapped = 'server=1,3,5,7,9,11,13,15;client=0,2,4,6,8,10,12,14';
-const parsed = {server: [0, 2, 4, 6, 8, 10, 12, 14], client: [1, 3, 5, 7, 9, 11, 13, 15]};
+const swapped = 'client=2,4,6,10,12,14;server=1,3,5,9,11,13;housekeeping=0,7,8,15';
 const json = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value));
-const prerequisites = (args: ReturnType<typeof options>, manifestHash: string, env: NodeJS.ProcessEnv, logicalCpus: number,
-  exists = (_path: string) => false) => checkPrerequisites(args, manifestHash, env, logicalCpus, exists);
 
 function host() {
   const dir = mkdtempSync(join(tmpdir(), 'diag870-'));
   const busy = join(dir, 'HOST-BUSY');
   writeFileSync(busy, 'q870: smoke-870, stage1-870, stage2-870 2026-11-24T00:00:00.000Z\n');
   const qualification = join(dir, 'qualification.json');
-  json(qualification, {issue: 796, result: 'PASS', cpuSets: sets});
-  return {dir, busy, qualification, env: {FUKULOW_HOST_BUSY: busy, FUKULOW_LAUNCH_JOB: 'stage1-870'}};
+  const reportPath = join(dir, 'formal-report.json');
+  const verdict = {result: 'PASS', reasons: [], runs: [1, 2, 3].map(i => ({name: `formal-${i}`, valid: true}))};
+  json(reportPath, verdict);
+  const formalReport = {path: reportPath, sha256: createHash('sha256').update(readFileSync(reportPath)).digest('hex')};
+  const record = {issue: 796, result: 'PASS', cpuSets: sets, formalReport};
+  json(qualification, record);
+  return {dir, busy, qualification, record, verdict, env: {FUKULOW_HOST_BUSY: busy, FUKULOW_LAUNCH_JOB: 'stage1-870'}};
 }
 // The maintainer's go for one stage, as the operator records it before queueing the job.
 function approval(dir: string, stage: string, over: Record<string, unknown> = {}) {
@@ -47,7 +51,7 @@ function prior(dir: string, stage: string, judgement: Record<string, unknown>,
   const at = '2026-11-25T10:00:00.000Z';
   const reasons = normal ? [] : (judgement.abnormal as string[] | undefined) ?? ['minimum not met: H2'];
   json(join(out, 'judgement.json'), {stage, stopped: null, abnormal: reasons, evidence: {complete: true, missing: []}, ...judgement});
-  json(join(out, 'metadata.json'), {cpuSets: parsed});
+  json(join(out, 'metadata.json'), {cpuSets: sets796});
   json(join(out, 'measurements.json'), {measurements, stopped: null});
   json(join(out, 'approval.json'), {issue: 870, stage, job: 'x', quote: 'go', at: '2026-11-25T09:00:00Z'});
   json(join(out, 'finish.json'), {normal, kind: normal ? 'normal' : limited ? 'limited' : 'blocked', reasons});
@@ -94,31 +98,47 @@ test('swapped CPU sets or a qualification that is not PASS on the #796 sets are 
   assert.throws(() => prerequisites(options(argv(h, 'smoke'), 'linux'), hash, env, 16), /not recorded as PASS/);
 });
 
-test('#870 preserves its frozen sets and refuses the #796 housekeeping layout before Docker', () => {
+test('#870 accepts the canonical three-set qualification with the verified formal report', () => {
   const h = host();
   const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870'};
-  const blocked = /cannot use the #796 housekeeping layout until it adopts the two-container layout and host preflight/;
-  const check = (cpuSets = sets, exists = (_path: string) => false) =>
-    prerequisites(options(argv(h, 'smoke', [], cpuSets), 'linux'), hash, env, 16, exists);
-  assert.equal(sets, 'server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15');
-  assert.throws(() => check(measuredSetsArg), blocked);
-  assert.throws(() => check(`${measuredSetsArg};housekeeping=0,7,8,15`), blocked);
-  for (const path of [`/run/systemd/system/${measurementSlice}`, `/sys/fs/cgroup/${measurementSlice}`]) {
-    assert.throws(() => check(sets, candidate => candidate === path), blocked);
-  }
-  json(h.qualification, {issue: 796, result: 'PASS', cpuSets: measuredSetsArg});
-  assert.throws(() => check(), blocked);
+  const check = (cpuSets = sets) => prerequisites(options(argv(h, 'smoke', [], cpuSets), 'linux'), hash, env, 16);
+  assert.equal(sets, 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15');
+  assert.deepEqual(check().sets, sets796);
+  assert.deepEqual(check().qualification.formalReport.runs, ['formal-1', 'formal-2', 'formal-3']);
+  assert.throws(() => check(measuredSetsArg), /must be the #796 sets/);
+  assert.throws(() => check(`${measuredSetsArg};housekeeping=0,7,8`), /must be the #796 sets/);
+  json(h.qualification, {...h.record, cpuSets: measuredSetsArg});
+  assert.throws(() => check(), /not recorded as PASS/);
+});
+
+test('qualification refuses missing provenance, a mismatched report hash, or a non-PASS formal report', () => {
+  const h = host();
+  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870'};
+  const check = () => prerequisites(options(argv(h, 'smoke'), 'linux'), hash, env, 16);
+  json(h.qualification, {...h.record, formalReport: undefined});
+  assert.throws(check, /needs the formal report path and full SHA-256/);
+  json(h.qualification, h.record);
+  json(h.record.formalReport.path, {...h.verdict, result: 'FAIL'});
+  assert.throws(check, /formal report hash differs/);
+  h.record.formalReport.sha256 = createHash('sha256').update(readFileSync(h.record.formalReport.path)).digest('hex');
+  json(h.qualification, h.record);
+  assert.throws(check, /formal report must be PASS/);
+  rmSync(h.record.formalReport.path);
+  assert.throws(check, /ENOENT/);
 });
 
 test('Stage 1 needs a smoke the supervisor finalized as valid, not only the worker completion', () => {
   const h = host();
   const run = (out: string) => prerequisites(options(argv(h, '1', ['--smoke-out', out]), 'linux'), hash, h.env, 16);
   assert.doesNotThrow(() => run(prior(h.dir, 'smoke', {outcome: 'smoke passed'})));
+  const wrongLayout = prior(mkdtempSync(join(h.dir, 'layout')), 'smoke', {outcome: 'smoke passed'});
+  json(join(wrongLayout, 'metadata.json'), {cpuSets: {...sets796, housekeeping: undefined}});
+  assert.throws(() => run(wrongLayout), /ran on other CPU sets/);
   const unfinalized = prior(mkdtempSync(join(h.dir, 'u')), 'smoke', {outcome: 'smoke passed'}, {finalized: false});
   assert.throws(() => run(unfinalized), /not a finalized, valid smoke run/);
   const invalid = prior(mkdtempSync(join(h.dir, 'i')), 'smoke', {outcome: 'smoke passed'}, {valid: false});
   assert.throws(() => run(invalid), /not a finalized, valid smoke run/);
-  // The supervisor publishes before the sweep: a sweep killed midway leaves no verified record.
+  // A missing cleanup record must still be refused even if a completion file exists.
   const unswept = prior(mkdtempSync(join(h.dir, 'w')), 'smoke', {outcome: 'smoke passed'}, {swept: false});
   assert.throws(() => run(unswept), /leftover sweep did not verify/);
   const failedSweep = prior(mkdtempSync(join(h.dir, 'x')), 'smoke', {outcome: 'smoke passed'}, {swept: false});
@@ -185,35 +205,65 @@ test('every stage needs its own approval record, for this stage and this job, no
   assert.throws(() => run(approval(h.dir, '1'), '1', h.env, ['--smoke-out', smokeOut]), /no recorded go for the smoke/);
 });
 
-test('the sweep always records whether it verified a clean host; a failed removal revokes validity, cleanup and the zero exit', () => {
-  const fake = (present: string[], failRm = false) => (...a: string[]) => {
-    if (a[1] === 'ls') return a[0] === 'container' ? present.map(n => `${n}|153`).join('\n') : '';
-    if (a[0] === 'rm') { if (failRm) throw new Error('busy'); present.splice(present.indexOf(a[2]), 1); }
-    return '';
-  };
-  const read = (dir: string, file: string) => JSON.parse(readFileSync(join(dir, file), 'utf8'));
-  const clean = mkdtempSync(join(tmpdir(), 'diag870-'));
-  assert.equal(sweepLeftovers(clean, fake([])), true);
-  assert.deepEqual(read(clean, 'leftover-cleanup.json'), {verified: true, found: [], failures: []});
+test('approvalFor rejects pending placeholders in quote, job and at', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'diag870-go-'));
+  t.after(() => rmSync(dir, {recursive: true}));
+  for (const field of ['quote', 'job', 'at']) {
+    for (const value of ['PENDING', 'pending', '  PeNdInG \t']) {
+      const file = approval(dir, 'smoke', {[field]: value});
+      assert.throws(() => approvalFor(file, 'smoke', field === 'job' ? value : 'smoke-870', null),
+        /go is still a pending placeholder/, `${field}=${JSON.stringify(value)}`);
+    }
+  }
+  assert.equal(approvalFor(approval(dir, 'smoke'), 'smoke', 'smoke-870', null).quote, 'go');
+});
 
-  const removed = mkdtempSync(join(tmpdir(), 'diag870-'));
-  json(join(removed, 'run-status.json'), {valid: true});
-  writeFileSync(join(removed, 'finished.json'), '{}');
-  assert.equal(sweepLeftovers(removed, fake(['probe'])), true);
-  assert.deepEqual(read(removed, 'leftover-cleanup.json'), {verified: true, found: [{kind: 'container', name: 'probe'}], failures: []});
-  assert.equal(JSON.parse(readFileSync(join(removed, 'run-status.json'), 'utf8')).valid, true);
+function preflightFixture(t: TestContext) {
+  const h = host();
+  t.after(() => rmSync(h.dir, {recursive: true}));
+  const args = argv(h, 'smoke');
+  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870', FUKULOW_LAUNCH_SESSION: 'session-870',
+    FUKULOW_LAUNCH_GATE_LOG: join(h.dir, 'smoke-870-gate.log')};
+  const calls: string[] = [];
+  const io = Object.fromEntries(Object.keys(rawIo).map(name => [name, () => {
+    calls.push(name);
+    assert.fail(`Unexpected ${name} call`);
+  }])) as unknown as Io;
+  const out = join(realpathSync(h.dir), 'out');
+  return {args, env, out, calls, deps: {io, os: 'linux' as const, logicalCpus: 16}};
+}
 
-  const stuck = mkdtempSync(join(tmpdir(), 'diag870-'));
-  json(join(stuck, 'run-status.json'), {valid: true, cleanupVerified: true, exitCode: 0});
-  writeFileSync(join(stuck, 'finished.json'), '{}');
-  const code = process.exitCode;
-  try {
-    assert.equal(sweepLeftovers(stuck, fake(['probe'], true)), false);
-    const status = read(stuck, 'run-status.json');
-    assert.deepEqual([status.valid, status.cleanupVerified, status.exitCode], [false, false, 1]);
-    assert.equal(read(stuck, 'leftover-cleanup.json').verified, false);
-    assert.equal(existsSync(join(stuck, 'finished.json')), false);
-  } finally { process.exitCode = code; }
+test('a driver host preflight failure stops before supervision and Docker', async t => {
+  const f = preflightFixture(t);
+  const problems = ['CPU policy unreadable'];
+  let gates = 0;
+  await assert.rejects(main(f.args, f.env, {...f.deps, hostGate: (session, path, source) => {
+    gates++;
+    assert.equal(session, f.env.FUKULOW_LAUNCH_SESSION);
+    assert.equal(path, f.out);
+    assert.deepEqual(source, {launcherGateLog: f.env.FUKULOW_LAUNCH_GATE_LOG});
+    return {problems};
+  }, supervise: async () => assert.fail('supervisor started')}), /STOP: host preflight.*CPU policy unreadable/);
+  assert.equal(gates, 1);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.out, 'host-preflight.json'), 'utf8')), {problems});
+});
+
+test('the worker rechecks the host after driver preflight and stops before Docker on drift', async t => {
+  const f = preflightFixture(t);
+  const problems = ['host service inactive'];
+  let gates = 0;
+  const deps = {...f.deps, hostGate: (session: string, path: string) => {
+    assert.equal(session, f.env.FUKULOW_LAUNCH_SESSION);
+    assert.equal(path, f.out);
+    return {problems: ++gates === 1 ? [] : problems};
+  }};
+  await assert.rejects(main(f.args, f.env, {...deps, supervise: ({env}) => main([], {...env, SEARCH_WORKER: '1'}, deps)}),
+    /STOP: host preflight.*host service inactive/);
+  assert.equal(gates, 2);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.out, 'host-preflight.json'), 'utf8')), {problems: []});
+  assert.deepEqual(JSON.parse(readFileSync(join(f.out, 'host-preflight-worker.json'), 'utf8')), {problems});
 });
 
 test('anything but a normal or limited finish writes stopped.json, no completed.json, and exits 2; a normal finish exits 0', () => {
@@ -245,13 +295,16 @@ test('the worker checks the prerequisites itself and claims a one-time token; SE
   writeFileSync(join(out, 'worker-token'), 'tok');
   const env = {...smokeEnv, SEARCH_WORKER: '1', DIAG870_ARGV: JSON.stringify(args), DIAG870_TOKEN: 'tok', DIAG870_OUT: out,
     DIAG870_STAGE: 'smoke', DIAG870_FROM: parsed.from, DIAG870_CPU_SETS: sets};
-  const gate = (e: Record<string, string>) => workerGate(e, hash, 16, 'linux', () => false);
+  const gate = (e: Record<string, string>) => workerGate(e, hash, 16, 'linux', () => ({problems: []}));
+  const {qualification} = prerequisites(parsed, hash, smokeEnv, 16);
+  json(join(out, 'qualification.json'), qualification);
   // Inherited worker settings without a launch: refused.
   assert.throws(() => gate({SEARCH_WORKER: '1', ...h.env}), /Not a supervised #870 worker launch/);
   // A launch whose prerequisites no longer hold (HOST-BUSY gone): refused.
   assert.throws(() => gate({...env, FUKULOW_HOST_BUSY: join(h.dir, 'gone')}), /HOST-BUSY is not held/);
-  assert.throws(() => workerGate(env, hash, 16, 'linux', path => path.endsWith(measurementSlice)),
-    /cannot use the #796 housekeeping layout/);
+  json(h.qualification, {...h.record, result: 'FAIL'});
+  assert.throws(() => gate(env), /not recorded as PASS/);
+  json(h.qualification, h.record);
   assert.ok(existsSync(join(out, 'worker-token')));
   assert.throws(() => gate({...env, DIAG870_STAGE: '1'}), /do not match the launch arguments/);
   assert.throws(() => gate({...env, DIAG870_TOKEN: 'other'}), /token does not match/);

@@ -253,7 +253,8 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       maxTctlC: job.cooldown?.maxTctlC, maxWaitSeconds: job.cooldown?.maxWaitSeconds,
       boost: job.requireHost?.boost, policyBoost: job.requireHost?.policyBoost, profile: job.requireHost?.platformProfile, policy,
     }) : undefined;
-    const c = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env, FUKULOW_HOST_BUSY: q.hostBusy,
+    const c = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env,
+      ...(job.gate ? { FUKULOW_LAUNCH_GATE_LOG: join(q.chainDir, `${job.name}-gate.log`) } : {}), FUKULOW_HOST_BUSY: q.hostBusy,
       FUKULOW_LAUNCH_JOB: job.name, FUKULOW_LAUNCH_SESSION: launchSession, ...(frequency ? { FUKULOW_LAUNCH_FREQUENCY: frequency } : {}) } });
     child = c;
     started.push({ child: c, job });

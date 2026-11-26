@@ -86,7 +86,8 @@ function readIrqs(io: typeof host) {
   return { active, rows };
 }
 
-export function readHostAffinity(launchSession: string, io = host) {
+export function readHostAffinity(launchSession: string, io = host,
+  readDockerCgroups = () => io.command('docker', ['info', '--format', '{{.CgroupDriver}} {{.CgroupVersion}}'])) {
   const unreadable: string[] = [];
   const capture = <T>(name: string, read: () => T) => {
     try { return read(); }
@@ -98,7 +99,7 @@ export function readHostAffinity(launchSession: string, io = host) {
     online: capture('online CPUs', () => list(io.read(`${cpuRoot}/online`))),
     siblings: capture('SMT topology', () => cpus796.map(cpu =>
       list(io.read(`${cpuRoot}/cpu${cpu}/topology/thread_siblings_list`)))),
-    docker: capture('Docker cgroup settings', () => io.command('docker', ['info', '--format', '{{.CgroupDriver}} {{.CgroupVersion}}'])),
+    docker: capture('Docker cgroup settings', readDockerCgroups),
     groups: capture('top-level cgroups', () => readGroups(io)),
     rootTasks: capture('root cgroup tasks', () => readRootTasks(io)),
     daemons: Object.fromEntries(services.map(unit => [unit, capture(unit, () => readDaemon(io, unit))])),

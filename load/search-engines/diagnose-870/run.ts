@@ -6,26 +6,28 @@ import { cpus, loadavg, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { cpuList, parseCpuSets, type CpuSets } from '../../harness-core/cpusets.ts';
-import { measuredSetsArg, measurementSlice, sets796 } from '../../harness-core/frequency-layout.ts';
-import { CommandTimeoutError, docker as rawDocker, save } from '../bench.ts';
+import { sets796 } from '../../harness-core/frequency-layout.ts';
+import { CommandTimeoutError, save } from '../bench.ts';
 import { resolveImage } from '../manifest.ts';
-import { ownedContainer, ownedVolume, ownershipLabel, refuseLeftovers, supervise, timeouts } from '../runtime.ts';
+import { ownershipLabel, refuseLeftovers, timeouts } from '../runtime.ts';
 import { literal } from '../seed.ts';
 import { accepts, completeness } from '../d3r/acceptance.ts';
 import { explainPage, prepare } from '../d3r/engine.ts';
 import { dfBytes, dockerDiskArgs } from '../d3r/headroom.ts';
-import { argumentsForPostgres, loadManifest } from '../d3r/manifest.ts';
+import { loadManifest } from '../d3r/manifest.ts';
 import { productionPath } from '../d3r/path.ts';
 import { outputPath, recordedWarmup } from '../d3r/run.ts';
 import { verifyRls } from '../d3r/rls.ts';
 import { loadBackfill } from '../d3r/snapshot.ts';
 import { timeQuery } from '../d3r/timing.ts';
-import { diagnosticSettings, expectedSnapshotSha256, launchArgs, planShape, qualifiedCpuSets } from './cluster.ts';
+import { planShape } from './cluster.ts';
+import { readHostGate } from './host-gate.ts';
+import { diagnosticCluster, diagnosticSettings, expectedSnapshotSha256, postgresDataDir, resourceNames } from './placement.ts';
+import { qualificationFor } from './qualification.ts';
+import { dockerStartMarker, superviseStage } from './supervisor.ts';
 import { gatedIo, rawIo, type Io } from './io.ts';
 import { cacheConstraint, fillPlans, noiseSpreads, ownReasons, smoke, stage1, stage2, type Block, type Measurement, type Noise, type Plan, type Stage1N } from './judge.ts';
 import { abortableIdle, execute, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
-import { ownedResources } from '../runtime.ts';
 import { ordered, sequence, type MeasuredStep, type Stage } from './plan.ts';
 import { awaitCoverage, freshFast, freshWaitMs, readSamples, stopProcess, windowFacts, type Restart } from './sampler.ts';
 
@@ -75,7 +77,10 @@ const isoInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:
 export function approvalFor(file: string, stage: Stage, job: string | undefined, notBefore: string | null,
   limitedStage1: {outcome: string; shortfall: string[]} | null = null) {
   const a = readIf(file) as Partial<Approval> | null;
-  assert.ok(a && a.issue === 870, `${file} is not an #870 approval record`);
+  assert.ok(a, `${file} is not an #870 approval record`);
+  assert.ok(!Object.values(a).some(value => typeof value === 'string' && value.trim().toLowerCase() === 'pending'),
+    'The go is still a pending placeholder');
+  assert.equal(a.issue, 870, `${file} is not an #870 approval record`);
   assert.equal(a.stage, stage, `The approval is for stage ${a.stage}, not ${stage}: each stage needs its own go`);
   assert.ok(typeof a.quote === 'string' && a.quote.trim().length > 0, 'The approval has no quoted go');
   assert.ok(typeof a.at === 'string' && isoInstant.test(a.at) && !Number.isNaN(Date.parse(a.at)), 'The approval has no valid time (ISO 8601 with offset, e.g. 2026-11-26T09:30+09:00)');
@@ -87,13 +92,13 @@ export function approvalFor(file: string, stage: Stage, job: string | undefined,
 }
 
 // A finished earlier stage of this diagnosis: finalized by the supervisor (finished.json, and run-status.json
-// valid with cleanup verified), swept afterwards with nothing left (leftover-cleanup.json verified), a normal
+// valid with cleanup verified), with nothing left (leftover-cleanup.json verified), a normal
 // finish (finish.json), approved for that stage, under this manifest, same CPU sets. The worker's
 // completed.json alone is not enough: it is written before teardown.
 // A limited Stage 1 (allowLimited, Stage 2 only) is accepted instead when the supervisor recorded its exit as
 // limitedExitCode with cleanup verified, and the worker wrote limited.json and finish.json kind "limited";
 // a STOP (stopped.json) never is.
-function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets: string, logicalCpus: number, allowLimited = false) {
+function finishedStage(dir: string, stage: Stage, manifestHash: string, allowLimited = false) {
   const name = stage === 'smoke' ? 'smoke' : `Stage ${stage}`;
   const finished = readIf(`${dir}/finished.json`), status = readIf(`${dir}/run-status.json`);
   const finish = readIf(`${dir}/finish.json`), limitedRecord = readIf(`${dir}/limited.json`);
@@ -112,7 +117,7 @@ function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets:
     ? finish.normal === false && judgement.finish?.kind === 'limited' && judgement.abnormal.length > 0
     : finish?.normal === true && judgement.abnormal.length === 0), `${dir} is not a normal finish of the ${name}`);
   assert.equal(readIf(`${dir}/approval.json`)?.stage, stage, `${dir} has no recorded go for the ${name}`);
-  assert.equal(JSON.stringify(metadata.cpuSets ?? null), JSON.stringify(parseCpuSets(cpuSets, logicalCpus)), `${dir} ran on other CPU sets`);
+  assert.deepEqual(metadata.cpuSets, sets796, `${dir} ran on other CPU sets`);
   assert.ok(typeof record.at === 'string', `${dir} has no finish time`);
   assert.ok(!Number.isNaN(Date.parse(record.at)), `${dir} has no valid finish time`);
   return {judgement, finishedAt: record.at as string, limited};
@@ -162,25 +167,13 @@ function launchedJob(env: NodeJS.ProcessEnv) {
 
 // §3 prerequisites and the stage's go, all checked before anything touches Docker or a database. Each
 // missing one is a STOP before start.
-export function prerequisites(args: ReturnType<typeof options>, manifestHash: string, env = process.env, logicalCpus = cpus().length,
-  exists: (path: string) => boolean = existsSync) {
+export function prerequisites(args: ReturnType<typeof options>, manifestHash: string, env = process.env, logicalCpus = cpus().length) {
   // §3.2: the launcher holds HOST-BUSY for this queue and this job (it also ran the preflight and logged the go).
   assert.ok(launchedJob(env), 'Start through the launcher: HOST-BUSY is not held for this job');
-  const [given, fixed] = [args.cpuSets, qualifiedCpuSets].map(t => parseCpuSets(t, logicalCpus));
-  const q = readIf(args.qualification);
-  const housekeepingPair = cpuList(given.server) === cpuList(sets796.server) && cpuList(given.client) === cpuList(sets796.client);
-  const housekeepingQualification = typeof q?.cpuSets === 'string' &&
-    (q.cpuSets === measuredSetsArg || q.cpuSets.startsWith(`${measuredSetsArg};housekeeping=`));
-  assert.ok(!housekeepingPair && !housekeepingQualification && !exists(`/run/systemd/system/${measurementSlice}`) &&
-    !exists(`/sys/fs/cgroup/${measurementSlice}`),
-    'STOP: #870 cannot use the #796 housekeeping layout until it adopts the two-container layout and host preflight');
-  assert.ok(!given.housekeeping && cpuList(given.server) === cpuList(fixed.server) && cpuList(given.client) === cpuList(fixed.client),
-    `CPU sets must be the #796 sets ${qualifiedCpuSets}`);
-  // §3.1: the #796 qualification record, PASS, on these sets.
-  assert.ok(q?.issue === 796 && q.result === 'PASS' && q.cpuSets === qualifiedCpuSets, 'The #796 qualification is not recorded as PASS on the #796 CPU sets');
+  const {sets, qualification} = qualificationFor(args.cpuSets, logicalCpus, args.qualification);
   // §3.4: a passed smoke before Stage 1; §5.3: a finished Stage 1 before Stage 2.
-  const prior = args.stage === '1' ? finishedStage(args.smokeOut!, 'smoke', manifestHash, args.cpuSets, logicalCpus)
-    : args.stage === '2' ? finishedStage(args.stage1Out!, '1', manifestHash, args.cpuSets, logicalCpus, true) : null;
+  const prior = args.stage === '1' ? finishedStage(args.smokeOut!, 'smoke', manifestHash)
+    : args.stage === '2' ? finishedStage(args.stage1Out!, '1', manifestHash, true) : null;
   if (args.stage === '1') assert.equal(prior!.judgement.outcome, 'smoke passed', 'The smoke did not pass');
   // Stage 1 is re-validated against its own measurements before the go is matched, and the go must name the
   // recomputed outcome and shortfall, never the recorded fields alone (sol review of the re-approval fix).
@@ -191,102 +184,101 @@ export function prerequisites(args: ReturnType<typeof options>, manifestHash: st
   }
   const limitedStage1 = n?.stage1.kind === 'limited' ? {outcome: prior!.judgement.outcome as string, shortfall: n.stage1.shortfall} : null;
   const approval = approvalFor(args.approval, args.stage, env.FUKULOW_LAUNCH_JOB, prior?.finishedAt ?? null, limitedStage1);
-  return {stage1Noise: n, approval};
+  return {stage1Noise: n, approval, sets, qualification};
 }
 const stage1Outcomes = ['not reproduced', 'cause established', 'cause not established', 'repetition-linked, cause not established', 'inconclusive'];
 
 const freeAt = (path: string) => { const s = statfsSync(path, {bigint: true}); return Number(s.bavail * s.bsize); };
 const freeOrNull = (path: string) => { try { return freeAt(path); } catch { return null; } };
 
-async function worker(env: NodeJS.ProcessEnv) {
+type PreflightDeps = {logicalCpus: number; os: NodeJS.Platform; hostGate: typeof readHostGate};
+
+function checkHost(out: string, env: NodeJS.ProcessEnv, hostGate: typeof readHostGate, record: string) {
+  const result = hostGate(env.FUKULOW_LAUNCH_SESSION ?? '', out, {launcherGateLog: env.FUKULOW_LAUNCH_GATE_LOG});
+  save(`${out}/${record}`, result);
+  assert.ok(result.problems.length === 0, `STOP: host preflight (§3.1): ${result.problems.join('; ')}`);
+}
+
+async function worker(env: NodeJS.ProcessEnv, {io: workerIo, logicalCpus, os, hostGate}: PreflightDeps & {io: Io}) {
   // Set by a signal (review rounds 6 and 7). The worker's only I/O is the gated set below, so no SQL,
   // docker command, session, statement or pgbench starts once it is set.
   let abortReason: string | null = null;
-  const io = gatedIo(rawIo, () => abortReason);
-  const {sql, docker, command, boundedCommand, checkPins, pinnedBenchmark, pinnedSession} = io;
+  const io = gatedIo(workerIo, () => abortReason);
+  const {sql, docker, command, boundedCommand, clientBenchmark, clientSession} = io;
   const {frozen, sha256} = loadManifest();
   // Before anything else: the prerequisites again, and this launch's one-time token (review round 5, item 1).
-  const {stage1Noise} = workerGate(env, sha256);
+  const {stage1Noise, sets, qualification} = workerGate(env, sha256, logicalCpus, os, hostGate);
   const stage = env.DIAG870_STAGE as Stage;
   const out = env.DIAG870_OUT!;
-  const sets: CpuSets | undefined = env.DIAG870_CPU_SETS ? parseCpuSets(env.DIAG870_CPU_SETS, cpus().length) : undefined;
   const {querySet, transactions, clients, warmupSweeps, rows, restoreRows} = frozen.performance;
-  const container = ownedContainer(), volume = ownedVolume();
-  assert.ok(container && volume, 'Missing supervised Docker resources');
-  const owner = (db: string, text: string) => sql(container, db, text);
+  assert.ok(env.DIAG870_RESOURCE_ID && env.FUKULOW_LAUNCH_SESSION, 'Missing supervised Docker resources or launcher session');
+  const names = resourceNames(env.DIAG870_RESOURCE_ID);
+  const {server, client} = names;
+  refuseLeftovers(docker);
 
   // Prerequisites (§3): snapshot identity and disk, before anything starts.
   const source = await loadBackfill(env.DIAG870_FROM!, sha256, rows, restoreRows);
   assert.equal(source.receipt.snapshot.sha256, expectedSnapshotSha256, 'Not the verified #689 snapshot');
+  writeFileSync(`${out}/${dockerStartMarker}`, '', {flag: 'wx'});
   try { resolveImage(docker, frozen.image, true); } catch (error) {
     if (error instanceof CommandTimeoutError) throw error;
     docker('pull', frozen.image);
   }
   const {id} = resolveImage(docker, frozen.image, true);
-  const dockerFree = () => { try { return dfBytes(docker(...dockerDiskArgs(id, ownershipLabel))).free; } catch { return null; } };
+  const [diskRun, ...diskArgs] = dockerDiskArgs(id, ownershipLabel);
+  const dockerFree = () => {
+    try { return dfBytes(docker(diskRun, '--tmpfs', postgresDataDir, ...diskArgs)).free; }
+    catch { return null; }
+  };
   // Docker storage, and the host filesystems of the snapshot tar and of the output (§3.3).
   const startFree = {docker: dockerFree(), snapshot: freeOrNull(source.snapshotDirectory), output: freeOrNull(out)};
   const diskProblems = startDiskProblems(startFree);
   save(`${out}/disk-preflight.json`, {...startFree, problems: diskProblems, unit: 'bytes; thresholds in decimal GB'});
   assert.deepEqual(diskProblems, [], `disk preflight (§3.3): ${diskProblems.join('; ')}`);
 
-  // Start the restored cluster (as the #689 formal run, plus diagnostic logging and the CPU pin).
-  const launch = launchArgs(source.snapshotDirectory, sets?.server);
-  docker('volume', 'create', '--label', ownershipLabel, volume);
-  command('docker', ['run', '-d', '--label', ownershipLabel, '--name', container, '--network=none',
-    `--shm-size=${frozen.shmBytes}`, '--mount', `type=volume,source=${volume},target=/var/lib/postgresql`,
-    ...launch.options, '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_USER=fukulow', '-e', 'POSTGRES_DB=postgres',
-    id, ...launch.args, ...argumentsForPostgres, ...diagnosticSettings], undefined, {...process.env, POSTGRES_PASSWORD: randomUUID()});
-  boundedCommand('docker', ['exec', container, 'sh', '-ec', 'until test -e /tmp/backfill-extracted; do sleep 1; done'], timeouts.psql);
-  const ready = async () => {
-    for (let i = 0; i < frozen.timing.startupAttempts; i++) {
-      try {
-        docker('exec', container, 'pg_isready', '-h', '127.0.0.1', '-U', 'fukulow', '-d', 'postgres');
-        if (owner('postgres', 'SELECT NOT pg_is_in_recovery();') === 't') return;
-      } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
-      await new Promise(r => setTimeout(r, frozen.timing.startupPollMs));
-    }
-    throw new Error('PostgreSQL startup timed out');
-  };
-  await ready();
+  const cluster = diagnosticCluster(io, names, {snapshotDirectory: source.snapshotDirectory, image: id,
+    shmBytes: frozen.shmBytes, ...frozen.timing}, env.FUKULOW_LAUNCH_SESSION);
+  const {owner} = cluster;
+  const placement = await cluster.start(randomUUID());
+  save(`${out}/placement-start.json`, placement);
   assert.equal(owner('postgres', 'SHOW server_version_num;'), '180006');
   assert.deepEqual(JSON.parse(owner('postgres', `SELECT json_object_agg(name,setting) FROM pg_settings
     WHERE name IN (${Object.keys(frozen.settings).map(literal).join(',')});`)), frozen.settings);
   assert.equal(owner('postgres', 'SHOW log_autovacuum_min_duration;'), '0');
   assert.equal(owner('postgres', 'SELECT system_identifier FROM pg_control_system();'), source.receipt.snapshot.systemIdentifier);
-  assert.deepEqual(verifyRls(text => sql(container, 'base', text, 'fukulow_app'), frozen.sessionPolicy.appSettings), source.receipt.rls);
-  const pins = sets ? checkPins(container, sets) : null;
+  assert.deepEqual(verifyRls(text => sql(client, 'base', text, 'fukulow_app'), frozen.sessionPolicy.appSettings), source.receipt.rls);
   const path = productionPath();
   save(`${out}/metadata.json`, {label, stage, manifestHash: sha256, image: {reference: frozen.image, id}, node: process.version,
     source: command('git', ['rev-parse', 'HEAD']), worktreeStatus: command('git', ['status', '--porcelain']),
-    snapshot: source.receipt.snapshot, cpuSets: sets ?? null, pins, diagnosticSettings, platform: platform(),
-    steps: sequence(stage), cacheConstraint, qualification: env.DIAG870_QUALIFICATION || null,
+    snapshot: source.receipt.snapshot, cpuSets: sets, containers: names, diagnosticSettings, platform: platform(),
+    steps: sequence(stage), cacheConstraint, qualification,
     approval: readJson(`${out}/approval.json`), hostBusy: env.FUKULOW_HOST_BUSY ?? null});
 
   // Samplers in their own process (§1). They are stopped on every path: before the judgement on a normal
-  // path, in finally on an error, and on a signal to this worker. The supervisor's SIGKILL of this worker's
-  // process group also reaches the sampler, and the IPC channel ends it if this worker dies otherwise.
+  // path, in finally on an error, and on a signal to this worker. If the supervisor kills the worker,
+  // the sampler receives the IPC disconnect and stops its in-flight commands.
   const samplesFile = `${out}/samples.jsonl`;
   const thermal = platform() === 'linux';
   const sampler = spawn(process.execPath, [fileURLToPath(new URL('./sampler.ts', import.meta.url)), '--out', samplesFile,
-    '--container', container, ...(sets ? ['--client-cpus', cpuList(sets.client)] : []), ...(thermal ? ['--thermal'] : [])],
+    '--server', server, '--client', client, ...(thermal ? ['--thermal'] : [])],
   {stdio: ['ignore', 'inherit', 'inherit', 'ipc'], detached: true});
   // The sampler leads its own process group, so a stop reaches its in-flight commands too.
   const samplerGroup = {get exitCode() { return sampler.exitCode; }, get signalCode() { return sampler.signalCode; },
     kill: (signal: NodeJS.Signals) => { try { process.kill(-sampler.pid!, signal); return true; } catch { return false; } }};
   const groupAlive = () => { try { process.kill(-sampler.pid!, 0); return true; } catch { return false; } };
-  const time = pinnedBenchmark(sets?.client);
+  const time = clientBenchmark();
   const windows = new Map<string, {start: number; end: number; blocks: Block[]; restart: Restart | null; checked: boolean}>();
   let previous: {id: string; end: number} | null = null;
   let lastRestart: Restart | null = null;
-  const app = <T>(body: (search: (text: string) => Promise<string>) => Promise<T>) => pinnedSession(container, 'measured', true, sets?.client, body);
+  const app = <T>(body: (search: (text: string) => Promise<string>) => Promise<T>) => clientSession(client, 'measured', true, body);
   // After a restart, wait (up to 30 s) for a fast sample from the restarted server, so the next window's
   // start environment is not read from before the restart. The gap across the restart is checked with the
   // window: over 30 s, or no fresh sample, makes the round INVALID (review item 3).
+  let restartCount = 0;
   const restart = async () => {
     const at = Date.now();
-    docker('restart', container);
-    await ready();
+    const placement = await cluster.restart();
+    save(`${out}/placement-restart-${++restartCount}.json`, {at, ...placement});
     const t = Date.now();
     while (!freshFast(readSamples(samplesFile), t) && Date.now() - t < freshWaitMs) await new Promise(r => setTimeout(r, 250));
     lastRestart = {at, fresh: freshFast(readSamples(samplesFile), t)};
@@ -312,14 +304,14 @@ async function worker(env: NodeJS.ProcessEnv) {
     settle: async capMs => {
       const deadline = Date.now() + capMs;
       const left = () => Math.max(1, deadline - Date.now());
-      const owned = (text: string) => boundedCommand('docker', ['exec', '-i', container, 'psql', '-XqAt', '-v', 'ON_ERROR_STOP=1',
+      const owned = (text: string) => boundedCommand('docker', ['exec', '-i', client, 'psql', '-XqAt', '-v', 'ON_ERROR_STOP=1',
         '-U', 'fukulow', '-d', 'postgres'], left(), text).trim();
       try {
         return await settleWait({
           checkpoint: () => { owned('CHECKPOINT;'); },
           reading: () => {
             
-            const mem = boundedCommand('docker', ['exec', container, 'cat', '/proc/meminfo'], Math.min(left(), timeouts.docker));
+            const mem = readFileSync('/proc/meminfo', 'utf8');
             // An unreadable field is NaN, which never settles: the wait runs to its cap (INVALID), not a STOP.
             const kib = (k: string) => Number(new RegExp(`^${k}:\\s+(\\d+) kB$`, 'm').exec(mem)?.[1] ?? NaN) * 1024;
             return {dirtyWritebackBytes: kib('Dirty') + kib('Writeback'),
@@ -358,7 +350,7 @@ async function worker(env: NodeJS.ProcessEnv) {
         
         const b = Date.now();
         try {
-          const sample = await timeQuery(container, 'measured', path.page, query, raw, !accepts(query), `${dest}/${query}`, transactions, clients, time);
+          const sample = await timeQuery(client, 'measured', path.page, query, raw, !accepts(query), `${dest}/${query}`, transactions, clients, time);
           results.push({query, sample});
           save(`${dest}/${query}.json`, sample);
         } catch (error) {
@@ -394,7 +386,7 @@ async function worker(env: NodeJS.ProcessEnv) {
         if (!w || w.checked) continue;
         const {samples, reached} = await awaitCoverage(() => readSamples(samplesFile), w.end, thermal, {now: () => Date.now(),
           sleep: ms => new Promise(r => setTimeout(r, ms)), alive: () => sampler.exitCode === null && sampler.signalCode === null});
-        const facts = windowFacts(samples, w.start, w.end, w.blocks, {thermal, serverCpus: sets?.server ?? null, restart: w.restart});
+        const facts = windowFacts(samples, w.start, w.end, w.blocks, {thermal, serverCpus: sets.server, restart: w.restart});
         if (!reached) facts.invalid.push('sampler coverage not reached by the deadline');
         m.invalid.push(...facts.invalid.filter(r => !m.invalid.includes(r)));
         m.env = facts.env;
@@ -454,7 +446,7 @@ async function worker(env: NodeJS.ProcessEnv) {
     const stopped = await stopSampler();
     if (!stopped.verified) stageMissing.push(`sampler: ${stopped.how}`);
     logTried = true;
-    const logMissing = postgresLog(io, container, out);
+    const logMissing = postgresLog(io, server, out);
     if (logMissing) stageMissing.push(logMissing);
     const judgement = stage === '1' ? stage1(result.measurements, result.stopped, stageMissing)
       : stage === '2' ? stage2(result.measurements, stage1Noise!, result.stopped, stageMissing)
@@ -467,7 +459,7 @@ async function worker(env: NodeJS.ProcessEnv) {
   } finally {
     const r = await stopSampler();
     if (!r.verified) { note(`sampler did not exit: ${r.how}`); process.exitCode ||= stopExitCode; }
-    if (!logTried) postgresLog(io, container, out);
+    if (!logTried) postgresLog(io, server, out);
   }
 }
 
@@ -475,17 +467,18 @@ async function worker(env: NodeJS.ProcessEnv) {
 // the launch's arguments and checks every prerequisite again, binds stage and output to them, and claims the
 // one-time token the launching process wrote into the output directory. A second worker, or one started
 // with inherited settings, finds the token claimed or missing and stops before Docker.
-export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logicalCpus = cpus().length, os = platform(),
-  exists: (path: string) => boolean = existsSync) {
+export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logicalCpus = cpus().length, os = platform(), hostGate = readHostGate) {
   assert.ok(env.DIAG870_ARGV && env.DIAG870_TOKEN && env.DIAG870_OUT, 'Not a supervised #870 worker launch');
   const args = options(JSON.parse(env.DIAG870_ARGV) as string[], os);
-  const checked = prerequisites(args, manifestHash, env, logicalCpus, exists);
+  const checked = prerequisites(args, manifestHash, env, logicalCpus);
   assert.ok(env.DIAG870_STAGE === args.stage && env.DIAG870_FROM === args.from && env.DIAG870_CPU_SETS === args.cpuSets,
     'The worker settings do not match the launch arguments');
   const file = `${env.DIAG870_OUT}/worker-token`, claimed = `${file}.claimed`;
   try { renameSync(file, claimed); } catch { assert.fail('The worker token is missing or already claimed'); }
   assert.equal(readFileSync(claimed, 'utf8'), env.DIAG870_TOKEN, 'The worker token does not match');
   assert.equal(JSON.stringify(readIf(`${env.DIAG870_OUT}/approval.json`)), JSON.stringify(checked.approval), 'The recorded go is not this launch\'s');
+  assert.deepEqual(readIf(`${env.DIAG870_OUT}/qualification.json`), checked.qualification, 'The qualification changed after the supervisor checked it');
+  checkHost(env.DIAG870_OUT, env, hostGate, 'host-preflight-worker.json');
   return checked;
 }
 
@@ -558,52 +551,26 @@ export function postgresLog(io: Pick<Io, 'spawnSync'>, container: string, out: s
   } catch (error) { return `postgres log not saved: ${String(error)}`; }
 }
 
-async function main() {
-  if (process.env.SEARCH_WORKER === '1') { await worker(process.env); return; }
-  const args = options(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2), env = process.env,
+  {logicalCpus = cpus().length, os = platform(), hostGate = readHostGate, io = rawIo, supervise = superviseStage} = {}) {
+  if (env.SEARCH_WORKER === '1') { await worker(env, {logicalCpus, os, hostGate, io}); return; }
+  const args = options(argv, os);
   const {sha256} = loadManifest();
   // Everything in §3 and the stage's go, before any Docker or database work.
-  const {approval} = prerequisites(args, sha256);
+  const {approval, qualification} = prerequisites(args, sha256, env, logicalCpus);
   const out = outputPath(args.out);
-  refuseLeftovers(rawDocker);
   mkdirSync(out, {mode: 0o700});
+  checkHost(out, env, hostGate, 'host-preflight.json');
   save(`${out}/approval.json`, approval);
+  save(`${out}/qualification.json`, qualification);
   const token = randomUUID();
+  const resourceId = randomUUID();
   writeFileSync(`${out}/worker-token`, token, {mode: 0o600, flag: 'wx'});
-  Object.assign(process.env, {DIAG870_STAGE: args.stage, DIAG870_OUT: out, DIAG870_FROM: args.from,
-    DIAG870_CPU_SETS: args.cpuSets ?? '', DIAG870_QUALIFICATION: args.qualification ?? '',
-    DIAG870_ARGV: JSON.stringify(process.argv.slice(2)), DIAG870_TOKEN: token});
-  // The supervisor runs this file as the worker, owns the container and volume, and always removes them.
-  await supervise(import.meta.url, out, sha256, () => note(`${label}: stage ${args.stage} finished (${out})`));
-  sweepLeftovers(out);
-  if (process.exitCode === 0 || process.exitCode === undefined) return;
-  note(`${label}: stage ${args.stage} did not finish normally (see ${out}/stopped.json, limited.json or the log); the queue ends`);
+  const workerEnv = {...env, DIAG870_STAGE: args.stage, DIAG870_OUT: out, DIAG870_FROM: args.from,
+    DIAG870_CPU_SETS: args.cpuSets, DIAG870_RESOURCE_ID: resourceId,
+    DIAG870_ARGV: JSON.stringify(argv), DIAG870_TOKEN: token};
+  await supervise({entry: import.meta.url, out, manifestHash: sha256, stage: args.stage, names: resourceNames(resourceId), env: workerEnv});
+  note(`${label}: stage ${args.stage} ${process.exitCode ? 'did not finish normally' : 'finished'} (${out})`);
 }
 
 if (import.meta.main) await main();
-
-// After the supervisor: any harness-labelled resource still present is this run's (refuseLeftovers found
-// none at start), such as a throwaway disk probe interrupted mid-run. It is removed and recorded; if the
-// listing, a removal or the check afterwards fails, the run is not valid and the queue ends.
-export function sweepLeftovers(out: string, d: (...args: string[]) => string = rawDocker) {
-  let found: {kind: string; name: string}[] = [];
-  const failures: string[] = [];
-  try { found = ownedResources(d); } catch (error) { failures.push(`listing failed: ${String(error)}`); }
-  for (const r of found) {
-    try { d(...(r.kind === 'container' ? ['rm', '-fv', r.name] : ['volume', 'rm', '-f', r.name])); } catch (error) { failures.push(`${r.kind} ${r.name}: ${String(error)}`); }
-  }
-  try {
-    const remain = ownedResources(d);
-    if (remain.length) failures.push(`still present: ${remain.map(r => `${r.kind} ${r.name}`).join(', ')}`);
-  } catch (error) { failures.push(`verification failed: ${String(error)}`); }
-  save(`${out}/leftover-cleanup.json`, {verified: !failures.length, found, failures});
-  if (!failures.length) return true;
-  const statusFile = `${out}/run-status.json`;
-  const status = existsSync(statusFile) ? readJson(statusFile) : {};
-  writeFileSync(statusFile, JSON.stringify({...status, valid: false, cleanupVerified: false,
-    exitCode: status.exitCode ? status.exitCode : 1, leftoverFailures: failures}) + '\n');
-  rmSync(`${out}/finished.json`, {force: true});
-  note(`${label}: harness cleanup failed (${failures.join('; ')}); the run is not valid`);
-  if (!process.exitCode) process.exitCode = 1;
-  return false;
-}

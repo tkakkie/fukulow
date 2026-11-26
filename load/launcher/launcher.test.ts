@@ -770,8 +770,8 @@ test('each gate and job is told the HOST-BUSY this queue holds and its own name'
   const w = world({ exits: [0, 0, 0] });
   await launch(queue([job('a', { gate: ['node', 'gate.ts'], env: { X: '1' } }), job('b')]), deps(w));
   assert.deepEqual(w.envs, [
-    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1' },
-    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1' },
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1', FUKULOW_LAUNCH_GATE_LOG: '/runs/chain/a-gate.log' },
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1', FUKULOW_LAUNCH_GATE_LOG: '/runs/chain/a-gate.log' },
     { FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'b', FUKULOW_LAUNCH_SESSION: 'sess-1' },
   ]);
 });
