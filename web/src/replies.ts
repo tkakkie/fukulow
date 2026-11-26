@@ -33,7 +33,7 @@ const chain = (anchor: Message, channel: ChannelState | undefined) => ({ anchor,
 type Chain = ReturnType<typeof chain>
 
 /** One open chain per Channel; projection records settle sends but never enter sync's confirmed window. */
-export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
+export function createReplies(sync: Sync, options: { api: RepliesApi; requestTimeoutMs?: number }) {
   const canonical = (channel: string, held: Message | undefined, incoming: Message) =>
     knownMessageState(sync.get().channels[channel], held, incoming)
   const chains = new Map<string, Chain>()
@@ -169,9 +169,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
     // C6 late 401 and C10 remain authoritative for this Account Session, even after timeout or unwatch.
     void operation.then(r => {
-      if (session !== sessionToken) return
-      if (!r.ok && r.kind === 'http' && r.status === 401) { void sync.close(); options.onSessionEnded?.() }
-      else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
+      if (session === sessionToken) sync.reportAccess?.(r, sync)
     })
     const apply = operation.then(result => {
       if (!isCurrent()) return

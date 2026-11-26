@@ -16,6 +16,7 @@ export type TimelineApi = {
   sendMessage(channel: string, body: SendMessageRequest): Promise<Result<Message>>
 }
 type Wait = Extract<Effect, { type: 'wait' }>
+type SyncAccessSource = { close(): Promise<void>; unavailable(): Promise<void> }
 export type SyncOptions = {
   selfId: string
   drafts?: DraftStore
@@ -25,6 +26,8 @@ export type SyncOptions = {
   connect?: (handlers: RealtimeHandlers) => Connection
   newId?: () => string
   onSessionEnded?: () => void
+  reportSyncAccess?: (result: Result<unknown>, source?: SyncAccessSource) => void
+  reportOrganizationUnavailable?: (apply: () => Promise<void>) => void
   graceMs?: number
   delay?: (attempt: number) => number
   random?: () => number
@@ -427,13 +430,19 @@ export function createSync(options: SyncOptions) {
             },
             onClose: code => {
               if (opened || !options.checkMembership) {
+                if (code === 4003) {
+                  if (state.connection === effect.id) options.reportOrganizationUnavailable?.(
+                    () => dispatch({ type: 'socket_closed', connection: effect.id, code }))
+                  return
+                }
                 void dispatch({ type: 'socket_closed', connection: effect.id, code }); return
               }
               // Browsers hide rejected upgrade responses. Only REST can establish Membership loss.
               void request(options.checkMembership).then(result => {
                 if (state.connection !== effect.id || !state.running) return
-                if (api.isOrganizationUnavailable(result)) void dispatch({ type: 'organization_unavailable' })
-                else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
+                if (api.isOrganizationUnavailable(result)) {
+                  options.reportOrganizationUnavailable?.(() => dispatch({ type: 'organization_unavailable' }))
+                } else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
                 else void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
               }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
             },
@@ -828,6 +837,7 @@ export function createSync(options: SyncOptions) {
     onInput(listener: (input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void) { inputListeners.add(listener); return () => { inputListeners.delete(listener) } },
     onActivity(listener: (notice: ActivityNotice) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
     get: () => state,
+    reportAccess: options.reportSyncAccess,
     request: (id: number) => core.request(id),
     timer: (id: number) => core.timer(id),
     subscribe(listener: SyncListener) { listeners.add(listener); return () => { listeners.delete(listener) } },
