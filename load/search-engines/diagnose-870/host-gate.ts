@@ -6,7 +6,7 @@ import { allowedCpus } from '../../harness-core/cpusets.ts';
 import { readCpuPolicy } from '../../harness-core/cpu-policy.ts';
 import { cpus796, sets796 } from '../../harness-core/frequency-layout.ts';
 import { hostRecord, requirementViolations } from '../../harness-core/host-record.ts';
-import { hostAffinityProblems, readHostAffinity } from '../../sql-probes/519-unread-counts/frequency-host-affinity.ts';
+import { hostAffinityProblems, readHostAffinity, type HostAffinity } from '../../sql-probes/519-unread-counts/frequency-host-affinity.ts';
 
 const host = {
   os: platform,
@@ -18,7 +18,37 @@ const host = {
   affinity: readHostAffinity,
 };
 
-export function readHostGate(session: string, diskPath: string, io = host) {
+type LauncherGateRecord = {session?: string; dockerService?: string; problems?: string[];
+  affinity?: Pick<HostAffinity, 'bootId' | 'docker'> | null};
+
+function dockerServiceIdentity() {
+  const state = execFileSync('systemctl', ['show', '--property=MainPID', '--property=ExecMainStartTimestampMonotonic', 'docker.service'],
+    {encoding: 'utf8', timeout: 5_000});
+  const pid = /^MainPID=([1-9]\d*)$/m.exec(state)?.[1];
+  const start = /^ExecMainStartTimestampMonotonic=([1-9]\d*)$/m.exec(state)?.[1];
+  if (!pid || !start) throw new Error('Docker service process identity is unreadable');
+  return `${pid}:${start}`;
+}
+
+export function launcherDockerReadback(gate: LauncherGateRecord | null, session: string, bootId: string, dockerService: string) {
+  if (gate?.session !== session || gate.affinity?.bootId !== bootId || gate.dockerService !== dockerService ||
+      !Array.isArray(gate.problems) || gate.problems.length !== 0 || typeof gate.affinity.docker !== 'string') {
+    throw new Error('No passed launcher host gate for this session, boot and Docker service process');
+  }
+  return gate.affinity.docker;
+}
+
+// The launcher's gate already queried Docker. Reuse only those readbacks while checking the live host again.
+function preflightHost(log: string | undefined): typeof host {
+  return {...host, record: path => hostRecord(path, () => null), affinity: session => readHostAffinity(session, undefined, () => {
+    if (!log) throw new Error('Missing launcher host gate log');
+    return launcherDockerReadback(JSON.parse(readFileSync(log, 'utf8')), session,
+      readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), dockerServiceIdentity());
+  })};
+}
+
+export function readHostGate(session: string, diskPath: string, source: typeof host | {launcherGateLog: string | undefined} = host) {
+  const io = 'launcherGateLog' in source ? preflightHost(source.launcherGateLog) : source;
   const problems: string[] = [];
   const capture = <T>(what: string, read: () => T) => {
     try { return read(); }
@@ -44,7 +74,10 @@ export function readHostGate(session: string, diskPath: string, io = host) {
 }
 
 if (import.meta.main) {
-  const result = readHostGate(process.env.FUKULOW_LAUNCH_SESSION ?? '', process.cwd());
-  console.log(JSON.stringify(result, null, 2));
+  const session = process.env.FUKULOW_LAUNCH_SESSION ?? '';
+  const dockerService = platform() === 'linux' && session ? dockerServiceIdentity() : null;
+  const result = readHostGate(session, process.cwd());
+  if (dockerService && dockerService !== dockerServiceIdentity()) result.problems.push('Docker service restarted during the host gate');
+  console.log(JSON.stringify({...result, dockerService}, null, 2));
   if (result.problems.length) process.exitCode = 1;
 }

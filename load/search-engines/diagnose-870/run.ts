@@ -6,9 +6,8 @@ import { cpus, loadavg, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { allowedCpus } from '../../harness-core/cpusets.ts';
 import { sets796 } from '../../harness-core/frequency-layout.ts';
-import { CommandTimeoutError, docker as rawDocker, save } from '../bench.ts';
+import { CommandTimeoutError, save } from '../bench.ts';
 import { resolveImage } from '../manifest.ts';
 import { ownershipLabel, refuseLeftovers, timeouts } from '../runtime.ts';
 import { literal } from '../seed.ts';
@@ -22,9 +21,10 @@ import { verifyRls } from '../d3r/rls.ts';
 import { loadBackfill } from '../d3r/snapshot.ts';
 import { timeQuery } from '../d3r/timing.ts';
 import { planShape } from './cluster.ts';
+import { readHostGate } from './host-gate.ts';
 import { diagnosticCluster, diagnosticSettings, expectedSnapshotSha256, postgresDataDir, resourceNames } from './placement.ts';
 import { qualificationFor } from './qualification.ts';
-import { superviseStage } from './supervisor.ts';
+import { dockerStartMarker, superviseStage } from './supervisor.ts';
 import { gatedIo, rawIo, type Io } from './io.ts';
 import { cacheConstraint, fillPlans, noiseSpreads, ownReasons, smoke, stage1, stage2, type Block, type Measurement, type Noise, type Plan, type Stage1N } from './judge.ts';
 import { abortableIdle, execute, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
@@ -77,7 +77,10 @@ const isoInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:
 export function approvalFor(file: string, stage: Stage, job: string | undefined, notBefore: string | null,
   limitedStage1: {outcome: string; shortfall: string[]} | null = null) {
   const a = readIf(file) as Partial<Approval> | null;
-  assert.ok(a && a.issue === 870, `${file} is not an #870 approval record`);
+  assert.ok(a, `${file} is not an #870 approval record`);
+  assert.ok(!Object.values(a).some(value => typeof value === 'string' && value.trim().toLowerCase() === 'pending'),
+    'The go is still a pending placeholder');
+  assert.equal(a.issue, 870, `${file} is not an #870 approval record`);
   assert.equal(a.stage, stage, `The approval is for stage ${a.stage}, not ${stage}: each stage needs its own go`);
   assert.ok(typeof a.quote === 'string' && a.quote.trim().length > 0, 'The approval has no quoted go');
   assert.ok(typeof a.at === 'string' && isoInstant.test(a.at) && !Number.isNaN(Date.parse(a.at)), 'The approval has no valid time (ISO 8601 with offset, e.g. 2026-11-26T09:30+09:00)');
@@ -188,27 +191,35 @@ const stage1Outcomes = ['not reproduced', 'cause established', 'cause not establ
 const freeAt = (path: string) => { const s = statfsSync(path, {bigint: true}); return Number(s.bavail * s.bsize); };
 const freeOrNull = (path: string) => { try { return freeAt(path); } catch { return null; } };
 
-async function worker(env: NodeJS.ProcessEnv) {
+type PreflightDeps = {logicalCpus: number; os: NodeJS.Platform; hostGate: typeof readHostGate};
+
+function checkHost(out: string, env: NodeJS.ProcessEnv, hostGate: typeof readHostGate, record: string) {
+  const result = hostGate(env.FUKULOW_LAUNCH_SESSION ?? '', out, {launcherGateLog: env.FUKULOW_LAUNCH_GATE_LOG});
+  save(`${out}/${record}`, result);
+  assert.ok(result.problems.length === 0, `STOP: host preflight (§3.1): ${result.problems.join('; ')}`);
+}
+
+async function worker(env: NodeJS.ProcessEnv, {io: workerIo, logicalCpus, os, hostGate}: PreflightDeps & {io: Io}) {
   // Set by a signal (review rounds 6 and 7). The worker's only I/O is the gated set below, so no SQL,
   // docker command, session, statement or pgbench starts once it is set.
   let abortReason: string | null = null;
-  const io = gatedIo(rawIo, () => abortReason);
+  const io = gatedIo(workerIo, () => abortReason);
   const {sql, docker, command, boundedCommand, clientBenchmark, clientSession} = io;
   const {frozen, sha256} = loadManifest();
   // Before anything else: the prerequisites again, and this launch's one-time token (review round 5, item 1).
-  const {stage1Noise, sets, qualification} = workerGate(env, sha256);
+  const {stage1Noise, sets, qualification} = workerGate(env, sha256, logicalCpus, os, hostGate);
   const stage = env.DIAG870_STAGE as Stage;
   const out = env.DIAG870_OUT!;
   const {querySet, transactions, clients, warmupSweeps, rows, restoreRows} = frozen.performance;
   assert.ok(env.DIAG870_RESOURCE_ID && env.FUKULOW_LAUNCH_SESSION, 'Missing supervised Docker resources or launcher session');
   const names = resourceNames(env.DIAG870_RESOURCE_ID);
   const {server, client} = names;
-  const coordinator = allowedCpus(readFileSync('/proc/self/status', 'utf8'));
-  assert.ok(coordinator.every(cpu => sets796.housekeeping.includes(cpu)), 'The #870 worker must run on housekeeping CPUs');
+  refuseLeftovers(docker);
 
   // Prerequisites (§3): snapshot identity and disk, before anything starts.
   const source = await loadBackfill(env.DIAG870_FROM!, sha256, rows, restoreRows);
   assert.equal(source.receipt.snapshot.sha256, expectedSnapshotSha256, 'Not the verified #689 snapshot');
+  writeFileSync(`${out}/${dockerStartMarker}`, '', {flag: 'wx'});
   try { resolveImage(docker, frozen.image, true); } catch (error) {
     if (error instanceof CommandTimeoutError) throw error;
     docker('pull', frozen.image);
@@ -456,7 +467,7 @@ async function worker(env: NodeJS.ProcessEnv) {
 // the launch's arguments and checks every prerequisite again, binds stage and output to them, and claims the
 // one-time token the launching process wrote into the output directory. A second worker, or one started
 // with inherited settings, finds the token claimed or missing and stops before Docker.
-export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logicalCpus = cpus().length, os = platform()) {
+export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logicalCpus = cpus().length, os = platform(), hostGate = readHostGate) {
   assert.ok(env.DIAG870_ARGV && env.DIAG870_TOKEN && env.DIAG870_OUT, 'Not a supervised #870 worker launch');
   const args = options(JSON.parse(env.DIAG870_ARGV) as string[], os);
   const checked = prerequisites(args, manifestHash, env, logicalCpus);
@@ -467,6 +478,7 @@ export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logical
   assert.equal(readFileSync(claimed, 'utf8'), env.DIAG870_TOKEN, 'The worker token does not match');
   assert.equal(JSON.stringify(readIf(`${env.DIAG870_OUT}/approval.json`)), JSON.stringify(checked.approval), 'The recorded go is not this launch\'s');
   assert.deepEqual(readIf(`${env.DIAG870_OUT}/qualification.json`), checked.qualification, 'The qualification changed after the supervisor checked it');
+  checkHost(env.DIAG870_OUT, env, hostGate, 'host-preflight-worker.json');
   return checked;
 }
 
@@ -539,24 +551,25 @@ export function postgresLog(io: Pick<Io, 'spawnSync'>, container: string, out: s
   } catch (error) { return `postgres log not saved: ${String(error)}`; }
 }
 
-async function main() {
-  if (process.env.SEARCH_WORKER === '1') { await worker(process.env); return; }
-  const args = options(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2), env = process.env,
+  {logicalCpus = cpus().length, os = platform(), hostGate = readHostGate, io = rawIo, supervise = superviseStage} = {}) {
+  if (env.SEARCH_WORKER === '1') { await worker(env, {logicalCpus, os, hostGate, io}); return; }
+  const args = options(argv, os);
   const {sha256} = loadManifest();
   // Everything in §3 and the stage's go, before any Docker or database work.
-  const {approval, qualification} = prerequisites(args, sha256);
+  const {approval, qualification} = prerequisites(args, sha256, env, logicalCpus);
   const out = outputPath(args.out);
-  refuseLeftovers(rawDocker);
   mkdirSync(out, {mode: 0o700});
+  checkHost(out, env, hostGate, 'host-preflight.json');
   save(`${out}/approval.json`, approval);
   save(`${out}/qualification.json`, qualification);
   const token = randomUUID();
   const resourceId = randomUUID();
   writeFileSync(`${out}/worker-token`, token, {mode: 0o600, flag: 'wx'});
-  const env = {...process.env, DIAG870_STAGE: args.stage, DIAG870_OUT: out, DIAG870_FROM: args.from,
+  const workerEnv = {...env, DIAG870_STAGE: args.stage, DIAG870_OUT: out, DIAG870_FROM: args.from,
     DIAG870_CPU_SETS: args.cpuSets, DIAG870_RESOURCE_ID: resourceId,
-    DIAG870_ARGV: JSON.stringify(process.argv.slice(2)), DIAG870_TOKEN: token};
-  await superviseStage({entry: import.meta.url, out, manifestHash: sha256, stage: args.stage, names: resourceNames(resourceId), env});
+    DIAG870_ARGV: JSON.stringify(argv), DIAG870_TOKEN: token};
+  await supervise({entry: import.meta.url, out, manifestHash: sha256, stage: args.stage, names: resourceNames(resourceId), env: workerEnv});
   note(`${label}: stage ${args.stage} ${process.exitCode ? 'did not finish normally' : 'finished'} (${out})`);
 }
 

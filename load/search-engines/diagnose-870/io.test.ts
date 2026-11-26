@@ -50,14 +50,14 @@ test('after the abort no gated I/O entry point starts anything (review round 7)'
   assert.deepEqual(f.started, ['sql', 'docker', 'session', 'statement SELECT 2']);
 });
 
-test('the worker reaches I/O only through gatedIo: run.ts imports no raw entry point but docker for the launcher', () => {
+test('the worker reaches workload I/O only through gatedIo', () => {
   const source = readFileSync(new URL('./run.ts', import.meta.url), 'utf8');
   const imports = source.split('\n').filter(l => l.startsWith('import ')).join('\n');
-  for (const name of ['sql', 'command', 'boundedCommand', 'benchmark', 'spawnSync', 'clientBenchmark', 'clientSession'])
+  for (const name of ['sql', 'docker', 'command', 'boundedCommand', 'benchmark', 'spawnSync', 'clientBenchmark', 'clientSession'])
     assert.doesNotMatch(imports, new RegExp(`[{,] ?${name}[ ,}]`), name);
   const worker = source.slice(source.indexOf('async function worker('), source.indexOf('\nexport function workerGate'));
-  assert.match(worker, /const io = gatedIo\(rawIo, \(\) => abortReason\);/);
-  assert.doesNotMatch(worker, /rawDocker|rawIo\./);
+  assert.match(worker, /const io = gatedIo\(workerIo, \(\) => abortReason\);/);
+  assert.doesNotMatch(worker, /rawDocker|rawIo\.|workerIo\./);
   // Its one raw spawn starts the sampler (a node process, stopped on a signal), never docker.
   assert.deepEqual(worker.match(/\bspawn\([^,]*/g), ['spawn(process.execPath']);
 });

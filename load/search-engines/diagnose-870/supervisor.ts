@@ -14,6 +14,7 @@ type Run = {entry: string; out: string; manifestHash: string; stage: Stage; name
 const read = (file: string) => JSON.parse(readFileSync(file, 'utf8'));
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const cleanupDocker = (...argv: string[]) => boundedCommand('docker', argv, timeouts.cleanup);
+export const dockerStartMarker = 'docker-started';
 
 export function publishRun(run: Pick<Run, 'out' | 'manifestHash' | 'stage'>, workerCode: number,
   cleanupVerified: boolean, hostProblems: string[], interrupted: number) {
@@ -38,9 +39,41 @@ export function publishRun(run: Pick<Run, 'out' | 'manifestHash' | 'stage'>, wor
   return exitCode;
 }
 
-export async function superviseStage({entry, out, manifestHash, stage, names, env}: Run) {
+export async function verifyAfterWorker({out, names, env}: Pick<Run, 'out' | 'names' | 'env'>, interrupted: number,
+  docker = cleanupDocker, hostGate = readHostGate) {
+  // A worker that stopped before the marker could not have created a resource.
+  if (!existsSync(`${out}/${dockerStartMarker}`)) return {cleanupVerified: false, hostProblems: []};
   const expected = [{kind: 'container', name: names.server}, {kind: 'container', name: names.client},
     {kind: 'volume', name: names.data}, {kind: 'volume', name: names.socket}] as const;
+  let cleanupVerified = false;
+  let hostProblems: string[] = [];
+  try {
+    const cleanup = () => cleanupResources(docker, [...expected]);
+    const result = cleanup();
+    // An interrupted Docker CLI can leave a create in flight in the daemon.
+    if (interrupted || !existsSync(`${out}/finish.json`)) {
+      const deadline = performance.now() + dockerSettleMs;
+      while (!result.failures.length && performance.now() < deadline) {
+        await pause(Math.min(dockerPollMs, Math.max(0, deadline - performance.now())));
+        const late = cleanup();
+        result.found.push(...late.found);
+        result.failures.push(...late.failures);
+      }
+    }
+    cleanupVerified = result.failures.length === 0;
+    save(`${out}/leftover-cleanup.json`, {...result, verified: cleanupVerified});
+    const hostAfter = hostGate(env.FUKULOW_LAUNCH_SESSION ?? '', out);
+    save(`${out}/host-after-cleanup.json`, hostAfter);
+    hostProblems = hostAfter.problems;
+    for (const problem of [...result.failures, ...hostProblems]) console.error(problem);
+  } catch (error) {
+    hostProblems.push(String(error));
+    console.error(String(error));
+  }
+  return {cleanupVerified, hostProblems};
+}
+
+export async function superviseStage({entry, out, manifestHash, stage, names, env}: Run) {
   let interrupted = 0;
   let workerClosed = false;
   let terminal = false;
@@ -64,29 +97,7 @@ export async function superviseStage({entry, out, manifestHash, stage, names, en
     worker.on('close', code => resolve(code ?? 1));
   });
   workerClosed = true;
-  try {
-    const cleanup = () => cleanupResources(cleanupDocker, [...expected]);
-    const result = cleanup();
-    // An interrupted Docker CLI can leave a create in flight in the daemon.
-    if (interrupted || !existsSync(`${out}/finish.json`)) {
-      const deadline = performance.now() + dockerSettleMs;
-      while (!result.failures.length && performance.now() < deadline) {
-        await pause(Math.min(dockerPollMs, Math.max(0, deadline - performance.now())));
-        const late = cleanup();
-        result.found.push(...late.found);
-        result.failures.push(...late.failures);
-      }
-    }
-    cleanupVerified = result.failures.length === 0;
-    save(`${out}/leftover-cleanup.json`, {...result, verified: cleanupVerified});
-    const hostAfter = readHostGate(env.FUKULOW_LAUNCH_SESSION ?? '', out);
-    save(`${out}/host-after-cleanup.json`, hostAfter);
-    hostProblems = hostAfter.problems;
-    for (const problem of [...result.failures, ...hostProblems]) console.error(problem);
-  } catch (error) {
-    hostProblems.push(String(error));
-    console.error(String(error));
-  }
+  ({cleanupVerified, hostProblems} = await verifyAfterWorker({out, names, env}, interrupted));
   // Drain signals queued during the synchronous cleanup and host reads before publishing a finish.
   await pause(0);
   publish();

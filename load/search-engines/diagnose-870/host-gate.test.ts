@@ -3,7 +3,7 @@ import test from 'node:test';
 import { cpus796, measurementSlice, sets796 } from '../../harness-core/frequency-layout.ts';
 import type { HostRecord } from '../../harness-core/host-record.ts';
 import { hostAffinity, policy, session } from '../../sql-probes/519-unread-counts/frequency-fixture.ts';
-import { readHostGate } from './host-gate.ts';
+import { launcherDockerReadback, readHostGate } from './host-gate.ts';
 
 const record = {logicalCpus: cpus796.length, boost: '0', policyBoost: {'0': cpus796},
   platformProfile: 'performance', maxFrequencyKHz: {'4000000': cpus796}} as unknown as HostRecord;
@@ -23,6 +23,17 @@ test('the #870 host gate records live #796 isolation and uses the effective cap'
   assert.equal(result.affinity?.docker, 'systemd 2');
   assert.deepEqual(result.coordinator, sets796.housekeeping);
   assert.ok(result.policy?.policies.every(p => p.max === '2000000'));
+});
+
+test('preflight reuses Docker cgroups only from a passed launcher gate for the same session, boot and daemon', () => {
+  const gate = {...readHostGate(session, '/fake', fake()), dockerService: '123:456'};
+  const read = (record: Parameters<typeof launcherDockerReadback>[0]) =>
+    launcherDockerReadback(record, session, policy.bootId, gate.dockerService);
+  assert.equal(read(gate), 'systemd 2');
+  for (const record of [null, {...gate, session: 'old'}, {...gate, dockerService: '123:457'},
+    {...gate, affinity: {...hostAffinity(), bootId: 'old'}}, {...gate, problems: ['host drift']}]) {
+    assert.throws(() => read(record), /No passed launcher host gate/);
+  }
 });
 
 test('the #870 host gate refuses inactive service, wrong Docker cgroups, and stale or missing affinity', () => {

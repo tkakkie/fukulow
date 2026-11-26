@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { publishRun } from './supervisor.ts';
+import { resourceNames } from './placement.ts';
+import { dockerStartMarker, publishRun, verifyAfterWorker } from './supervisor.ts';
 
 test('the supervisor publishes completion only when the worker, cleanup and host readbacks passed', t => {
   const out = mkdtempSync(join(tmpdir(), 'diag870-supervisor-'));
@@ -27,4 +28,20 @@ test('the supervisor publishes completion only when the worker, cleanup and host
     assert.equal(existsSync(finished), false);
     assert.deepEqual(status(), {manifestHash: 'v17', valid: false, cleanupVerified, exitCode, problems});
   }
+});
+
+test('the supervisor skips Docker and host readbacks when the worker stops before starting Docker work', async t => {
+  const out = mkdtempSync(join(tmpdir(), 'diag870-supervisor-'));
+  t.after(() => rmSync(out, {recursive: true}));
+  const calls: string[] = [];
+  const docker = (...args: string[]) => { calls.push(args.slice(0, 2).join(' ')); return ''; };
+  const hostGate = () => { calls.push('host gate'); return {problems: []}; };
+  const run = {out, names: resourceNames('test'), env: {FUKULOW_LAUNCH_SESSION: 'test'}};
+  assert.deepEqual(await verifyAfterWorker(run, 0, docker, hostGate), {cleanupVerified: false, hostProblems: []});
+  assert.deepEqual(calls, []);
+
+  writeFileSync(join(out, dockerStartMarker), '');
+  writeFileSync(join(out, 'finish.json'), '{}');
+  assert.deepEqual(await verifyAfterWorker(run, 0, docker, hostGate), {cleanupVerified: true, hostProblems: []});
+  assert.deepEqual(calls, ['container ls', 'volume ls', 'container ls', 'volume ls', 'host gate']);
 });

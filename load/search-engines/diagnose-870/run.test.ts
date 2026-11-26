@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { measuredSetsArg, sets796 } from '../../harness-core/frequency-layout.ts';
+import { rawIo, type Io } from './io.ts';
 import { qualifiedCpuSets } from './qualification.ts';
 import { stage1, type Measurement } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
-import { finishRecords, limitedExitCode, options, parseCount, prerequisites, readCounterWaitMs, readsDelta, signalStop, stopExitCode, workerGate } from './run.ts';
+import { approvalFor, finishRecords, limitedExitCode, main, options, parseCount, prerequisites, readCounterWaitMs, readsDelta, signalStop, stopExitCode, workerGate } from './run.ts';
 
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
@@ -204,6 +205,67 @@ test('every stage needs its own approval record, for this stage and this job, no
   assert.throws(() => run(approval(h.dir, '1'), '1', h.env, ['--smoke-out', smokeOut]), /no recorded go for the smoke/);
 });
 
+test('approvalFor rejects pending placeholders in quote, job and at', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'diag870-go-'));
+  t.after(() => rmSync(dir, {recursive: true}));
+  for (const field of ['quote', 'job', 'at']) {
+    for (const value of ['PENDING', 'pending', '  PeNdInG \t']) {
+      const file = approval(dir, 'smoke', {[field]: value});
+      assert.throws(() => approvalFor(file, 'smoke', field === 'job' ? value : 'smoke-870', null),
+        /go is still a pending placeholder/, `${field}=${JSON.stringify(value)}`);
+    }
+  }
+  assert.equal(approvalFor(approval(dir, 'smoke'), 'smoke', 'smoke-870', null).quote, 'go');
+});
+
+function preflightFixture(t: TestContext) {
+  const h = host();
+  t.after(() => rmSync(h.dir, {recursive: true}));
+  const args = argv(h, 'smoke');
+  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870', FUKULOW_LAUNCH_SESSION: 'session-870',
+    FUKULOW_LAUNCH_GATE_LOG: join(h.dir, 'smoke-870-gate.log')};
+  const calls: string[] = [];
+  const io = Object.fromEntries(Object.keys(rawIo).map(name => [name, () => {
+    calls.push(name);
+    assert.fail(`Unexpected ${name} call`);
+  }])) as unknown as Io;
+  const out = join(realpathSync(h.dir), 'out');
+  return {args, env, out, calls, deps: {io, os: 'linux' as const, logicalCpus: 16}};
+}
+
+test('a driver host preflight failure stops before supervision and Docker', async t => {
+  const f = preflightFixture(t);
+  const problems = ['CPU policy unreadable'];
+  let gates = 0;
+  await assert.rejects(main(f.args, f.env, {...f.deps, hostGate: (session, path, source) => {
+    gates++;
+    assert.equal(session, f.env.FUKULOW_LAUNCH_SESSION);
+    assert.equal(path, f.out);
+    assert.deepEqual(source, {launcherGateLog: f.env.FUKULOW_LAUNCH_GATE_LOG});
+    return {problems};
+  }, supervise: async () => assert.fail('supervisor started')}), /STOP: host preflight.*CPU policy unreadable/);
+  assert.equal(gates, 1);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.out, 'host-preflight.json'), 'utf8')), {problems});
+});
+
+test('the worker rechecks the host after driver preflight and stops before Docker on drift', async t => {
+  const f = preflightFixture(t);
+  const problems = ['host service inactive'];
+  let gates = 0;
+  const deps = {...f.deps, hostGate: (session: string, path: string) => {
+    assert.equal(session, f.env.FUKULOW_LAUNCH_SESSION);
+    assert.equal(path, f.out);
+    return {problems: ++gates === 1 ? [] : problems};
+  }};
+  await assert.rejects(main(f.args, f.env, {...deps, supervise: ({env}) => main([], {...env, SEARCH_WORKER: '1'}, deps)}),
+    /STOP: host preflight.*host service inactive/);
+  assert.equal(gates, 2);
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.out, 'host-preflight.json'), 'utf8')), {problems: []});
+  assert.deepEqual(JSON.parse(readFileSync(join(f.out, 'host-preflight-worker.json'), 'utf8')), {problems});
+});
+
 test('anything but a normal or limited finish writes stopped.json, no completed.json, and exits 2; a normal finish exits 0', () => {
   assert.equal(stopExitCode, 2);
   const read = (dir: string, file: string) => JSON.parse(readFileSync(join(dir, file), 'utf8'));
@@ -233,7 +295,7 @@ test('the worker checks the prerequisites itself and claims a one-time token; SE
   writeFileSync(join(out, 'worker-token'), 'tok');
   const env = {...smokeEnv, SEARCH_WORKER: '1', DIAG870_ARGV: JSON.stringify(args), DIAG870_TOKEN: 'tok', DIAG870_OUT: out,
     DIAG870_STAGE: 'smoke', DIAG870_FROM: parsed.from, DIAG870_CPU_SETS: sets};
-  const gate = (e: Record<string, string>) => workerGate(e, hash, 16, 'linux');
+  const gate = (e: Record<string, string>) => workerGate(e, hash, 16, 'linux', () => ({problems: []}));
   const {qualification} = prerequisites(parsed, hash, smokeEnv, 16);
   json(join(out, 'qualification.json'), qualification);
   // Inherited worker settings without a launch: refused.
