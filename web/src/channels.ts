@@ -1,12 +1,23 @@
 import { completeCountFields } from './unread-counts'
 import { sessionEndedMessage } from './auth'
-import { createActivityTarget, type Activity } from './activity'
+import { createActivityTarget, type Activity, type ReadReason } from './activity'
 import { isOrganizationUnavailable, type Channel, type ChannelList, type ChannelVisibility, type CreateChannelRequest, type Result, type UpdateChannelRequest } from './api'
 
 export type { Channel, ChannelVisibility }
 
+export const CHANNEL_READ_MARK = 'fukulow:read:channels'
+let nextChannelReadSeq = 0
+
+export function markChannelsRead(reasons: readonly ReadReason[]): string {
+  const id = `ch-${++nextChannelReadSeq}`
+  if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+    performance.mark(CHANNEL_READ_MARK, { detail: { id, reasons: [...new Set(reasons)] } })
+  }
+  return id
+}
+
 export type ChannelsApi = {
-  listChannels: (signal?: AbortSignal) => Promise<Result<{ channels: Channel[] }>>
+  listChannels: (signal?: AbortSignal, readId?: string) => Promise<Result<{ channels: Channel[] }>>
   createChannel: (body: CreateChannelRequest) => Promise<Result<Channel>>
   listArchivedChannels?: (signal: AbortSignal) => Promise<Result<ChannelList>>
   getChannel?: (id: string, signal: AbortSignal) => Promise<Result<Channel>>
@@ -56,6 +67,7 @@ type ChannelDetails = {
   onArchivedSnapshot(rows: ChannelList['channels']): void
   connectionEpoch?(): number | null
   coversUnread?(rows: Channel[]): boolean
+  hasInitialChannels?(): boolean
 }
 
 const terminal = (r: Result<unknown>) => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r))
@@ -174,7 +186,10 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
 
   const target = activity ? createActivityTarget<{ channels: Channel[] }>({
     canLoad: () => !awaitingReady,
-    load: async signal => validList(await api.listChannels(signal)),
+    load: async (signal, reasons) => {
+      const readId = details?.hasInitialChannels?.() ? undefined : markChannelsRead(reasons)
+      return validList(await api.listChannels(signal, readId))
+    },
     connectionEpoch: details?.connectionEpoch,
     covers: data => details?.coversUnread?.(data.channels) ?? true,
     acceptBelowFloor: true,

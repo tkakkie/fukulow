@@ -10,6 +10,13 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { connect as tlsConnect, type DetailedPeerCertificate } from 'node:tls'
 import { fileURLToPath } from 'node:url'
 import { chromium, request as pwRequest } from '@playwright/test'
+import {
+  classifyChannelReads,
+  summarizeCellChannelReads,
+  type CapturedReadMark,
+  type CellChannelReadSummary,
+  type ChannelReadSummary,
+} from './read-reasons.ts'
 
 const external = process.env.FIRST_PAINT_EXTERNAL === '1'
 const targetDomain = process.env.FIRST_PAINT_DOMAIN ?? 'localhost'
@@ -42,6 +49,8 @@ export type ApiTiming = {
   seq: number
   method: string
   path: string
+  search?: string
+  readId?: string | null
   label: string
   start: number
   headersEnd: number
@@ -77,6 +86,7 @@ export type RunMetrics = {
   directoryStartMs: number | null
   authorLookupStartMs: number | null
   apiCalls: ApiTiming[]
+  channelReads: ChannelReadSummary
   timingChain: string[]
 }
 
@@ -115,6 +125,7 @@ export type CellSummary = {
       completedBeforeTimelineCount: number
     }
   >
+  channelReads: CellChannelReadSummary
   timingChain: string[]
 }
 
@@ -226,6 +237,8 @@ export function installFirstPaintProbe({
     seq: number
     method: string
     path: string
+    search: string
+    readId: string | null
     label: string
     start: number
     headersEnd: number
@@ -321,8 +334,17 @@ export function installFirstPaintProbe({
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+    const parsedUrl = new URL(rawUrl, window.location.origin)
     const path = normalizePath(rawUrl)
     if (!path.startsWith('/api/')) return origFetch(input, init)
+
+    let readId: string | null = null
+    try {
+      const headers = init?.headers ?? (input instanceof Request ? input.headers : undefined)
+      if (headers !== undefined) readId = new Headers(headers).get('x-fukulow-read-id')
+    } catch {
+      readId = null
+    }
 
     const start = performance.now()
     let latestPrior: RawApiCall | null = null
@@ -343,6 +365,8 @@ export function installFirstPaintProbe({
       seq: state.apiCalls.length + 1,
       method,
       path,
+      search: parsedUrl.search,
+      readId,
       label,
       start,
       headersEnd: start,
@@ -424,11 +448,17 @@ export async function extractRunMetricsInPage(args: {
   expectedOrg: string
   expectedChannel: string
   settleTimeoutMs: number
-}): Promise<Omit<RunMetrics, 'directoryStartMs' | 'authorLookupStartMs'>> {
+}): Promise<
+  Omit<RunMetrics, 'directoryStartMs' | 'authorLookupStartMs' | 'channelReads'> & {
+    channelReadMarks: CapturedReadMark[] | null
+  }
+> {
   type RawApiCall = {
     seq: number
     method: string
     path: string
+    search?: string
+    readId?: string | null
     label: string
     start: number
     headersEnd: number
@@ -503,6 +533,8 @@ export async function extractRunMetricsInPage(args: {
       seq: c.seq,
       method: c.method,
       path: c.path,
+      search: c.search ?? '',
+      readId: c.readId ?? null,
       label: c.label,
       start: Number(c.start.toFixed(2)),
       headersEnd: Number(c.headersEnd.toFixed(2)),
@@ -515,6 +547,21 @@ export async function extractRunMetricsInPage(args: {
       completedBeforeTimeline: c.end !== null && c.end <= s.timelineVisibleMs,
     }
   })
+
+  let channelReadMarks: CapturedReadMark[] | null = null
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.getEntriesByName === 'function') {
+      channelReadMarks = performance.getEntriesByName('fukulow:read:channels', 'mark').map((entry) => {
+        const detail = (entry as PerformanceMark).detail as { id?: unknown; reasons?: unknown } | null | undefined
+        return {
+          id: detail?.id ?? null,
+          reasons: detail?.reasons ?? null,
+        }
+      })
+    }
+  } catch {
+    channelReadMarks = null
+  }
 
   // Time order only: each link is the latest API request that ended before the next one started.
   // It does not prove that a request waited for that response; actual dependencies come from the source.
@@ -548,6 +595,7 @@ export async function extractRunMetricsInPage(args: {
     timelinePaintedMs: Number(s.timelinePaintedMs.toFixed(2)),
     firstNamedRowMs: s.firstNamedRowMs !== null ? Number(s.firstNamedRowMs.toFixed(2)) : null,
     apiCalls,
+    channelReadMarks,
     timingChain: chain,
   }
 }
@@ -566,17 +614,19 @@ export async function collectRunMetrics(
     primaryTimeoutMs: options.primaryTimeoutMs,
     diagnosticTimeoutMs: options.diagnosticTimeoutMs,
   })
-  const rawMetrics = await page.evaluate(extractRunMetricsInPage, {
+  const { channelReadMarks, ...rawMetrics } = await page.evaluate(extractRunMetricsInPage, {
     run: options.runNumber,
     expectedOrg: options.expectedOrg ?? orgId,
     expectedChannel: options.expectedChannel ?? hotChannelId,
     settleTimeoutMs: remainingDiagnosticMs,
   })
   const { directoryStartMs, authorLookupStartMs } = findDiagnosticStarts(rawMetrics.apiCalls)
+  const channelReads = classifyChannelReads(rawMetrics.apiCalls, channelReadMarks)
   return {
     ...rawMetrics,
     directoryStartMs,
     authorLookupStartMs,
+    channelReads,
   }
 }
 
@@ -730,6 +780,7 @@ export function summarizeCell(
     assetsTransferBytes: summarizeNumbers(runs.map((r) => r.assetsTransferBytes)),
     htmlTransferBytes: summarizeNumbers(runs.map((r) => r.htmlTransferBytes)),
     apiByLabel,
+    channelReads: summarizeCellChannelReads(runs),
     timingChain: runs[0]?.timingChain ?? [],
   }
 }
