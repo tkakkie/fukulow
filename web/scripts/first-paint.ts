@@ -632,32 +632,6 @@ export async function collectRunMetrics(
   }
 }
 
-export async function measureRunWithInvalidityRerun(
-  measureOnce: () => Promise<RunMetrics>,
-  maxReruns = 1,
-): Promise<RunMetrics> {
-  let result = await measureOnce()
-  if (result.channelReads.valid) {
-    return {
-      ...result,
-      channelReads: { ...result.channelReads, status: 'valid', rerunAttempted: false },
-    }
-  }
-  for (let attempt = 1; attempt <= maxReruns; attempt++) {
-    result = await measureOnce()
-    if (result.channelReads.valid) {
-      return {
-        ...result,
-        channelReads: { ...result.channelReads, status: 'valid', rerunAttempted: true },
-      }
-    }
-  }
-  return {
-    ...result,
-    channelReads: { ...result.channelReads, status: 'inconclusive', rerunAttempted: maxReruns > 0 },
-  }
-}
-
 // Nearest rank: with 10 runs, p95 is the 10th value, i.e. the maximum of the cell.
 function nearestRank(values: number[], percentile: number): number {
   const sorted = [...values].sort((a, b) => a - b)
@@ -988,9 +962,9 @@ async function main(): Promise<void> {
                 storageState,
               })
               try {
-                const cold = await measureRunWithInvalidityRerun(() => measurePageLoad(context, baseUrl, p.path, 'cold', net, i))
+                const cold = await measurePageLoad(context, baseUrl, p.path, 'cold', net, i)
                 coldRuns.push(cold)
-                const warm = await measureRunWithInvalidityRerun(() => measurePageLoad(context, baseUrl, p.path, 'warm', net, i))
+                const warm = await measurePageLoad(context, baseUrl, p.path, 'warm', net, i)
                 warmRuns.push(warm)
               } finally {
                 await context.close()
@@ -1055,8 +1029,8 @@ async function main(): Promise<void> {
 
         const resultsPath = join(outDir, 'results.json')
         writeFileSync(resultsPath, JSON.stringify(report, null, 2))
-        if (channelReads.status === 'inconclusive') {
-          console.warn(`Target 1 channelReads status: inconclusive (${channelReads.invalidCells.length} invalid cell(s))`)
+        if (channelReads.status === 'invalid') {
+          console.warn(`Target 1 channelReads status: invalid (${channelReads.invalidCells.length} invalid cell(s))`)
         }
         console.log(`Saved full measurement results to ${resultsPath}`)
       } finally {

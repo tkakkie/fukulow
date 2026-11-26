@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { MiniDocument, MiniElement } from '../src/svelte-dom-test-helpers.ts'
+import * as firstPaintModule from './first-paint.ts'
 import {
   AUTHOR_LOOKUP_API_PATH,
   DIRECTORY_API_PATH,
@@ -10,13 +11,13 @@ import {
   extractRunMetricsInPage,
   findDiagnosticStarts,
   installFirstPaintProbe,
-  measureRunWithInvalidityRerun,
   resolveArmSourceSha,
   summarizeCell,
   waitForPageMilestones,
   type MilestoneProbe,
   type RunMetrics,
 } from './first-paint.ts'
+import { summarizeReportChannelReads } from './read-reasons.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 
@@ -302,6 +303,7 @@ describe('first-paint measurement diagnostics (#954 R1)', () => {
       apiCalls: [],
       channelReads: {
         valid: true,
+        status: 'valid',
         invalidReasons: [],
         reads: [],
         countsByClass: { 'O5-only': 0, startup: 0, composite: 0, empty: 0, unknown: 0 },
@@ -491,14 +493,21 @@ describe('first-paint measurement diagnostics (#954 R1)', () => {
     }
   })
 
-  it('re-runs invalid measurements and records persistent invalidity explicitly as inconclusive', async () => {
-    const makeRun = (valid: boolean): RunMetrics => ({
-      run: 1,
+  it('keeps invalid run timings in the cell summary unchanged, marks cell and report invalid, and reports a 3-counted-read invalid run', () => {
+    const makeRun = (
+      run: number,
+      overrides: {
+        fcpMs: number
+        timelineVisibleMs: number
+        channelReads: RunMetrics['channelReads']
+      },
+    ): RunMetrics => ({
+      run,
       ttfbMs: 10,
       htmlEndMs: 20,
       htmlTransferBytes: 1000,
-      fcpMs: 140,
-      blankScreenMs: 140,
+      fcpMs: overrides.fcpMs,
+      blankScreenMs: overrides.fcpMs,
       jsEndMs: 100,
       cssEndMs: 80,
       wasmEndMs: 110,
@@ -509,57 +518,146 @@ describe('first-paint measurement diagnostics (#954 R1)', () => {
       wsOpenMs: 180,
       wsSubscribeSentMs: 185,
       wsSubscribedMs: 210,
-      timelineVisibleMs: 310,
-      timelinePaintedMs: 325,
-      firstNamedRowMs: 315,
+      timelineVisibleMs: overrides.timelineVisibleMs,
+      timelinePaintedMs: overrides.timelineVisibleMs + 15,
+      firstNamedRowMs: overrides.timelineVisibleMs + 20,
       directoryStartMs: 330,
       authorLookupStartMs: 190,
       apiCalls: [],
-      channelReads: valid
-        ? {
-            valid: true,
-            invalidReasons: [],
-            reads: [{ seq: 1, readId: 'ch-1', reasons: ['initial'], classification: 'startup', counted: true }],
-            countsByClass: { 'O5-only': 0, startup: 1, composite: 0, empty: 0, unknown: 0 },
-            countedReads: 1,
-          }
-        : {
-            valid: false,
-            invalidReasons: ['unmatched_request'],
-            reads: [{ seq: 1, readId: 'ch-1', reasons: null, classification: 'unknown', counted: true }],
-            countsByClass: { 'O5-only': 0, startup: 0, composite: 0, empty: 0, unknown: 1 },
-            countedReads: 1,
-          },
+      channelReads: overrides.channelReads,
       timingChain: [],
     })
 
-    // Persistent invalidity after re-run -> inconclusive.
-    let persistentCalls = 0
-    const persistent = await measureRunWithInvalidityRerun(async () => {
-      persistentCalls++
-      return makeRun(false)
+    const validRun = makeRun(1, {
+      fcpMs: 120,
+      timelineVisibleMs: 280,
+      channelReads: {
+        valid: true,
+        status: 'valid',
+        invalidReasons: [],
+        reads: [
+          { seq: 1, readId: 'ch-1', reasons: ['initial'], classification: 'startup', counted: true },
+          { seq: 2, readId: 'ch-2', reasons: ['reconcile'], classification: 'startup', counted: true },
+        ],
+        countsByClass: { 'O5-only': 0, startup: 2, composite: 0, empty: 0, unknown: 0 },
+        countedReads: 2,
+      },
     })
-    expect(persistentCalls).toBe(2)
-    expect(persistent.channelReads.valid).toBe(false)
-    expect(persistent.channelReads.status).toBe('inconclusive')
-    expect(persistent.channelReads.rerunAttempted).toBe(true)
+    const invalidRun = makeRun(2, {
+      fcpMs: 420,
+      timelineVisibleMs: 950,
+      channelReads: {
+        valid: false,
+        status: 'invalid',
+        invalidReasons: ['unmatched_request'],
+        reads: [
+          { seq: 1, readId: 'ch-3', reasons: ['initial'], classification: 'startup', counted: true },
+          { seq: 2, readId: 'ch-4', reasons: ['reconcile'], classification: 'startup', counted: true },
+          { seq: 3, readId: 'ch-5', reasons: null, classification: 'unknown', counted: true },
+        ],
+        countsByClass: { 'O5-only': 0, startup: 2, composite: 0, empty: 0, unknown: 1 },
+        countedReads: 3,
+      },
+    })
 
-    const cell = summarizeCell('/', '/', 'throttled', 'cold', [persistent])
-    expect(cell.channelReads.valid).toBe(false)
-    expect(cell.channelReads.status).toBe('inconclusive')
-    expect(cell.channelReads.invalidRunReasons).toEqual([
-      { run: 1, reasons: ['unmatched_request'], persistedAfterRerun: true },
+    const validCell = summarizeCell('/', '/', 'unthrottled', 'cold', [validRun])
+    const invalidCell = summarizeCell('/', '/', 'throttled', 'cold', [validRun, invalidRun])
+
+    // (i) Invalid run's timings enter the cell summary unchanged.
+    expect(invalidCell.runs).toBe(2)
+    expect(invalidCell.fcpMs).toEqual({ p50: 120, p90: 420, p95: 420, max: 420 })
+    expect(invalidCell.timelineVisibleMs).toEqual({ p50: 280, p90: 950, p95: 950, max: 950 })
+
+    // (ii) Invalid run makes the cell and report invalid (never valid or inconclusive).
+    expect(invalidCell.channelReads.valid).toBe(false)
+    expect(invalidCell.channelReads.status).toBe('invalid')
+    expect(invalidCell.channelReads.validRuns).toBe(1)
+    expect(invalidCell.channelReads.invalidRuns).toBe(1)
+
+    // (iii) The 3-counted-read invalid run remains visible in cell and report summaries.
+    expect(invalidCell.channelReads.maxCountedReadsPerRun).toBe(3)
+    expect(invalidCell.channelReads.countsByClass).toEqual({
+      'O5-only': 0,
+      startup: 4,
+      composite: 0,
+      empty: 0,
+      unknown: 1,
+    })
+    expect(invalidCell.channelReads.invalidRunReasons).toEqual([
+      { run: 2, reasons: ['unmatched_request'], countedReads: 3 },
     ])
 
-    // Transient invalidity that passes on re-run -> valid.
-    let transientCalls = 0
-    const recovered = await measureRunWithInvalidityRerun(async () => {
-      transientCalls++
-      return makeRun(transientCalls > 1)
-    })
-    expect(transientCalls).toBe(2)
-    expect(recovered.channelReads.valid).toBe(true)
-    expect(recovered.channelReads.status).toBe('valid')
-    expect(recovered.channelReads.rerunAttempted).toBe(true)
+    const reportReads = summarizeReportChannelReads([
+      { cell: '/|unthrottled|cold', channelReads: validCell.channelReads },
+      { cell: '/|throttled|cold', channelReads: invalidCell.channelReads },
+    ])
+    expect(reportReads.valid).toBe(false)
+    expect(reportReads.status).toBe('invalid')
+    expect(reportReads.validCells).toBe(1)
+    expect(reportReads.invalidCells).toEqual([
+      {
+        cell: '/|throttled|cold',
+        invalidRuns: 1,
+        invalidRunReasons: [{ run: 2, reasons: ['unmatched_request'], countedReads: 3 }],
+      },
+    ])
+  })
+
+  it('measures each run once without re-measuring on invalid channel reads', async () => {
+    // (iv) No rerun helper or inconclusive/rerunAttempted state exists in first-paint.ts.
+    expect('measureRunWithInvalidityRerun' in firstPaintModule).toBe(false)
+    const source = readFileSync(resolve(root, 'web/scripts/first-paint.ts'), 'utf8')
+    expect(source).not.toContain('measureRunWithInvalidityRerun')
+    expect(source).not.toContain('rerunAttempted')
+    expect(source).not.toContain('inconclusive')
+
+    // Behavioral check: collectRunMetrics evaluates the page exactly once even when reads are invalid.
+    performance.clearMarks('fukulow:read:channels')
+    try {
+      await withProbeGlobals(({ win }) => (async () => {
+        installFirstPaintProbe({ expectedOrg: 'org-1', expectedChannel: 'ch-1' })
+        const fetchFn = win.fetch as typeof fetch
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-1', reasons: ['initial'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-1' } })
+        performance.mark('fukulow:read:channels', { detail: { id: 'ch-2', reasons: ['reconcile'] } })
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-2' } })
+        // Third request has no matching mark -> invalid run with 3 counted reads.
+        await fetchFn('/api/v1/orgs/org-1/channels', { headers: { 'x-fukulow-read-id': 'ch-unpaired' } })
+
+        const probe = win.__fp345 as Record<string, unknown>
+        Object.assign(probe, {
+          appMountMs: 100,
+          fcpMs: 90,
+          timelineVisibleMs: 200,
+          timelinePaintedMs: 210,
+          firstNamedRowMs: 220,
+          wsConnectStartMs: 110,
+          wsOpenMs: 120,
+          wsSubscribeSentMs: 125,
+          wsSubscribedMs: 140,
+        })
+        const evaluate = vi.fn(async (fn: typeof extractRunMetricsInPage, arg: Parameters<typeof extractRunMetricsInPage>[0]) => {
+          return await fn(arg)
+        })
+        const page = {
+          waitForFunction: vi.fn(async () => undefined as never),
+          evaluate,
+        }
+        const metrics = await collectRunMetrics(page as never, {
+          runNumber: 1,
+          expectedOrg: 'org-1',
+          expectedChannel: 'ch-1',
+          diagnosticTimeoutMs: 50,
+        })
+        expect(evaluate).toHaveBeenCalledTimes(1)
+        expect(metrics.timelineVisibleMs).toBe(200)
+        expect(metrics.channelReads.valid).toBe(false)
+        expect(metrics.channelReads.status).toBe('invalid')
+        expect(metrics.channelReads.invalidReasons).toEqual(['unmatched_request'])
+        expect(metrics.channelReads.countedReads).toBe(3)
+      })())
+    } finally {
+      performance.clearMarks('fukulow:read:channels')
+    }
   })
 })
