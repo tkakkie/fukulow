@@ -19,7 +19,8 @@ import { verifyPins, verifySmoke, type Pin, type Pins } from './c3-pins.ts';
 import { countChecks, disableMaintenance, fixtureChecks, fixtureReasons, maintenanceReasons, maintenanceSQL,
   settleFixture, shapeSQL, workersSQL, type Maintenance, type Workers } from './c3-fixture.ts';
 import { connectionEvidence, logSettings, parseTraffic } from './c3-logs.ts';
-import { settleCatalogs, settleRecorder, type CatalogSettle } from './c3-catalog-settle.ts';
+import { settleCatalogs, type CatalogSettle } from './c3-catalog-settle.ts';
+import { settleRecorder } from './c3-catalog-evidence.ts';
 import { c3ExitCode, summarizeC3, type WindowResult } from './c3-summary.ts';
 import { evictionReason, statementEvidence, statementSQL } from './c3-statements.ts';
 import { cpuWindow, DrainPending, latency, loadBoundaries, storageCoverage, storageReason, trafficReasons } from './c3-timing.ts';
@@ -60,11 +61,8 @@ const reason = (error: unknown) => (error instanceof SyntaxError ? 'malformed di
   .replaceAll(password, '[redacted]').replaceAll(setupToken, '[redacted]');
 let pins: Pins, recordedPins: Pins | undefined, dbStarted = false, networkStarted = false;
 const manifest: Record<string, unknown> = {}, catalogSettles: CatalogSettle[] = [];
-const settle = (stage: string, windowFile?: string) => settleCatalogs(stage, sql, { capMs: Math.min(60000, active()), signal,
-  report: settleRecorder(catalogSettles, (settles, latest) => {
-    dump(resolve(output, 'manifest.json'), { ...manifest, catalogSettles: settles });
-    if (windowFile) dump(windowFile, latest);
-  }) });
+const settle = (stage: string, windowDir?: string) => settleCatalogs(stage, sql, { capMs: Math.min(60000, active()), signal,
+  report: settleRecorder(output, manifest, catalogSettles, windowDir) });
 
 const stop = runtimeEnv.remove;
 
@@ -169,7 +167,7 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
         clone = name;
       },
       disableMaintenance: name => { sql(name, disableMaintenance, 'disable automatic maintenance on clone'); },
-      settle: () => settle(window.id, resolve(dir, 'catalog-settle.json')),
+      settle: () => settle(window.id, dir),
       async restart(arm, name) { appUp = true; await appStart(app, name, pins[arm]); },
     });
     const cpuTask = observe(observer, cpuPath, app);
