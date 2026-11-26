@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::activity::{NoticeFrame, Registration};
 use futures_util::future::join_all;
 use sqlx::{Postgres, Transaction};
 
