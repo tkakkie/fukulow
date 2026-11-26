@@ -30,7 +30,8 @@ const fake = async (url: string) => {
 
 test('report lists newer versions, near and past support ends, failures and notes', async () => {
   const today = '2026-11-17'
-  const body = report(entries, await gather(entries, fake, today), today)
+  const { body, actionable } = report(entries, await gather(entries, fake, today), today)
+  assert.equal(actionable, true)
   assert.ok(body.startsWith(marker))
   const section = (title: string) => body.split(`## ${title}\n`)[1].split('\n\n')[0]
   assert.equal(section('Newer versions available'), '- Node.js: 26.13.1 -> 26.14.0 (`f`, toolchain)\n- k6: 1.8.2 -> 2.0.0 (`f`, patch-minor, new major: one Issue, maintainer decides)')
@@ -47,7 +48,7 @@ test('upstream HTTP errors are reported, never skipped', async () => {
   const facts = await gather(entries, failing, '2026-11-17')
   assert.deepEqual(facts.get('k6')?.failures, ['Error: GitHub grafana/k6: HTTP 503'])
   assert.deepEqual(facts.get('Node.js')?.failures, ['Error: endoflife.date nodejs: HTTP 503', 'Error: endoflife.date nodejs: HTTP 503'])
-  const body = report(entries, facts, '2026-11-17')
+  const { body } = report(entries, facts, '2026-11-17')
   assert.match(body, /- Debian: Error: endoflife.date debian: HTTP 503/)
 })
 
@@ -83,4 +84,49 @@ test('latest line is chosen by version, whatever the API order', () => {
   }
   assert.equal(newestLine(lines, true, '2027-10-26')?.latest?.name, '28.0.0', 'LTS start day counts')
   assert.equal(newestLine(lines, true, '2023-01-01'), undefined)
+})
+
+test('current versions with no support deadlines produce an all-clear report', async () => {
+  const entry = entries[0]
+  const today = '2026-11-17'
+  const current = { ...entry, version: '26.14.0' }
+  const { body, ...findings } = report([current], await gather([current], fake, today), today)
+  assert.deepEqual(findings, { newer: [], soon: [], past: [], failures: [], notes: [], actionable: false })
+  assert.equal(body.match(/^- none$/gm)?.length, 5)
+})
+
+test('each finding category alone makes a report actionable', () => {
+  const today = '2026-11-17'
+  const entry = entries[4]
+  const cases = [
+    { category: 'newer', fact: { latest: '2.0.0' }, row: {
+      component: 'k6', pinned: '1.8.2', latest: '2.0.0', file: 'f', class: 'patch-minor', newMajor: true,
+    } },
+    { category: 'soon', fact: { support: '2027-05-17' }, row: {
+      component: 'k6', version: '1.8.2', end: '2027-05-17', source: 'endoflife.date',
+    } },
+    { category: 'past', fact: { support: '2026-11-16' }, row: {
+      component: 'k6', version: '1.8.2', end: '2026-11-16', source: 'endoflife.date',
+    } },
+    { category: 'notes', fact: { notes: ['release cycle needs a check'] }, row: {
+      component: 'k6', message: 'release cycle needs a check',
+    } },
+  ] as const
+  for (const { category, fact, row } of cases) {
+    const facts = { failures: [], ...fact, notes: 'notes' in fact ? [...fact.notes] : [] }
+    const findings = report([entry], new Map([[entry.component, facts]]), today)
+    assert.equal(findings.actionable, true, category)
+    assert.deepEqual(findings[category], [row])
+    assert.equal(findings.body.match(/^- none$/gm)?.length, 4, category)
+  }
+})
+
+test('a fetch failure alone is actionable and appears in JSON and Markdown', async () => {
+  const today = '2026-11-17'
+  const failed = [entries[5]]
+  const findings = report(failed, await gather(failed, fake, today), today)
+  assert.equal(findings.actionable, true)
+  assert.deepEqual(findings.failures, [{ component: 'Tool', message: 'Error: network unreachable' }])
+  assert.match(findings.body, /- Tool: Error: network unreachable/)
+  assert.equal(findings.body.match(/^- none$/gm)?.length, 4)
 })

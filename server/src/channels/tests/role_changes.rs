@@ -1,10 +1,6 @@
 use super::management::{grant, mutation, snapshot};
 use super::*;
 use crate::test_support::{Blocked, Count, wait_blocked};
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
 use std::time::Duration;
 
 pub(super) async fn change(app: &Router, token: &str, target: Uuid, role: &str) -> Response {
@@ -46,26 +42,6 @@ async fn all_state(pool: &PgPool) -> Value {
     let auth: Value = sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id,id) FROM users u),(SELECT jsonb_agg(to_jsonb(s) ORDER BY token_hash) FROM account_sessions s),(SELECT jsonb_agg(to_jsonb(c) ORDER BY organization_id,id) FROM channels c))")
         .fetch_one(pool).await.unwrap();
     json!([auth, snapshot(pool).await])
-}
-
-#[derive(Default)]
-struct ObservedAccess {
-    access: super::super::access::AccessChanges,
-    calls: AtomicUsize,
-}
-impl auth::SubscriptionRecheck for ObservedAccess {
-    fn check<'a>(
-        &'a self,
-        pool: &'a PgPool,
-        scope: auth::SubscriptionScope,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
-    {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move { auth::SubscriptionRecheck::check(&self.access, pool, scope).await })
-    }
-    fn failed(&self, _: auth::SubscriptionScope) {
-        panic!("unexpected subscription failure");
-    }
 }
 
 #[fukulow_test::test]
@@ -119,10 +95,7 @@ async fn role_change_body_errors_follow_path_decoding_and_precede_member_uuid_pa
 async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgPool) {
     let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
-    let observed = Arc::new(ObservedAccess::default());
-    state
-        .session_changes
-        .set_subscription_recheck(observed.clone());
+    let observed = RecheckObservation::install(&state.session_changes);
     let org = organization(&pool).await;
     let target = Uuid::new_v4();
     let tt = member(&pool, org, target, "owner").await;
@@ -185,10 +158,7 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
     for multiple in [false, true] {
         let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state.clone());
-        let observed = Arc::new(ObservedAccess::default());
-        state
-            .session_changes
-            .set_subscription_recheck(observed.clone());
+        let observed = RecheckObservation::install(&state.session_changes);
         let org = organization(&pool).await;
         let ot = member(&pool, org, Uuid::new_v4(), "owner").await;
         let target = Uuid::new_v4();

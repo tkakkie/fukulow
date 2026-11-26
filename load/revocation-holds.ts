@@ -14,7 +14,7 @@ import { CELLS, DURATIONS, parseOptions, planRuns, replacementQueue, runId, setu
 import { cleanup, measure, type Active } from './revocation-holds-run.ts';
 import { SetupAbort, type Setup } from './revocation-holds-setup.ts';
 import { clientScope, placementEnabled } from './revocation-holds-placement.ts';
-import { preflightLedgerPath, recordPreflight } from './revocation-holds-preflight-ledger.ts';
+import { preflightLedgerPath, recordPreflight, requireRecordedLedger } from './revocation-holds-preflight-ledger.ts';
 import { preflightSession } from './revocation-holds-preflight-session.ts';
 import { collectSessionIdentity, type SessionIdentity } from './revocation-holds-provenance.ts';
 import { parseSendBuffer, SEND_BUFFER_ENV } from './revocation-measured-server.ts';
@@ -36,7 +36,7 @@ if (args.includes('--help')) {
     '  [--rehearsal | --overhead | --overhead-summary <summary.json>] [--cells ...] [--durations short,long]',
     'Use a clean checkout and the same server and stall-helper binaries on the same boot.',
     `Set ${SEND_BUFFER_ENV} to the calibrated request in bytes for every stage.`,
-    'Use the same host ledger across stages. The default is revocation-holds-preflights.<hostname>.ndjson beside the output directory. Override with --preflight-ledger /absolute/path.',
+    'Every stage uses one host ledger: by default <passwd home>/.local/state/fukulow/revocation-holds-preflights.<hostname>.ndjson (XDG_STATE_HOME and HOME are ignored), or --preflight-ledger /absolute/path. A later stage refuses a ledger other than the one its preflight.json records.',
     'Use FUKULOW_LAUNCH_SESSION or choose a fresh --session ID for each measurement session.',
   ].join('\n'));
   process.exit(0);
@@ -63,11 +63,14 @@ if (preflight && (!session || args.includes('--preflight-result'))) throw new Er
 const preflightFile = value('--preflight-result');
 const options = parseOptions(overhead ? [...args, '--rehearsal'] : args);
 const mode = preflight ? 'preflight' : overhead ? 'overhead' : options.rehearsal ? 'rehearsal' : 'formal';
+const host = hostname();
+const ledger = outsideCheckout(preflightLedgerPath(host, value('--preflight-ledger')));
+const hostLedger = outsideCheckout(preflightLedgerPath(host));
+// Refused before anything else, including the Linux placement check, so every later stage fails the same way.
+if (preflightFile) requireRecordedLedger(preflightFile, ledger);
 const sendBuffer = parseSendBuffer(process.env[SEND_BUFFER_ENV]);
 const linuxPlacement = placementEnabled(platform(), mode);
 const output = outsideCheckout(options.out);
-const host = hostname();
-const ledger = outsideCheckout(preflightLedgerPath(output, host, value('--preflight-ledger')));
 if (existsSync(output)) throw new Error('Output directory already exists');
 mkdirSync(output, { recursive: true });
 
@@ -106,7 +109,7 @@ async function runLaterStage() {
     : undefined;
   const environment = environmentFor(identity, correctionKb);
   save('environment.json', environment);
-  const context = contextFor({ kind: 'measured', identity, ledger, preflightFile });
+  const context = contextFor({ kind: 'measured', identity, ledger, hostLedger, preflightFile });
   if (overhead) {
     const samples: ReturnType<typeof overheadSample>[] = [];
     const errors: { id: string; message: string }[] = [];
@@ -197,7 +200,7 @@ try {
         console.log(`#668 preflight ${id}`);
         return runAttempt({ ...context, preflightVolume: trial.volume }, trial.run, id);
       }, saveProgress);
-    });
+    }, hostLedger);
     console.log(`#668 preflight ${result.passed ? 'passed' : 'failed'}`);
     if (!result.passed) process.exitCode = 1;
   } else await runLaterStage();
