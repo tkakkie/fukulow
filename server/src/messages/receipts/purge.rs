@@ -32,12 +32,13 @@ impl Purge {
                 break;
             }
             first.get_or_insert(org);
+            // Advance before I/O so a failed or timed-out probe still yields its turn.
+            wrapped |= self.after.is_some_and(|after| org <= after);
+            self.after = Some(org);
             if !self.queued.contains(&org) && has_expired(pool, org).await? {
                 self.queued.insert(org);
                 self.queue.push_back(org);
             }
-            wrapped |= self.after.is_some_and(|after| org <= after);
-            self.after = Some(org);
         }
         Ok(wrapped)
     }

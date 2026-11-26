@@ -89,6 +89,69 @@ async fn purge_rotates_backlogged_organizations_across_ticks(pool: PgPool) {
 }
 
 #[fukulow_test::test]
+async fn purge_resumes_discovery_after_probe_timeout(pool: PgPool) {
+    // The next tick can reach Organization 33 only if the blocked probe used its turn.
+    let orgs = organizations(&pool, 34).await;
+    let (later, beyond_limit) = (orgs[32], orgs[33]);
+    for org in [later, beyond_limit] {
+        seed(&pool, org, 1, 0).await;
+    }
+    let app = crate::test_app_pool(pool.clone()).await;
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE operation_receipts IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+
+    let mut purge = Purge::default();
+    tick(&mut purge, &app).await;
+    lock.rollback().await.unwrap();
+    assert_eq!(remaining(&pool, later).await, 1);
+
+    tick(&mut purge, &app).await;
+    assert_eq!(remaining(&pool, later).await, 0);
+    assert_eq!(remaining(&pool, beyond_limit).await, 1);
+}
+
+#[fukulow_test::test]
+async fn purge_keeps_timed_out_batch_queued(pool: PgPool) {
+    // Three discovery ticks cover disjoint ranges, so only the queue can retry the first batch.
+    let orgs = organizations(&pool, 96).await;
+    let (blocked, queued, later) = (orgs[0], orgs[1], orgs[32]);
+    for org in [blocked, queued, later] {
+        seed(&pool, org, 1, 0).await;
+    }
+    let app = crate::test_app_pool(pool.clone()).await;
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION block_receipt_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock(883); RETURN OLD; END $$;
+         CREATE TRIGGER block_receipt_delete BEFORE DELETE ON operation_receipts
+         FOR EACH ROW WHEN (OLD.organization_id = '{blocked}')
+         EXECUTE FUNCTION block_receipt_delete();"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(883)")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+
+    let mut purge = Purge::default();
+    tick(&mut purge, &app).await;
+    assert_eq!(remaining(&pool, queued).await, 1);
+    tick(&mut purge, &app).await;
+    assert_eq!(remaining(&pool, blocked).await, 1);
+    assert_eq!(remaining(&pool, queued).await, 0);
+
+    lock.rollback().await.unwrap();
+    tick(&mut purge, &app).await;
+    assert_eq!(remaining(&pool, later).await, 0);
+    assert_eq!(remaining(&pool, blocked).await, 0);
+}
+
+#[fukulow_test::test]
 async fn purge_probe_and_batch_deny_foreign_and_unexpired_rows(pool: PgPool) {
     let orgs = organizations(&pool, 2).await;
     let (local, foreign) = (orgs[0], orgs[1]);
