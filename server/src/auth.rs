@@ -21,8 +21,6 @@ mod admission_tests;
 mod cleanup;
 #[cfg(test)]
 mod credential_tests;
-#[cfg(test)]
-pub(crate) mod hook_decorator;
 pub mod invites;
 pub mod members;
 mod password;

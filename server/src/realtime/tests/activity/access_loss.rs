@@ -1,5 +1,5 @@
 use super::*;
-use crate::auth::hook_decorator::{ActivityHooks, ChangeHooks, Decorator, RecheckHooks};
+use crate::auth::activity::hook_decorator::{ActivityHooks, ChangeHooks, Decorator, RecheckHooks};
 
 #[fukulow_test::test]
 async fn delete_grant_reports_revocation_with_and_without_an_active_subscription(pool: PgPool) {

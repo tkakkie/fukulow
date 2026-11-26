@@ -1,9 +1,7 @@
 //! Delegates auth hooks while tests observe or control specific call sites.
 
-use super::{
-    SubscriptionRecheck, SubscriptionScope,
-    activity::{ActivityChange, ActivityChanges, Capture, ChangeScope, ChannelChange},
-};
+use super::{ActivityChange, ActivityChanges, Capture, ChangeScope, ChannelChange};
+use crate::auth::{SubscriptionRecheck, SubscriptionScope};
 use futures_util::future::BoxFuture;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;

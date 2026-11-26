@@ -4,7 +4,9 @@ use crate::{
     auth::{
         SubscriptionScope,
         activity::ChangeScope,
-        hook_decorator::{ActivityHooks, BeforeRecheck, ChangeHooks, Decorator, RecheckHooks},
+        activity::hook_decorator::{
+            ActivityHooks, BeforeRecheck, ChangeHooks, Decorator, RecheckHooks,
+        },
     },
     channels::{
         activity::{Notice, pause_member},

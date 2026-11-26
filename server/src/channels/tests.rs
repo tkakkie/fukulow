@@ -1,5 +1,5 @@
 use super::*;
-use crate::auth::hook_decorator::{Decorator, RecheckHooks};
+use crate::auth::activity::hook_decorator::{Decorator, RecheckHooks};
 use axum::{
     Router,
     body::{Body, to_bytes},

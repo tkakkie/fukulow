@@ -2,7 +2,9 @@ use super::*;
 use crate::{
     auth::{
         activity::ChannelChange,
-        hook_decorator::{ActivityHooks, BeforeRecheck, ChangeHooks, Decorator, RecheckHooks},
+        activity::hook_decorator::{
+            ActivityHooks, BeforeRecheck, ChangeHooks, Decorator, RecheckHooks,
+        },
     },
     channels::activity::pause,
 };
