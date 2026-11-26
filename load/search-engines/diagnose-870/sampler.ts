@@ -215,11 +215,22 @@ function thermalSample() {
   return {temperaturesC, frequencyKHz};
 }
 
+export async function fastSample(client: string, sql = run, meminfo = () => readFileSync('/proc/meminfo', 'utf8')) {
+  const mem = parseMeminfo(meminfo());
+  const json = await sql(['docker', 'exec', '-i', client, 'psql', '-XqAt', '-v', 'ON_ERROR_STOP=1', '-U', 'fukulow', '-d', 'postgres'], activitySql);
+  const {autovacuum, checkpointer, wal} = JSON.parse(json.trim());
+  return {...mem, autovacuum, checkpointer, wal};
+}
+
+export function foreignContainers(text: string, server: string, client: string) {
+  return text.split('\n').map(name => name.trim()).filter(name => name && name !== server && name !== client);
+}
+
 async function main() {
-  const {values} = parseArgs({options: {out: {type: 'string'}, container: {type: 'string'}, 'client-cpus': {type: 'string'},
+  const {values} = parseArgs({options: {out: {type: 'string'}, server: {type: 'string'}, client: {type: 'string'},
     thermal: {type: 'boolean', default: false}}});
-  const out = values.out!, container = values.container!;
-  const pin = values['client-cpus'] ? ['taskset', '-c', values['client-cpus']] : [];
+  const {out, server, client} = values;
+  if (!out || !server || !client || server === client) throw new Error('The sampler needs --out and distinct --server and --client names');
   const write = (s: Sample) => appendFileSync(out, JSON.stringify(s) + '\n');
   const sample = async (stream: Stream, read: () => Promise<Omit<Extract<Sample, {stream: typeof stream}>, 'at' | 'done' | 'stream'>>) => {
     const at = Date.now();
@@ -233,13 +244,7 @@ async function main() {
       await new Promise(r => setTimeout(r, Math.max(0, streams[stream] - (Date.now() - t))));
     }
   };
-  void loop('fast', async () => {
-    const text = await run(['docker', 'exec', '-i', container, ...pin, 'sh', '-c',
-      'cat /proc/meminfo; echo ---; exec psql -XqAt -v ON_ERROR_STOP=1 -U fukulow -d postgres'], activitySql);
-    const [mem, json] = text.split('\n---\n');
-    const activity = JSON.parse(json.trim());
-    return {...parseMeminfo(mem), autovacuum: activity.autovacuum, checkpointer: activity.checkpointer, wal: activity.wal};
-  });
+  void loop('fast', () => fastSample(client));
   if (values.thermal) void loop('thermal', async () => thermalSample());
   void (async () => {
     for (;;) {
@@ -252,8 +257,8 @@ async function main() {
         return {load: loadavg(), workers: otherWorkers(commands, process.pid), processes: lines};
       });
       await sample('containers', async () => {
-        const names = (await run(['docker', 'ps', '--format', '{{.Names}}'])).split('\n').map(s => s.trim()).filter(Boolean);
-        return {containers: names.filter(n => n !== container)};
+        const names = await run(['docker', 'ps', '--format', '{{.Names}}']);
+        return {containers: foreignContainers(names, server, client)};
       });
       await new Promise(r => setTimeout(r, Math.max(0, streams.process - (Date.now() - t))));
     }
