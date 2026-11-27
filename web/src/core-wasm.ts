@@ -4,6 +4,10 @@ import { identityOrder, rememberIdentityResponse } from './identity-order'
 import type { Message } from './api'
 import type { ChannelState, CoreResult, Input, Pending, State, SyncCore, SyncView } from './protocol-types'
 
+// A Node micro-benchmark on a 200-Message Channel had find and Map break even at ~4 inserts and Map
+// clearly ahead at 8 (5.75 µs vs 2.38 µs); a single append pays ~1.7 µs more with the Map (#488).
+const PRIOR_MAP_MIN_INSERTS = 8
+
 let ready: Promise<void> | undefined
 /** Starts loading once; every caller shares the same outcome, so a failed load is never retried behind the error. */
 export function initCore(): Promise<void> {
@@ -84,9 +88,18 @@ export function createCore(selfId: string): SyncCore {
         }
         if (patch.splices) {
           const observed = new Map(records.get(id)?.map(m => [m.id, m]))
+          let insertCount = 0
+          for (const op of patch.splices) insertCount += op.insert.length
+          let priorById: Map<string, Message> | undefined
+          if (insertCount >= PRIOR_MAP_MIN_INSERTS && before?.messages.length) {
+            priorById = new Map()
+            for (const old of before.messages) {
+              if (!priorById.has(old.id)) priorById.set(old.id, old)
+            }
+          }
           const restore = (encoded: Interned<Message>) => {
             const m = expandBody<Message>(encoded, bodies)
-            const prior = before?.messages.find(old => old.id === m.id)
+            const prior = priorById ? priorById.get(m.id) : before?.messages.find(old => old.id === m.id)
             const record = observed.get(m.id)
             if (prior && sameMessage(prior, m) && !(input.refreshMentionNames && record)) return prior
             if (record && sameMessage(record, m)) return record
