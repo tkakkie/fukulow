@@ -31,7 +31,9 @@ type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: num
   topicMissing?: true; recovery?: TopicRecovery;
   operation?: symbol; intent?: MarkReadRequest; queued?: MarkReadRequest; timer?: ReturnType<typeof setTimeout>; attempt: number }
 const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
+type MainReadAck = { readSeq: number; token: symbol; historyEpoch: number; session: number; connection: number }
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
+  mainReadAck: undefined as MainReadAck | undefined,
   archived: undefined as boolean | undefined,
   records: new Map<number, UnreadRecord>(), lostThrough: 0, unwatchedThrough: 0, aggregate: undefined as AggregateBaseline | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
   heldPositions: new Map<string, number>(), stopped: false, error: false,
@@ -142,6 +144,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     s.timer = undefined; s.operation = undefined; s.intent = undefined; s.queued = undefined
   }
   const fence = (id: string, c: Channel) => {
+    c.mainReadAck = undefined
     c.token = Symbol(); stopScope(c.main); c.topics.forEach(stopScope); c.summaryReads.clear(); c.queuedSummaries.clear(); deadlines.cancel(id)
     c.summaryTimers.forEach(clearTimeout); c.summaryTimers.clear()
     if (visit?.scope.channel === id) visit = undefined
@@ -354,6 +357,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const intent = s.intent
     if (!intent) return
     const token = Symbol(), generation = c.token
+    const { historyEpoch, connection } = sync.get(), account = session
     s.operation = token
     const r = await request(() => options.api.markRead(v.scope, intent), v.scope.channel)
     if (!isVisit(v) || c.token !== generation || s.operation !== token) return
@@ -376,6 +380,11 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         s.requiredPosition = Math.max(s.requiredPosition, s.position); s.error = true
         if (v.scope.topicId === null) void refresh()
         else void refreshTopic(v.scope.channel, v.scope.topicId)
+      }
+      const current = sync.get()
+      if (v.scope.topicId === null && !listNeedsRecovery(c) && connection !== null && current.connected &&
+        connection === current.connection && historyEpoch === current.historyEpoch && account === session) {
+        c.mainReadAck = { readSeq: r.data.read_seq, token: generation, historyEpoch, session: account, connection }
       }
       if (s.queued && count(v.scope.channel, c, v.scope.topicId) === null) s.queued = undefined
       if (v.scope.topicId !== null) void refresh()
@@ -512,6 +521,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     previous = next
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
     if (before.historyEpoch !== next.historyEpoch) reset()
+    // Watched Channels can keep their lifetime across reconnect, but their ACKs cannot.
+    if (before.connection !== next.connection) for (const c of channels.values()) c.mainReadAck = undefined
     let rebootstrap = false, needBaseline = false, topicRebootstrap = false, moveRefresh = false
     const changed = new Set<string>()
     const selfChanged = before.selfId !== next.selfId
@@ -716,7 +727,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   if (active()) { reconcile(); void refresh() }
   return {
     subscribe,
-    activityMainCoverage(id: string) { const row = channels.get(id)?.aggregate; return row && completeCountFields(row) ? row.read_seq : -1 },
+    activityMainCoverage(id: string) {
+      const c = channels.get(id), row = c?.aggregate
+      if (!c || !row || !completeCountFields(row)) return -1
+      if (c.archived) return row.read_seq
+      const ack = c.mainReadAck, state = sync.get()
+      if (!ack || !active() || !state.connected || !state.channels[id]?.subscription?.confirmed ||
+        ack.token !== c.token || ack.historyEpoch !== state.historyEpoch || ack.session !== session ||
+        ack.connection !== state.connection || listNeedsRecovery(c) ||
+        aggregateCount(id, c) === null || aggregateCount(id, c, true) === null) return row.read_seq
+      return Math.max(row.read_seq, ack.readSeq)
+    },
     activityCoversListBaseline(row: UnreadChannel) {
       const c = channels.get(row.id)
       if (!c || !watched(row.id)) return true
