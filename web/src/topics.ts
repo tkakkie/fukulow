@@ -2,6 +2,7 @@ import { createActivityTarget, type Activity, type ActivityRead } from './activi
 import * as api from './api'
 import { createRequestDeadlines } from './request-deadlines'
 import type { InitialRead, InitialTimeline } from './initial-timeline'
+import { observeGeneration } from './observe-generation'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
 import { coversTopicCounts, readActivitySummary, stampTopicEvidence, topicBaselineStarts, type TopicCountRequirement } from './topic-summary-requests'
@@ -276,10 +277,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     }) : undefined
     try {
       const response = reuse ? prefetched : await (deadline ? Promise.race([operation, deadline.until]) : operation)
-      if (isCurrent()) {
-        const generation = response.ok && response.data && typeof response.data === 'object' && 'history_generation' in response.data ? response.data.history_generation : undefined
-        if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { result: { ok: false, kind: 'network' } as Result<T>, isCurrent: () => false, startedAt }
-        if (!response.ok && response.kind === 'http' && response.status === 409 && response.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return { result: response, isCurrent: () => false, startedAt } }
+      if (isCurrent() && observeGeneration(sync, response) === 'stale') {
+        const result: Result<T> = response.ok ? { ok: false, kind: 'network' } : response
+        return { result, isCurrent: () => false, startedAt }
       }
       const state = sync.get().channels[channel]
       const mutationSeq = state?.mutationSeq ?? 0

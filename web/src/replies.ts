@@ -1,6 +1,7 @@
 import * as api from './api'
 import { createRequestDeadlines } from './request-deadlines'
 import { knownMessageState } from './identity-order'
+import { observeGeneration } from './observe-generation'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
 import { REPLY_MESSAGE_LIMIT, type ChannelState } from './protocol-types'
@@ -174,9 +175,11 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; requestTim
     const apply = operation.then(result => {
       if (!isCurrent()) return
       w.loading = false
-      const generation = result.ok ? result.data.history_generation : undefined
-      if (generation !== undefined && !sync.observeHistoryGeneration(generation)) return
-      if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
+      const observed = observeGeneration(sync, result, data => {
+        const generation = data.history_generation
+        if (generation !== undefined) return { generation }
+      })
+      if (observed === 'stale') return
       const state = sync.get().channels[channel]
       const mutationSeq = state?.mutationSeq ?? 0
       const floor = mutationFloor < mutationSeq ? mutationSeq : state?.moveSeq ?? 0

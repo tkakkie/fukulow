@@ -11,6 +11,7 @@ import { createChannels, markChannelsRead, type ChannelsApi } from './channels'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import type { InitialTimeline } from './initial-timeline'
 import { createMoveChain, type MoveChainApi } from './move-chain'
+import { observeGeneration } from './observe-generation'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
@@ -95,9 +96,7 @@ export function createSession(options: SessionOptions) {
     const result = await promise
     report?.(result)
     if (!closed && history && (epoch === undefined || epoch === history.get().historyEpoch)) {
-      const generation = result.ok && result.data && typeof result.data === 'object' && 'history_generation' in result.data ? result.data.history_generation : undefined
-      if (typeof generation === 'string' && !history.observeHistoryGeneration(generation)) return { ok: false, kind: 'network' }
-      if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { history.observeHistoryGeneration(); return { ok: false, kind: 'network' } }
+      if (observeGeneration(history, result) === 'stale') return { ok: false, kind: 'network' }
     } else if (result.ok && epoch !== undefined && epoch !== history?.get().historyEpoch) return { ok: false, kind: 'network' }
     return result
   }

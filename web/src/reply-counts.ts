@@ -2,6 +2,7 @@ import { createReplyCountCore } from '#sync-core'
 import * as api from './api'
 import type { Message, ReplyCountPage, ReplyCountRequest, Result } from './api'
 import type { CountCore, CountInput, CountTicket, CountView } from './reply-count-core'
+import { observeGeneration } from './observe-generation'
 import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import type { Replies } from './replies'
@@ -111,8 +112,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
           return
         }
         if (!current()) return
-        if (result.ok && !sync.observeHistoryGeneration(result.data.history_generation)) return
-        if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
+        if (observeGeneration(sync, result, data => ({ generation: data.history_generation })) === 'stale') return
         clearTimeout(batch.timeout); c.batch = undefined
         update(c, { type: 'failed', tickets })
         if (result.ok && result.data.as_of_seq < (sync.get().channels[id]?.moveSeq ?? 0)) {
