@@ -1,5 +1,6 @@
 import { RunBudget } from './budget.ts'
 import { notificationText } from '../../scripts/backup-notification-text.ts'
+import { defaultRetryDelayMs, discordAttempts, discordOutcome, retryAfterDelayMs } from '../../scripts/backup-discord-retry.ts'
 import { accountUsage } from '../../scripts/backup-usage-model.ts'
 import type { Guard } from './bindings.ts'
 
@@ -15,26 +16,22 @@ export function discordNotifier(url: string, guard: Guard, request: Fetch = fetc
   return async (event: string): Promise<void> => {
     let content: string
     try { content = notificationText(event) } catch { throw new Error('Notification failed category=event') }
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < discordAttempts; attempt++) {
       await guard()
       budget.external(event === 'checker-failed')
-      let status = 0, delay = 1000
+      let status = 0, delay = defaultRetryDelayMs
       try {
         const response = await request(https(url), { method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ content, allowed_mentions: { parse: [] } }), signal: AbortSignal.timeout(30_000) })
         status = response.status
-        const retry = response.headers.get('retry-after')
-        if (retry) {
-          const parsed = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - now()
-          if (Number.isFinite(parsed)) delay = Math.max(0, Math.min(30_000, parsed))
-        }
+        delay = retryAfterDelayMs(response.headers.get('retry-after'), now)
         await response.body?.cancel()
       } catch { /* Raw transport diagnostics and URLs never leave this adapter. */ }
       await guard()
-      if (status >= 200 && status < 300) return
-      if (status >= 400 && status < 500 && status !== 429) throw new Error('Notification failed category=rejected')
-      if (status !== 0 && status !== 429 && status < 500) throw new Error('Notification failed category=response')
-      if (attempt < 2) { await sleep(delay); await guard() }
+      const outcome = discordOutcome(status)
+      if (outcome === 'delivered') return
+      if (outcome !== 'retry') throw new Error(`Notification failed category=${outcome}`)
+      if (attempt < discordAttempts - 1) { await sleep(delay); await guard() }
     }
     throw new Error('Notification failed category=unavailable')
   }
