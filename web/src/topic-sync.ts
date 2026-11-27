@@ -1,16 +1,11 @@
 import type { Activity } from './activity'
-import * as api from './api'
 import type { InitialTimeline } from './initial-timeline'
-import { createSync, type SyncOptions } from './sync'
+import { createSync, timelineApi, type SyncOptions } from './sync'
 import { createTopics, topicsApi, type TopicsApi } from './topics'
 
 /** Opt-in composition for the Topic UI. Existing sync consumers keep their current history transport. */
 export function createTopicSync(options: SyncOptions & { topicsApi?: TopicsApi; activity?: Activity; isDm?(channel: string): boolean; initialTimeline?: InitialTimeline }) {
-  const transport = options.api ?? {
-    listChannelEvents: (channel: string, query: api.ListChannelEventsQuery) => api.listChannelEvents(options.organizationId ?? '', channel, query),
-    listMessages: (channel: string, query?: api.ListMessagesQuery) => api.listMessages(options.organizationId ?? '', channel, query),
-    sendMessage: (channel: string, body: api.SendMessageRequest) => api.sendMessage(options.organizationId ?? '', channel, body),
-  }
+  const transport = options.api ?? timelineApi(options.organizationId ?? '')
   const projected = new Set<string>()
   const sync = createSync({ ...options, api: {
     ...transport,

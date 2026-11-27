@@ -15,7 +15,7 @@ import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
 import { createSections, sectionsApi, type SectionsApi } from './sections'
-import type { SyncOptions } from './sync'
+import { timelineApi, type SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
 import { topicsApi, type TopicsApi } from './topics'
 import { unreadApi, type UnreadApi } from './unread'
@@ -132,11 +132,7 @@ export function createSession(options: SessionOptions) {
     getChannel: (id, signal) => api.getChannel(organizationId, id, undefined, signal),
     updateChannel: (id, body) => api.updateChannel(organizationId, id, body),
   }
-  const timeline = options.sync?.api ?? {
-    listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
-    listMessages: (channel, query, signal) => api.listMessages(organizationId, channel, query, undefined, signal),
-    sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
-  } satisfies NonNullable<SyncOptions['api']>
+  const timeline = options.sync?.api ?? timelineApi(organizationId)
   const topicSource = options.topicsApi ?? topicsApi(organizationId, () => history?.get().historyGeneration)
   const replySource = options.repliesApi ?? repliesApi(organizationId)
   const unreadSource = options.unreadApi ?? unreadApi(organizationId, () => history?.get().historyGeneration)

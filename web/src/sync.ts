@@ -7,14 +7,22 @@ import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { createCore } from '#sync-core'
+import { messageBodyError, topicNameError } from './message-rules'
 import type { SyncCore } from './protocol-types'
 import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
+
+export { foldTopicName, MESSAGE_BODY_MAX, messageBodyError, TOPIC_NAME_MAX, topicNameError } from './message-rules'
 
 export type TimelineApi = {
   listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
   listMessages(channel: string, query?: ListMessagesQuery, signal?: AbortSignal): Promise<Result<MessagePage>>
   sendMessage(channel: string, body: SendMessageRequest): Promise<Result<Message>>
 }
+export const timelineApi = (organizationId: string): TimelineApi => ({
+  listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
+  listMessages: (channel, query, signal) => api.listMessages(organizationId, channel, query, undefined, signal),
+  sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
+})
 type Wait = Extract<Effect, { type: 'wait' }>
 type SyncAccessSource = { close(): Promise<void>; unavailable(): Promise<void> }
 export type SyncOptions = {
@@ -62,42 +70,6 @@ export type TimelineState = {
   olderError: boolean
 }
 
-/** Max Message body length in Unicode scalar values (API rule; a test compares it to openapi.json). */
-export const MESSAGE_BODY_MAX = 4000
-
-/** Max Topic name length in Unicode scalar values (API rule; a test compares it to openapi.json). */
-export const TOPIC_NAME_MAX = 60
-
-/** Channel-scoped ASCII case fold matching the server's `to_ascii_lowercase()` Topic identity. */
-export const foldTopicName = (name: string): string => name.replace(/[A-Z]/g, ch => ch.toLowerCase())
-
-/** Japanese message when the Message body violates API scalar/NUL rules, else null. */
-export function messageBodyError(body: string): string | null {
-  if (body.includes('\0')) return 'メッセージにNUL文字は含められません。'
-  let count = 0
-  for (const ch of body) {
-    const cp = ch.codePointAt(0)!
-    if (cp >= 0xd800 && cp <= 0xdfff) return 'メッセージに使用できない文字が含まれています。'
-    if (++count > MESSAGE_BODY_MAX) return `メッセージは${MESSAGE_BODY_MAX}文字以内にしてください。`
-  }
-  return null
-}
-
-/** Japanese message when a Topic name violates API scalar/NUL/whitespace rules, else null. */
-export function topicNameError(name: string): string | null {
-  if (name.includes('\0')) return 'トピック名にNUL文字は含められません。'
-  if (name.length === 0 || /^\p{White_Space}|\p{White_Space}$/u.test(name)) {
-    return `トピック名の前後に空白を入れず、1〜${TOPIC_NAME_MAX}文字にしてください。`
-  }
-  let count = 0
-  for (const ch of name) {
-    const cp = ch.codePointAt(0)!
-    if (cp >= 0xd800 && cp <= 0xdfff) return 'トピック名に使用できない文字が含まれています。'
-    if (++count > TOPIC_NAME_MAX) return `トピック名は${TOPIC_NAME_MAX}文字以内にしてください。`
-  }
-  return null
-}
-
 const emptyComposer: ChannelComposerState = { draft: '', topicDraft: '', composerError: null }
 const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 
@@ -105,11 +77,7 @@ type SyncListener = (changedChannels: ReadonlySet<string>, records?: ReadonlyMap
 
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
-  const transport = options.api ?? {
-    listChannelEvents: (channel: string, query: api.ListChannelEventsQuery) => api.listChannelEvents(options.organizationId ?? '', channel, query),
-    listMessages: (channel: string, query?: ListMessagesQuery, signal?: AbortSignal) => api.listMessages(options.organizationId ?? '', channel, query, undefined, signal),
-    sendMessage: (channel: string, body: SendMessageRequest) => api.sendMessage(options.organizationId ?? '', channel, body),
-  }
+  const transport = options.api ?? timelineApi(options.organizationId ?? '')
   const connect = options.connect ?? (handlers => connectRealtime(handlers, undefined, options.organizationId))
   const newId = options.newId ?? (() => crypto.randomUUID())
   const fillDelay = options.delay ?? backoffCap
