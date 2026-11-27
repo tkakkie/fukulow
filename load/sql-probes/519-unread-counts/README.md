@@ -88,3 +88,26 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
 - **Reported:** per block in run order: tps, p95/p99, WAL bytes/send, images per WAL record and per send, start and end times, host state. Per pair: both ratios and each breach. Every check with its duration.
 - **No exclusion or rerun after results.** A failed run (setup, check, timeout or crossing checkpoint) is reported as failed. At most one rerun for a known setup failure, as #769 allows.
 - **Time:** about 25 min of blocks, plus setup and three final-block checks (each expected well under the 45 min limit).
+
+### Send-cost attribution (`--attribution`)
+
+DIAGNOSTIC / NOT EVALUATED. Instrumentation lowers tps. Totals are not comparable to #796 or to the stop rule. Use only the split between arms.
+
+For the Ubuntu smoke, run the five-second send smoke on the idle host, once plain (output unchanged) and once with attribution (checks the extensions and WAL inspection on a real server; it takes no CPU sets or frequency stage).
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --out /absolute/new/smoke
+node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --attribution --out /absolute/new/smoke-attribution
+```
+
+For the Ubuntu diagnostic, use a single job in the [#796 formal launcher setup](../../harness-core/README.md#796-frequency-validity-v3). Keep the image, disk and host gates, frozen floors, and `issue: 796` for launcher routing. Supply the go for this #519 diagnostic and fresh output paths. Put the following command in the job's `command` argv, then run `node load/launch.ts --queue /absolute/519-attribution-queue.json`.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --attribution \
+  --cpu-sets 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15' \
+  --frequency-v3 formal --perf-helper /absolute/fukulow-perf-helper --out /absolute/new/attribution
+```
+
+Attribution requires diagnostic sends-only. Formal v3 supplies the Ubuntu placement and host gates for the same six blocks. Control changes the arm order and caps a block. Rehearsal 2 is reserved for floor qualification. The stability report rejects attribution runs.
+
+The probe checks for 40 GiB free on PostgreSQL's WAL filesystem and retains at least 8 GiB of recent WAL. It writes `block*/attribution.json` plus `attribution-summary.json` and `attribution-summary.md`. Unavailable WAL marks attribution incomplete and preserves the block's statement and function data.

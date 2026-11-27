@@ -37,3 +37,17 @@ test('the offline report reads the start, finish and container affinity files in
   assert.deepEqual(present.evidence.containerCpusets, containerCpusets());
   assert.ok(!present.reasons.some((reason: string) => /^(?:start:|finish:|missing frequency-container-cpusets)/.test(reason)));
 });
+
+test('the #796 stability report refuses attribution evidence', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'fukulow-stability-attribution-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const queue = join(dir, 'queue.json');
+  writeFileSync(queue, JSON.stringify({ name: 'attribution', chainDir: dir, hostBusy: join(dir, 'HOST-BUSY'), jobs: [{
+    name: 'attribution', issue: 796, go: { quote: 'go', date: '2026-11-27' }, worktree: dir, commit: '1234567',
+    command: ['node', 'final.ts', '--attribution'], out: dir,
+  }] }));
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('stability.ts', import.meta.url)),
+    '--stage', 'control', '--queue', queue, '--out', join(dir, 'report.json')], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Attribution output is diagnostic and cannot qualify the #796 host/);
+});
