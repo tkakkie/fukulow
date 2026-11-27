@@ -2,9 +2,14 @@
 -- with all app instances stopped. Deploy matching code using the A3 SQL and
 -- the complete migration history when promoting this file to a migration.
 SET LOCAL row_security = off;
-LOCK TABLE users, channels, channel_members, channel_read_positions, topic_read_positions,
-    message_mentions, message_append_counts, message_count_corrections IN SHARE ROW EXCLUSIVE MODE;
+-- Match F2: Channel/Member/grant authorization, exclusive Channel #135 in the
+-- runtime, sequence allocation, Topic join, Message write, append/correction
+-- keys, Mentions, then position tables. Topic record/repair reuse the Topic
+-- lock. Drain first: early Message reads can precede allocation.
+LOCK TABLE channels, users, channel_members IN SHARE ROW EXCLUSIVE MODE;
 LOCK TABLE channel_message_sequences, topics, messages IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE message_append_counts, message_count_corrections, message_mentions,
+    channel_read_positions, topic_read_positions IN SHARE ROW EXCLUSIVE MODE;
 
 INSERT INTO message_append_counts AS k (organization_id, channel_id, scope_id, member_id, appended)
 SELECT s.organization_id, s.channel_id, nil.id, nil.id, s.main_appended

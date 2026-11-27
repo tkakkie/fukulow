@@ -1,5 +1,5 @@
 {
-  "sha256": "6ba7eeee0429a5226c275d4ca718f25929f27d1dc76d53e6a1ecd9e6cd0fdf38",
+  "sha256": "9fc68f54a1a0ed1730b6bfc85045b1e4615f98a1372e9838e8f41446ddd96844",
   "frozen": {
     "version": 19,
     "date": "2026-11-27",
@@ -396,7 +396,7 @@
       },
       {
         "path": "server/migrations/202611271100_unread_counts_scope_total.sql",
-        "sha256": "b9ce9382d6c334d847ef8da09dd82e3ac20999c9750a4e7c6bc7a47774e292fd"
+        "sha256": "04c4eee27312a4455cae19fe61063a6d81e1edb6d46510684d4945b4d19568cf"
       },
       {
         "path": "server/src/auth.rs",

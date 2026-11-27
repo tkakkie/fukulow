@@ -164,16 +164,16 @@ export function replayLegacyRun(r: RunInput, bound: Binding) {
   return { ...procedural, valid: invalid.length === 0, invalid, legacy };
 }
 
-export function judgeRun(r: RunInput, bound: Binding, floors: Floors | null, stage: FrequencyStage, approval?: string) {
+export function judgeRun(r: RunInput, bound: Binding, floors: Floors | null, stage: FrequencyStage, approval?: string,
+  armOrder: readonly string[] = stage === 'control' ? ['current', 'current', 'current'] : ['current', 'final', 'final', 'current', 'current', 'final']) {
   const control = stage === 'control';
-  const p = judgeProcedure(r, bound, control ? 3 : blocksPerRun, false);
+  const p = judgeProcedure(r, bound, armOrder.length, false);
   const invalid = [...p.invalid];
   if (!isQuote(bound.go) || bound.go.quote !== r.metadata.frequencyGo?.quote || bound.go.date !== r.metadata.frequencyGo?.date) {
     invalid.push('no matching #796 go in the launcher session');
   }
   if (r.metadata.frequencyStage !== stage || r.metadata.frequencyApproval !== approval) invalid.push('wrong #796 stage or reviewed floor digest');
-  const expectedArms = control ? 'current,current,current' : 'current,final,final,current,current,final';
-  if ([...r.sends].sort((a, b) => a.order - b.order).map(s => s.arm).join(',') !== expectedArms) invalid.push('incorrect send arm order');
+  if ([...r.sends].sort((a, b) => a.order - b.order).map(s => s.arm).join(',') !== armOrder.join(',')) invalid.push('incorrect send arm order');
   if (r.metadata.sends.measuredSeconds !== frequencyWorkSeconds) invalid.push(`incorrect ${frequencyWorkSeconds} s workload`);
   if (!r.hostAfter || r.hostAfter.platform !== 'linux' || r.hostAfter.launchSession !== bound.id) invalid.push('missing launcher host-after record');
   else invalid.push(...linuxViolations(r.hostAfter), ...requirementViolations(r.hostAfter, levers));

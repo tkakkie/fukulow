@@ -4,9 +4,15 @@
 -- before their Channel sequence row exists. No fallback writer locks a sequence
 -- or Topic row for counting.
 SET LOCAL row_security = off;
-LOCK TABLE users, channels, channel_members, channel_read_positions, topic_read_positions,
-    message_mentions, message_append_counts, message_count_corrections IN SHARE ROW EXCLUSIVE MODE;
+-- Send and Move lock Channel, Member and grants, then take exclusive Channel #135.
+-- Follow the Send writes: sequence allocation, Topic join, Message INSERT,
+-- append keys/corrections, then Mentions. Topic record/repair reuse the Topic
+-- lock. Position writers also touch the upstream tables through their triggers.
+-- #135 is per Channel. Drain first: early Message reads can precede allocation.
+LOCK TABLE channels, users, channel_members IN SHARE ROW EXCLUSIVE MODE;
 LOCK TABLE channel_message_sequences, topics, messages IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE message_append_counts, message_count_corrections, message_mentions,
+    channel_read_positions, topic_read_positions IN SHARE ROW EXCLUSIVE MODE;
 
 ALTER TABLE channel_message_sequences ADD COLUMN main_appended bigint NOT NULL DEFAULT 0 CHECK (main_appended >= 0);
 ALTER TABLE topics ADD COLUMN scope_appended bigint NOT NULL DEFAULT 0 CHECK (scope_appended >= 0);

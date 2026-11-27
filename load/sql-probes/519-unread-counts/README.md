@@ -89,6 +89,29 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
 - **No exclusion or rerun after results.** A failed run (setup, check, timeout or crossing checkpoint) is reported as failed. At most one rerun for a known setup failure, as #769 allows.
 - **Time:** about 25 min of blocks, plus setup and three final-block checks (each expected well under the 45 min limit).
 
+### F2 send comparison (`--f2`)
+
+The Mac smoke uses only F2, 300 seeded Messages per Channel and 5 s warm/5 s measured blocks. It exercises marked main and Topic sends and Mentions under `fukulow_app` with RLS. It verifies the migration and zero count discrepancies before and after the block. Smoke produces no stop-rule verdict.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --f2 --out /absolute/new/f2-smoke
+```
+
+After a separate measurement go, use one job on the qualified Ubuntu host with the [formal v3 launcher conditions](../../harness-core/README.md#796-frequency-validity-v3). Keep the pinned image, disk and host preflights, cool-down, airflow confirmation, 5 s thermal sampling, frozen frequency floors and workload label `io.fukulow.probe=519-final`. Use `issue: 796` for launcher routing, the go for this #519 comparison, and the same full F2 source SHA in the queue's `commit` and the command. Use a clean checkout. Run `node load/launch.ts --queue /absolute/519-f2-queue.json` with this command in the job's argv.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --f2 --f2-source F2_FULL_SHA \
+  --cpu-sets 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15' \
+  --frequency-v3 formal --perf-helper /absolute/fukulow-perf-helper --out /absolute/new/f2
+node load/sql-probes/519-unread-counts/stability.ts --stage formal --f2 \
+  --queue /absolute/519-f2-queue.json --out /absolute/new/f2-placement.json
+```
+
+- Current stays at `5ef561e5` and final applies only A3 from `fd6a5949` and UPDATE-first from `c672b0a4`. Both keep `sql/send-current.sql`. F2 uses the same full seed and applies the exact migration chain through F2 from pre-F2 base `6e2d1d4d`. On the F2 clone, populate the Create log from the seed for #620's bijection check before applying the chain.
+- F2's fresh-send SQL mirrors the sequence UPSERT, Topic join/record, marked Message INSERT and Mention writes in Rust. The SQL probe measures the database writes in one routine call per send and skips application authorization, search indexing, HTTP and delivery. The F2 arm includes #620's removal of the Create-log write and the Topic paging index carried by its production schema. Those differences also affect WAL/send and tps.
+- Use the same settings, RLS role, 8 clients/4 threads, forced checkpoint, 60 s warm and 120 s measured work. Both counted templates are recounted. Each block uses a fresh clone, with the 45 min `message_counts_check` cap after every final and F2 block. Migration drift outside the pinned chain fails setup. Source SHA and SQL hashes are written to `metadata.json`.
+- Fixed order by group of three: current/final/F2, final/F2/current, F2/current/final. Use the placement report to verify the host evidence before interpreting results. `stop-rule-f2.json` uses the existing limits against current (median WAL/send ≤ 1.20, median tps ≥ 0.90), and `stop-rule.json` still compares final with current.
+
 ### Send-cost attribution (`--attribution`)
 
 DIAGNOSTIC / NOT EVALUATED. Instrumentation lowers tps. Totals are not comparable to #796 or to the stop rule. Use only the split between arms.

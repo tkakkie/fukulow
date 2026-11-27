@@ -8,6 +8,7 @@ import { judgeRun as judgeV3, replayLegacyRun as judgeRun, type RunInput } from 
 import { block, containerCpusets, evidence, floors, hostAffinity, sets796 } from './frequency-fixture.ts';
 import { cpus796 } from './frequency-evidence.ts';
 import { judgeChain, limits, sessionProblems } from './stability-chain.ts';
+import { f2Order } from './f2-arm.ts';
 
 const judge = (runs: RunInput[], session: Session | null, queue: string) => judgeChain(runs, session, queue, judgeRun);
 
@@ -28,19 +29,20 @@ const jr = (r: RunInput, thermalSampleSeconds: unknown = 5) => judgeRun(r, { id:
 // cpu(block, cpu, tick) may override one CPU's kHz and its busy fraction (default 0.9) in a tick.
 type CpuTick = { khz?: number | null; busy?: number };
 // ncpu replaces the 8 CPUs (server = even, client = odd, in the metadata too).
-function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number]; periodMs?: number; cpu?: (block: number, cpu: number, ms: number) => CpuTick; ncpu?: number } = {}): RunInput {
+function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number]; periodMs?: number; cpu?: (block: number, cpu: number, ms: number) => CpuTick; ncpu?: number; armOrder?: readonly string[] } = {}): RunInput {
   const all = opts.ncpu === undefined ? cpus : Array.from({ length: opts.ncpu }, (_, i) => i);
   const sets = opts.ncpu === undefined ? cpuSets : { server: all.filter(c => c % 2 === 0), client: all.filter(c => c % 2 === 1) };
   const freq = opts.freq ?? (() => [2_000_000, 2_000_000]);
-  const sends = arms.map((arm, i) => {
+  const armOrder = opts.armOrder ?? arms;
+  const sends = armOrder.map((arm, i) => {
     const endMs = t0 + (i + 1) * 200_000;
     return { order: i + 1, arm, tps: (opts.tps ?? 10_000) + i, walBytesPerSend: opts.wal ?? 1787, crossed: false, errors: [] as string[],
       measuredWindow: { startMs: endMs - 121_200, endMs: endMs + 300, monoMs: 121_500 }, pgbenchWindow: { startMs: endMs - 120_000, endMs }, host: idle(), hostAfter: idle() };
   });
   const samples: SampleLine[] = [];
   const jiffies = all.map(() => [0, 0]);
-  for (let ms = 0; ms <= 1_300_000; ms += opts.periodMs ?? 5000) {
-    const block = Math.min(6, Math.max(1, Math.ceil(ms / 200_000)));
+  for (let ms = 0; ms <= 200_000 * armOrder.length + 100_000; ms += opts.periodMs ?? 5000) {
+    const block = Math.min(armOrder.length, Math.max(1, Math.ceil(ms / 200_000)));
     const [server, client] = freq(block);
     const ticks = all.map(cpu => ({ khz: cpu % 2 === 0 ? server : client, busy: 0.9, ...opts.cpu?.(block, cpu, ms) }));
     ticks.forEach((c, cpu) => { const j = Math.round(500 * c.busy); jiffies[cpu][0] += j; jiffies[cpu][1] += 500 - j; });
@@ -608,5 +610,23 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
     assert.match(assess(noAffinity).invalid.join(), /block 1:.*CPU masks missing or incorrect/);
     noAffinity.metadata.frequencyStage = 'formal';
     assert.deepEqual(judgeV3(noAffinity, { id: sid, thermalSampleSeconds: 5, go }, floors, 'formal', 'control-digest').invalid, []);
+  });
+  await t.test('F2 uses the same v3 checks across all nine blocks', () => {
+    const order = f2Order.flat();
+    const fixture = run('s1', {}, { ncpu: 16, armOrder: order });
+    const comparison: RunInput = { ...r, samples: fixture.samples, sends: fixture.sends,
+      metadata: { ...r.metadata, frequencyStage: 'formal' } };
+    for (const send of comparison.sends) {
+      send.counters = block(send.order, { launchSession: sid }).counters;
+      if (send.pgbenchWindow) send.measuredWindow = { ...send.pgbenchWindow, monoMs: 120_000 };
+    }
+    const bound = { id: sid, thermalSampleSeconds: 5, go };
+    const assessF2 = () => judgeV3(comparison, bound, floors, 'formal', 'control-digest', order);
+    assert.deepEqual(assessF2().invalid, []);
+    assert.ok(judgeV3(comparison, bound, floors, 'formal', 'control-digest').invalid.includes('9 blocks, not 6'));
+    comparison.sends[8].arm = 'f2';
+    comparison.samples = comparison.samples.filter(s => s.at !== new Date(t0 + 1_780_000).toISOString());
+    assert.ok(assessF2().invalid.includes('incorrect send arm order'));
+    assert.match(assessF2().invalid.join(), /block 9: missing 5 s thermal tick/);
   });
 });
