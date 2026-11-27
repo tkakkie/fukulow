@@ -301,10 +301,10 @@ it.each(['channels', 'dms'] as const)('reads %s when a PUT ACK arrives on a late
     await advance(250)
     c.net.socket.onReady()
     c.confirm()
-    c.net.event({ type: 'activity_ready' })
     await c.ack()
     expect(c.session.unread.get(id).main.position).toBe(1)
     expect(c.coverage()).toBe(0)
+    c.net.event({ type: 'activity_ready' })
     c.snapshot(1)
     await expectNotice(c, true)
   } finally { c.session.close() }

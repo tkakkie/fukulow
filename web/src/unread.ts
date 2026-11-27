@@ -730,6 +730,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     activityMainCoverage(id: string) {
       const c = channels.get(id), row = c?.aggregate
       if (!c || !row || !completeCountFields(row)) return -1
+      if (c.archived) return row.read_seq
       const ack = c.mainReadAck, state = sync.get()
       if (!ack || !active() || !state.connected || !state.channels[id]?.subscription?.confirmed ||
         ack.token !== c.token || ack.historyEpoch !== state.historyEpoch || ack.session !== session ||
