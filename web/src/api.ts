@@ -147,8 +147,19 @@ const querySuffix = (query: object) => {
 export const getOrganizationMe = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
   call<Identity>(f, `${orgPath(organizationId)}/me`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
+export const isSessionEnded = (r: Result<unknown>) =>
+  !r.ok && r.kind === 'http' && r.status === 401
+
 export const isOrganizationUnavailable = (r: Result<unknown>) =>
   !r.ok && r.kind === 'http' && r.status === 404 && r.error === 'organization_unavailable'
+
+/** Callers handle Organization unavailability separately so C10 keeps its original precedence. */
+export const isChannelDenial = (r: Result<unknown>, { statuses, localNotFound }: {
+  statuses: readonly number[]
+  localNotFound?: string
+}) =>
+  !r.ok && r.kind === 'http' && statuses.includes(r.status) &&
+  (localNotFound === undefined || r.error !== localNotFound)
 
 export type Channel = components['schemas']['Channel']
 export type ChannelVisibility = components['schemas']['ChannelVisibility']

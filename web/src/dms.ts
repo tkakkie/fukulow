@@ -13,7 +13,7 @@ export const dmsApi = (org: string): DmsApi => ({
   changes: (query, signal) => api.listDmChanges(org, query, undefined, signal),
   open: (body, signal) => api.openDm(org, body, undefined, signal),
 })
-const terminal = (r: api.Result<unknown>) => !r.ok && r.kind === 'http' && (r.status === 401 || api.isOrganizationUnavailable(r))
+const terminal = (r: api.Result<unknown>) => !r.ok && r.kind === 'http' && (api.isSessionEnded(r) || api.isOrganizationUnavailable(r))
 const retryable = (r: Exclude<api.Result<unknown>, { ok: true }>) => r.kind === 'network' || r.status === 429 || r.status >= 500
 export function dmError(r: Exclude<api.Result<unknown>, { ok: true }>): string {
   if (r.kind === 'http' && r.error === 'member_not_found') return 'このメンバーとのダイレクトメッセージは開けません。'

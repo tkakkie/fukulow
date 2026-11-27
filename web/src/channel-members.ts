@@ -46,7 +46,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
         set({ members: [], loading: false, unavailable: true, error: '', retryable: false })
       } else set({ members: [], loading: false, error: channelMemberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
     },
-    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+    terminal: r => !r.ok && r.kind === 'http' && (api.isSessionEnded(r) || r.status === 403 || r.status === 404),
   })
   const load = () => closed || state.unavailable ? Promise.resolve() : activityTarget.retryNow()
   async function mutate(run: () => Promise<api.Result<undefined>>, refreshChannels = false) {

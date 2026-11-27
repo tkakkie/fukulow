@@ -9,7 +9,7 @@ import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.s
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
-import { getOrganizationMe, isOrganizationUnavailable, listTimeline, type Identity, type Role } from './api'
+import { getOrganizationMe, isOrganizationUnavailable, isSessionEnded, listTimeline, type Identity, type Role } from './api'
 import { startInitialSelection } from './initial-timeline'
 import type { Navigation } from './navigation'
 import type { createChannelMembers } from './channel-members'
@@ -158,7 +158,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     const reportEnded = reportAccountRejection
     const result = await deps.getOrganization(id)
     // Account Session rejection remains authoritative even when this selection was replaced.
-    if (!result.ok && result.kind === 'http' && result.status === 401) { reportEnded(); return }
+    if (isSessionEnded(result)) { reportEnded(); return }
     if (account !== accountGeneration || selection !== selectionGeneration) return
     if (!result.ok) {
       if (isOrganizationUnavailable(result)) organizationStatus = 'unavailable'
@@ -168,7 +168,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     // A superseded selection's 401 can still end this Account Session.
     const initialChannels = deps.readInitialChannels?.(id, accountRequests.signal)
       .then(list => {
-        if (!list.ok && list.kind === 'http' && list.status === 401) reportEnded()
+        if (isSessionEnded(list)) reportEnded()
         return list
       })
     const initial = startInitialSelection({

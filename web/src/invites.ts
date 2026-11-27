@@ -12,7 +12,7 @@ export function createInvites(org: string, onEnded: () => void, onUnavailable: (
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
   function close() { generation++; closed = true; state = { ...state, invites: [], nextCursor: undefined, loading: false, busy: false }; listeners.forEach(l => l()); listeners.clear() }
   function observe<T>(r: api.Result<T>) {
-    if (!r.ok && r.kind === 'http' && r.status === 401) onEnded()
+    if (api.isSessionEnded(r)) onEnded()
     else if (!closed && !r.ok && api.isOrganizationUnavailable(r)) { close(); onUnavailable() }
     return r
   }
@@ -59,7 +59,7 @@ export function createInvites(org: string, onEnded: () => void, onUnavailable: (
     const pending = deps.revokeInvite(org, id)
       .catch((): api.Result<undefined> => ({ ok: false, kind: 'network' })).then(r => {
         // Account Session loss still applies after this operation's deadline.
-        return own === generation || !r.ok && r.kind === 'http' && r.status === 401 ? observe(r) : r
+        return own === generation || api.isSessionEnded(r) ? observe(r) : r
       })
     const r = await deadlines.wait(pending, { ok: false, kind: 'network' }, { timeoutMs: 10_000 })
     if (closed || own !== generation) return false
