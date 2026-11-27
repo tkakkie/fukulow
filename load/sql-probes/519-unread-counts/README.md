@@ -91,7 +91,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
 
 ### F2 send comparison (`--f2`)
 
-The Mac smoke uses only F2, 300 seeded Messages per Channel and 5 s warm/5 s measured blocks. It exercises marked main and Topic sends and Mentions under `fukulow_app` with RLS. It verifies the migration and zero count discrepancies before and after the block. Smoke produces no stop-rule verdict.
+The Mac smoke runs one pre-F2 block followed by one F2 block, with 300 seeded Messages per Channel and 5 s warm/5 s measured per block. It verifies both migration chains, fresh main and Topic sends with Mentions under `fukulow_app` with RLS, and zero count discrepancies before and after sends. Smoke is labeled SMOKE / NOT EVIDENCE.
 
 ```sh
 node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --f2 --out /absolute/new/f2-smoke
@@ -107,10 +107,17 @@ node load/sql-probes/519-unread-counts/stability.ts --stage formal --f2 \
   --queue /absolute/519-f2-queue.json --out /absolute/new/f2-placement.json
 ```
 
-- Current stays at `5ef561e5` and final applies only A3 from `fd6a5949` and UPDATE-first from `c672b0a4`. Both keep `sql/send-current.sql`. F2 uses the same full seed and applies the exact migration chain through F2 from pre-F2 base `6e2d1d4d`. On the F2 clone, populate the Create log from the seed for #620's bijection check before applying the chain.
-- F2's fresh-send SQL mirrors the sequence UPSERT, Topic join/record, marked Message INSERT and Mention writes in Rust. The SQL probe measures the database writes in one routine call per send and skips application authorization, search indexing, HTTP and delivery. The F2 arm includes #620's removal of the Create-log write and the Topic paging index carried by its production schema. Those differences also affect WAL/send and tps.
-- Use the same settings, RLS role, 8 clients/4 threads, forced checkpoint, 60 s warm and 120 s measured work. Both counted templates are recounted. Each block uses a fresh clone, with the 45 min `message_counts_check` cap after every final and F2 block. Migration drift outside the pinned chain fails setup. Source SHA and SQL hashes are written to `metadata.json`.
-- Fixed order by group of three: current/final/F2, final/F2/current, F2/current/final. Use the placement report to verify the host evidence before interpreting results. `stop-rule-f2.json` uses the existing limits against current (median WAL/send ≤ 1.20, median tps ≥ 0.90), and `stop-rule.json` still compares final with current.
+- Current stays at `5ef561e5` and final applies only A3 from `fd6a5949` and UPDATE-first from `c672b0a4`. Both use `sql/send-current.sql`. Pre-F2 (`pref2`) applies the exact migration chain at `6e2d1d4d`, and F2 adds only the F2 migration. Both use the same seed with a reconstructed Create log for #620's bijection guard.
+- `sql/send-pref2.sql` and `sql/send-f2.sql` mirror the Rust sequence UPSERT, Topic join and update, Message INSERT and Mention writes. Their only SQL differences are `main_appended`, `scope_appended` and `scope_append_recorded`. Both arms include #620's removal of the Create-log write and the Topic paging index. The probe measures the database writes in one routine call per send and skips application authorization, search indexing, HTTP and delivery.
+- Every block uses a fresh clone, the same settings and RLS role, 8 clients/4 threads, a forced checkpoint, 60 s warm and 120 s measured. `message_counts_check` runs on the final, pre-F2 and F2 templates and after each of their blocks with the 45 min statement timeout. Migration drift outside the pinned chain fails setup. `metadata.json` records the source pins and hashes of the SQL and Rust send files for pre-F2 and F2.
+- The four Williams square rows are the four pairs, in order. Each arm occupies every position once and follows each other arm once within a row.
+  1. current, final, F2, pre-F2
+  2. final, pre-F2, current, F2
+  3. pre-F2, F2, final, current
+  4. F2, current, pre-F2, final
+- The 16 blocks take 48 min of pgbench work, up from 27 min, plus the first-block 150 s settle/reference, setup, checkpoints, cloning, 15 explicit consistency checks and up to 20 min of prelaunch cool-down. The launcher has no whole-job timeout. Allow for a session beyond one hour, including the extra checks. Per-block time, thermal cadence and all existing timeouts still apply.
+- Use the placement report to verify the host evidence before interpreting results. `stop-rule.json` compares final with current and `stop-rule-f2.json` compares F2 with current with the existing median limits (WAL/send ≤ 1.20, tps ≥ 0.90). The summary also shows F2 vs final. Ratios use paired blocks and the probe's existing nearest-rank median (lower middle of four).
+- The report-only **F2 vs pre-F2** and **pre-F2 vs current** sections show each pair and the medians. F2/pre-F2 isolates the counter change. Pre-F2/current includes the #620 and Topic paging changes together. The summary and `stop-rule-f2.json` always display the F2-only flag for a completed comparison. Median F2/pre-F2 WAL/send > 1.20 or tps < 0.90 gives `F2-ONLY REGRESSION`. Otherwise, WAL/send > 1.00 in all four pairs or tps < 1.00 in all four gives `F2-only worsening below limits`. All other results give `no F2-only regression observed`. The flag is informational.
 
 ### Send-cost attribution (`--attribution`)
 

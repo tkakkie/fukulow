@@ -62,7 +62,7 @@ if (values.f2) {
   if (!meta?.f2 || meta.commits?.f2 !== job.commit || meta.harnessCommit !== job.commit || meta.harnessDirty !== false) {
     reasons.push('F2 source commit or harness does not match the launcher pin');
   }
-  const expectedChecks = ['t_final', 't_f2', ...f2Blocks(false).filter(b => b.arm !== 'current').map(b => b.db)];
+  const expectedChecks = ['t_final', 't_f2', 't_pref2', ...f2Blocks(false).filter(b => b.arm !== 'current').map(b => b.db)];
   for (const db of expectedChecks) {
     if (checks.filter((c: { db: string; rows: number; status: string; timeout: string }) =>
       c.db === db && c.rows === 0 && c.status === 'ok' && c.timeout === '45min').length !== 1) {

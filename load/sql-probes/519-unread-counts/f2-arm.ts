@@ -7,9 +7,15 @@ export const f2Migration = '202611271100_unread_counts_scope_total.sql';
 export const topicPageMigration = '202611221101_topics_page.sql';
 export const createCutover = '202611260620_create_from_messages.sql';
 export const f2Send = 'send-f2.sql';
+export const pref2Send = 'send-pref2.sql';
 
-export const f2Order = [['current', 'final', 'f2'], ['final', 'f2', 'current'], ['f2', 'current', 'final']] as const;
-const smokeOrder = [['f2']] as const;
+export const f2Order = [
+  ['current', 'final', 'f2', 'pref2'],
+  ['final', 'pref2', 'current', 'f2'],
+  ['pref2', 'f2', 'final', 'current'],
+  ['f2', 'current', 'pref2', 'final'],
+] as const;
+const smokeOrder = [['pref2', 'f2']] as const;
 export const f2BlockOrder = (smoke: boolean) => smoke ? smokeOrder : f2Order;
 
 export function f2Blocks(smoke: boolean) {
@@ -34,7 +40,8 @@ export function expectF2MigrationDiff(diff: string) {
   if (diff !== `A\t${f2Path}`) throw new Error(`unexpected F2 migration diff from ${f2Base}: ${diff || '(empty)'}`);
 }
 
-export function f2Sources(root: string, git: (...args: string[]) => string, smoke: boolean, pin: string | undefined) {
+export function f2Sources(root: string, readGit: (...args: string[]) => string, smoke: boolean, pin: string | undefined) {
+  const git = (...args: string[]) => readGit(...args).trim();
   const head = git('rev-parse', 'HEAD');
   const commit = pin ?? head;
   if (commit !== head) throw new Error('--f2-source must be the checked-out commit');
@@ -49,8 +56,11 @@ export function f2Sources(root: string, git: (...args: string[]) => string, smok
   if (!smoke && git('status', '--porcelain', '--untracked-files=all') !== '') throw new Error('--f2 diagnostic requires a clean checkout');
   // In smoke mode the author can exercise an uncommitted round. Record the exact bytes used.
   const migration = readFileSync(join(root, f2Path));
-  return { commit, base: f2Base, migration, hashes: Object.fromEntries([f2Path, ...rustSend].map(path =>
-    [path, sha256(readFileSync(join(root, path)))])) };
+  return {
+    commit, base: f2Base, migration,
+    hashes: Object.fromEntries([f2Path, ...rustSend].map(path => [path, hashFile(join(root, path))])),
+    baseHashes: Object.fromEntries(rustSend.map(path => [path, sha256(readGit('show', `${f2Base}:${path}`))])),
+  };
 }
 
 export function f2SeedSql(smoke: boolean) {
@@ -58,14 +68,16 @@ export function f2SeedSql(smoke: boolean) {
   return smoke ? 'sql/seed-f2-smoke.sql' : seed;
 }
 
+export const f2SmokeMessagesPerChannel = 300;
+
 export function f2SmokeSeed(seed: string) {
   const full = 'generate_series(1,2000) s;';
   if (seed.split(full).length !== 2) throw new Error('F2 smoke seed no longer matches the formal seed');
-  return seed.replace(full, 'generate_series(1,300) s;');
+  return seed.replace(full, `generate_series(1,${f2SmokeMessagesPerChannel}) s;`);
 }
 
 // #620 validates the original Create log by bijection before it removes it.
-// The shared probe seed omits the redundant log, so reconstruct it on the F2 clone only.
+// The shared probe seed omits the redundant log, so reconstruct it on each clone that applies #620.
 export const seedCreateLog = `INSERT INTO channel_log
   (organization_id, channel_id, event_seq, kind, message_id, sender, client_message_id)
   SELECT organization_id, channel_id, seq, 'create', id, sender, client_message_id FROM messages;`;

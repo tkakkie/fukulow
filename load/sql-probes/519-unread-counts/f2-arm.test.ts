@@ -1,20 +1,56 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { expectF2MigrationDiff, f2Base, f2Blocks, f2Migration, f2SmokeSeed, f2Sources, validateF2 } from './f2-arm.ts';
-import { sendBlocks } from './probe.ts';
+import { expectF2MigrationDiff, f2Base, f2Blocks, f2Migration, f2Order, f2SmokeSeed, f2Sources, validateF2 } from './f2-arm.ts';
 
-test('F2 smoke runs one F2 block and the formal plan preserves the comparison order', () => {
-  assert.deepEqual(f2Blocks(true), [{ pair: 1, arm: 'f2', order: 1, db: 's1_f2' }]);
+test('F2 smoke exercises just the reference and F2', () => {
+  assert.deepEqual(f2Blocks(true), [
+    { pair: 1, arm: 'pref2', order: 1, db: 's1_pref2' },
+    { pair: 1, arm: 'f2', order: 2, db: 's2_f2' },
+  ]);
+});
+
+test('the four-pair F2 plan balances position and immediate predecessors within each pair', () => {
   const blocks = f2Blocks(false);
-  assert.deepEqual(blocks.map(b => b.arm), ['current', 'final', 'f2', 'final', 'f2', 'current', 'f2', 'current', 'final']);
-  assert.deepEqual(blocks.filter(b => b.arm !== 'f2').map(({ pair, arm }) => ({ pair, arm })),
-    sendBlocks([['current', 'final'], ['final', 'current'], ['current', 'final']]).map(({ pair, arm }) => ({ pair, arm })));
-  assert.equal(new Set(blocks.map(b => b.db)).size, 9);
+  const arms = ['current', 'f2', 'final', 'pref2'];
+  assert.equal(f2Order.length, 4);
+  assert.equal(blocks.length, 16);
+  assert.equal(new Set(blocks.map(b => b.db)).size, 16);
+  for (const [i, row] of f2Order.entries()) {
+    assert.deepEqual([...row].sort(), arms);
+    assert.deepEqual(blocks.slice(4 * i, 4 * i + 4), row.map((arm, j) => {
+      const order = 4 * i + j + 1;
+      return { pair: i + 1, arm, order, db: `s${order}_${arm}` };
+    }));
+    assert.deepEqual(f2Order.map(other => other[i]).sort(), arms);
+  }
+  for (const arm of arms) {
+    const predecessors = f2Order.flatMap(row => row.slice(1).flatMap((next, i) => next === arm ? [row[i]] : []));
+    assert.deepEqual(predecessors.sort(), arms.filter(other => other !== arm));
+  }
+});
+
+test('F2 and pre-F2 send SQL differ only in the scope counter changes', () => {
+  let sql = readFileSync(new URL('./sql/send-f2.sql', import.meta.url), 'utf8');
+  for (const [counterSql, preF2Sql] of [
+    [', main_appended)', ')'],
+    [', (NOT in_topic)::integer)', ')'],
+    [',\n      main_appended = channel_message_sequences.main_appended + EXCLUDED.main_appended', ''],
+    [', scope_appended)', ')'],
+    ['topic_name, s, s, 1, 1)', 'topic_name, s, s, 1)'],
+    [', scope_append_recorded)', ')'],
+    ['tid, NULL, NULL, true)', 'tid, NULL, NULL)'],
+    [', scope_appended = scope_appended + 1', ''],
+  ]) {
+    assert.equal(sql.split(counterSql).length, 2, counterSql);
+    sql = sql.replace(counterSql, preF2Sql);
+  }
+  assert.equal(sql, readFileSync(new URL('./sql/send-pref2.sql', import.meta.url), 'utf8'));
 });
 
 test('F2 CLI rejects an unplaced or unpinned diagnostic before host setup', () => {
@@ -47,8 +83,9 @@ test('F2 pins the checkout, records content hashes and rejects live migration dr
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const path = `server/migrations/${f2Migration}`;
   const commit = 'b'.repeat(40);
-  for (const file of [path, 'server/src/messages/log.rs', 'server/src/messages/topics.rs',
-    'server/src/messages/send/admitted.rs', 'server/src/messages/mentions.rs']) {
+  const rustFiles = ['server/src/messages/log.rs', 'server/src/messages/topics.rs',
+    'server/src/messages/send/admitted.rs', 'server/src/messages/mentions.rs'];
+  for (const file of [path, ...rustFiles]) {
     mkdirSync(join(root, file, '..'), { recursive: true });
     writeFileSync(join(root, file), 'abc');
   }
@@ -59,12 +96,18 @@ test('F2 pins the checkout, records content hashes and rejects live migration dr
     if (cmd === 'merge-base') return f2Base;
     if (cmd === 'ls-tree') return f2Migration;
     if (cmd === 'status') return status;
+    if (cmd === 'show') {
+      assert.ok(rustFiles.some(file => args[0] === `${f2Base}:${file}`));
+      return `${args[0]}\n`;
+    }
     assert.equal(cmd, 'diff');
     return args[1] === f2Base ? `A\t${path}` : worktreeDiff;
   };
   const source = f2Sources(root, git, false, commit);
   assert.equal(source.commit, commit);
   assert.equal(source.hashes[path], 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.deepEqual(source.baseHashes, Object.fromEntries(rustFiles.map(file =>
+    [file, createHash('sha256').update(`${f2Base}:${file}\n`).digest('hex')])));
   assert.throws(() => f2Sources(root, git, false, f2Base), /must be the checked-out commit/);
   status = '?? load/extra.sql';
   assert.throws(() => f2Sources(root, git, false, commit), /clean checkout/);

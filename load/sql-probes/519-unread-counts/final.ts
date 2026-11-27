@@ -23,8 +23,9 @@ import { attributionSettings, boundaryCommandArgs, postgresSettingsArgs, sendPgb
 import { attributionMetadata, diffSnapshots, walWindowBytes, type AttributionBlock, type Snapshot } from './attribution.ts';
 import { inspectWal, installAttributionSql, parseBoundary, snapshotSql, walDiskPreflight } from './attribution-sql.ts';
 import { attributionMarkdown, summarizeAttribution } from './attribution-summary.ts';
-import { createCutover, f2Base, f2BlockOrder, f2Blocks, f2Migration, f2SeedSql, f2Send, f2SmokeSeed,
-  f2Sources, hashFile, seedCreateLog, topicPageMigration, validateF2 } from './f2-arm.ts';
+import { createCutover, f2Base, f2BlockOrder, f2Blocks, f2Migration, f2SeedSql, f2Send, f2SmokeMessagesPerChannel, f2SmokeSeed,
+  f2Sources, hashFile, pref2Send, seedCreateLog, topicPageMigration, validateF2 } from './f2-arm.ts';
+import { f2ReferenceMarkdown, f2ReferenceReport } from './f2-report.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
@@ -60,7 +61,8 @@ if (frequencyStage !== undefined && (smoke || !sendsOnly)) throw new Error('#796
 const request = frequencyStage === undefined ? null : frequencyRequest(frequencyStage, values['perf-helper'], values['control-review'], values['permission-check'], launchSession, cpuSets, marker);
 const control = request?.stage === 'control';
 type FinalArm = 'current' | 'final';
-type SendArm = FinalArm | 'f2';
+type F2Arm = 'pref2' | 'f2';
+type SendArm = FinalArm | F2Arm;
 const pins: Record<FinalArm, string> = { current: '5ef561e5', final: 'fd6a5949' };
 const a3Migration = '202611221100_unread_counts.sql';
 // Re-measure after #814 (#820, approved 2026-11-23): the final arm also applies the UPDATE-first
@@ -89,7 +91,7 @@ const run = (cmd: string, args: string[], input?: string) => {
 const git = (...args: string[]) => run('git', args).trim();
 const commits = { current: git('rev-parse', pins.current + '^{commit}'), final: git('rev-parse', pins.final + '^{commit}') };
 if (git('rev-parse', commits.final + '^') !== commits.current) throw new Error('final pin must be the direct child of current');
-const f2Source = f2 ? f2Sources(root, git, smoke, values['f2-source']) : null;
+const f2Source = f2 ? f2Sources(root, (...args) => run('git', args), smoke, values['f2-source']) : null;
 mkdirSync(out, { mode: 0o700 });
 mkdirSync(join(out, 'plans'));
 mkdirSync(join(out, 'latency'));
@@ -115,20 +117,23 @@ if (git('diff', '--name-status', commits.final, update, '--', `server/migrations
 writeFileSync(join(work, a3Update), git('show', `${update}:server/migrations/${a3Update}`) + '\n');
 // Only the SQL this probe opens, readable by the container postgres user whatever the umask; a
 // symlinked input throws (stage-sql.ts).
-stageSql(join(root, 'load/sql-probes/519-unread-counts/sql'), work, f2Source ? [...stagedSql, f2Send] : stagedSql);
-const f2Migrations = [a3Migration, topicPageMigration, a3Update, createCutover, f2Migration];
+stageSql(join(root, 'load/sql-probes/519-unread-counts/sql'), work, f2Source ? [...stagedSql, f2Send, pref2Send] : stagedSql);
+const pref2Migrations = [a3Migration, topicPageMigration, a3Update, createCutover];
+const f2Migrations = [...pref2Migrations, f2Migration];
 const seed = f2Source ? f2SeedSql(smoke) : 'sql/seed.sql';
 if (f2Source) {
-  for (const name of [topicPageMigration, createCutover]) {
-    writeFileSync(join(work, name), run('git', ['show', `${f2Base}:server/migrations/${name}`]));
-  }
-  for (const name of [a3Migration, a3Update]) {
-    const pinned = git('show', `${f2Base}:server/migrations/${name}`);
-    if (readFileSync(join(work, name), 'utf8') !== pinned + '\n') throw new Error(`F2 base changed ${name}`);
-  }
   const delta = git('diff', '--name-status', commits.current, f2Base, '--', 'server/migrations');
-  const expected = f2Migrations.slice(0, -1).map(name => `A\tserver/migrations/${name}`).join('\n');
+  const expected = pref2Migrations.map(name => `A\tserver/migrations/${name}`).join('\n');
   if (delta !== expected) throw new Error(`unexpected pre-F2 migration diff: ${delta}`);
+  for (const name of pref2Migrations) {
+    const path = join(work, name);
+    const pinned = run('git', ['show', `${f2Base}:server/migrations/${name}`]);
+    if (name === a3Migration || name === a3Update) {
+      if (readFileSync(path, 'utf8') !== pinned) throw new Error(`F2 base changed ${name}`);
+    } else {
+      writeFileSync(path, pinned);
+    }
+  }
   writeFileSync(join(work, f2Migration), f2Source.migration);
   if (smoke) writeFileSync(join(work, seed), f2SmokeSeed(readFileSync(join(work, 'sql/seed.sql'), 'utf8')));
 }
@@ -156,10 +161,11 @@ const countsCheck = (db: string, label: string) => bounded(db, `message_counts_c
   `SELECT count(*) FROM message_counts_check('${organization}');\n`, c => countsCheckOutcome(c.status, c.stdout ?? '', c.stderr ?? ''));
 const migrateA3 = (db: string) => bounded(db, `A3 migration on ${db} (backfill guard runs message_counts_check)`,
   `BEGIN;\n\\i /work/${a3Migration}\nCOMMIT;\nBEGIN;\n\\i /work/${a3Update}\nCOMMIT;\n`, c => migrationOutcome(c.status, c.stderr ?? ''));
-const migrateF2 = (db: string) => {
+const migrateF2Arm = (db: string, arm: F2Arm) => {
   psql(db, seedCreateLog);
-  bounded(db, `F2 migration chain on ${db} (backfill guards run message_counts_check)`,
-    f2Migrations.map(name => `BEGIN;\n\\i /work/${name}\nCOMMIT;\n`).join(''), c => migrationOutcome(c.status, c.stderr ?? ''));
+  const chain = arm === 'pref2' ? pref2Migrations : f2Migrations;
+  bounded(db, `${arm === 'pref2' ? 'pre-F2' : 'F2'} migration chain on ${db} (backfill guards run message_counts_check)`,
+    chain.map(name => `BEGIN;\n\\i /work/${name}\nCOMMIT;\n`).join(''), c => migrationOutcome(c.status, c.stderr ?? ''));
 };
 // Host state around each block. A diagnostic block refuses to start next to any other running
 // container; after the block, any container still running or started during it fails the block.
@@ -316,7 +322,7 @@ function sendBlock(db: string, label: string, order: number, arm: SendArm, refer
       if (latencies.length !== result.transactions) errors.push(`${latencies.length} log lines for ${result.transactions} transactions`);
       const walBytes = attribution ? walWindowBytes(before.lsn, after.lsn) : Number(after.lsnBytes) - Number(before.lsnBytes);
       if (attribution) {
-        if (arm === 'f2') throw new Error('F2 attribution is unsupported');
+        if (arm === 'f2' || arm === 'pref2') throw new Error('F2 attribution is unsupported');
         if (!before.snapshot || !after.snapshot) throw new Error('Missing attribution snapshots');
         const stats = diffSnapshots(before.snapshot, after.snapshot, result.transactions);
         const wal = inspectWal(sql => psql(db, sql), before.lsn, after.lsn, result.transactions);
@@ -351,16 +357,18 @@ const keepBlock = (extra: Record<string, unknown> = {}) => (row: SendRow) => {
   save('sends.json', { ...extra, sends });
 };
 // Send re-measure: each block gets a fresh clone of its arm's template, which was vacuumed and
-// analyzed before any block, and is dropped after the block (and its check, for the final arm).
+// analyzed before any block, and is dropped after the block and any consistency check.
 async function freshSends() {
-  const arms: SendArm[] = f2 ? smoke ? ['f2'] : ['current', 'final', 'f2'] : control ? ['current'] : ['current', 'final'];
+  const arms: SendArm[] = f2 ? [...new Set(f2BlockOrder(smoke).flat())] : control ? ['current'] : ['current', 'final'];
+  const sendSql: Record<SendArm, string> = { current: 'send-current.sql', final: 'send-current.sql', pref2: pref2Send, f2: f2Send };
   for (const arm of arms) {
-    psql('postgres', `CREATE DATABASE t_${arm} TEMPLATE p519;`);
-    if (arm === 'final') migrateA3('t_final');
-    if (arm === 'f2') migrateF2('t_f2');
-    file(`t_${arm}`, arm === 'f2' ? `sql/${f2Send}` : 'sql/send-current.sql');
-    psql(`t_${arm}`, 'VACUUM (ANALYZE);');
-    if (arm !== 'current') countsCheck(`t_${arm}`, `${arm} template, before the sends`);
+    const db = `t_${arm}`;
+    psql('postgres', `CREATE DATABASE ${db} TEMPLATE p519;`);
+    if (arm === 'final') migrateA3(db);
+    if (arm === 'f2' || arm === 'pref2') migrateF2Arm(db, arm);
+    file(db, `sql/${sendSql[arm]}`);
+    psql(db, 'VACUUM (ANALYZE);');
+    if (arm !== 'current') countsCheck(db, `${arm} template, before the sends`);
   }
   const plan = f2 ? f2Blocks(smoke) : control ? [1, 2, 3].map(order => ({ order, pair: 1, arm: 'current' as const, db: `s${order}_current` })) : sendBlocks(benchOrder);
   for (const b of plan) {
@@ -379,16 +387,17 @@ async function freshSends() {
     if (frequency) await frequency.runBlock(b.order, () => psql(template, 'CHECKPOINT;'), clone, block);
     else await block(clone());
     if (b.arm !== 'current') countsCheck(b.db, `after block ${b.order}`);
-    if (smoke && b.arm === 'f2') {
+    if (smoke && (b.arm === 'f2' || b.arm === 'pref2')) {
+      const fresh = b.arm === 'f2' ? 'm.scope_append_recorded' : `m.seq > ${f2SmokeMessagesPerChannel}`;
       const exercised = JSON.parse(psql(b.db, `SELECT json_build_object(
         'main', count(*) FILTER (WHERE m.topic_id IS NULL),
         'topic', count(*) FILTER (WHERE m.topic_id IS NOT NULL),
         'mention', count(*) FILTER (WHERE mm.message_id IS NOT NULL))
         FROM messages m LEFT JOIN message_mentions mm
           ON (mm.organization_id, mm.message_id) = (m.organization_id, m.id)
-        WHERE m.scope_append_recorded;`));
-      if (!(exercised.main > 0 && exercised.topic > 0 && exercised.mention > 0)) throw new Error('F2 smoke must exercise marked main, Topic and Mention sends');
-      save('f2-smoke-paths.json', exercised);
+        WHERE ${fresh};`));
+      if (!(exercised.main > 0 && exercised.topic > 0 && exercised.mention > 0)) throw new Error(`${b.arm} smoke must exercise fresh main, Topic and Mention sends`);
+      save(`${b.arm}-smoke-paths.json`, exercised);
     }
     psql('postgres', `DROP DATABASE ${b.db} WITH (FORCE);`);
   }
@@ -450,7 +459,8 @@ try {
   file('p519', seed);
   const metadata = {
     status: f2 && smoke ? 'SMOKE / NOT EVIDENCE' : attribution ? attributionMetadata.status : 'DIAGNOSTIC / NOT EVALUATED (stop rule only)',
-    mode: smoke ? 'smoke' : 'diagnostic', sendsOnly, started, commits: { ...commits, update, ...(f2Source ? { f2: f2Source.commit } : {}) }, a3Migration, a3Update,
+    mode: smoke ? 'smoke' : 'diagnostic', sendsOnly, started,
+    commits: { ...commits, update, ...(f2Source ? { f2: f2Source.commit, pref2: f2Source.base } : {}) }, a3Migration, a3Update,
     harnessCommit: git('rev-parse', 'HEAD'), harnessDirty: git('status', '--porcelain', '--', 'load/sql-probes/519-unread-counts') !== '',
     image, imageId: run('docker', ['image', 'inspect', '--format', '{{.Id}}', image]).trim(),
     settings: JSON.parse(psql('p519', `SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN
@@ -467,8 +477,11 @@ try {
       protocol: 'pgbench simple protocol, no named prepared statements', sourceHashes: {
       ...f2Source.hashes, ...Object.fromEntries([...f2Migrations, seed, `sql/${f2Send}`, 'sql/send-current.sql', 'sql/bench.pgb']
         .map(path => [path, hashFile(join(work, path))])),
+    } }, pref2: { base: f2Source.base, migrations: pref2Migrations, seed, sourceHashes: {
+      ...f2Source.baseHashes, ...Object.fromEntries([...pref2Migrations, seed, `sql/${pref2Send}`, 'sql/bench.pgb']
+        .map(path => [path, hashFile(join(work, path))])),
     } } } : {}),
-    countsCheck: { timeout: checkTimeout, when: f2 ? (smoke ? 'F2 template and F2 block' : 'final and F2 templates and blocks')
+    countsCheck: { timeout: checkTimeout, when: f2 ? (smoke ? 'pre-F2 and F2 templates and blocks' : 'final, pre-F2 and F2 templates and blocks')
       : sendsOnly ? 'final template, then after every final block' : 'after the read cuts and after the sends' },
     ...(attribution ? { attribution: { ...attributionMetadata, settings: attributionSettings, walKeepGiB, walDisk } }
       : { stopRule: stopRule([{ pair: 1, walBytesPerSend: 1, tps: 1 }], [{ pair: 1, walBytesPerSend: 1, tps: 1 }]).limits }),
@@ -513,12 +526,15 @@ try {
     countsCheck('s_final', 'after the sends');
   }
   if (f2 && smoke) {
-    console.log('F2 smoke completed. No stop-rule verdict.');
+    console.log('SMOKE / NOT EVIDENCE: pre-F2 and F2 completed.');
   } else if (!control && !attribution) {
-    const verdict = stopRule(sends.filter(s => s.arm === 'current'), sends.filter(s => s.arm === 'final'));
+    const currentSends = sends.filter(s => s.arm === 'current');
+    const f2Sends = sends.filter(s => s.arm === 'f2');
+    const verdict = stopRule(currentSends, sends.filter(s => s.arm === 'final'));
     save('stop-rule.json', verdict);
-    const f2Verdict = f2 ? stopRule(sends.filter(s => s.arm === 'current'), sends.filter(s => s.arm === 'f2')) : null;
-    if (f2Verdict) save('stop-rule-f2.json', f2Verdict);
+    const f2Verdict = f2 ? stopRule(currentSends, f2Sends) : null;
+    const f2Reference = f2 ? f2ReferenceReport(currentSends, sends.filter(s => s.arm === 'pref2'), f2Sends) : null;
+    if (f2Verdict) save('stop-rule-f2.json', { ...f2Verdict, ...f2Reference });
     const lines = [
       ...(reads.length === 0 ? [] : ['| cut | arm | p50 ms | p95 ms | EXPLAIN ms | blocks | checksum |', '|---:|---|---:|---:|---:|---:|---|',
         ...reads.map(r => `| ${r.cut} | ${r.arm} | ${r.p50Ms} | ${r.p95Ms} | ${r.executionMs} | ${r.sharedBlocks} | ${r.checksum} |`), '']),
@@ -534,7 +550,8 @@ try {
         ...f2Verdict.ratios.map(r => `- Pair ${r.pair}: WAL/send ${r.walPerSend.toFixed(3)}, tps ${r.tps.toFixed(3)}`),
         '', `Median WAL/send ratio ${f2Verdict.medianWalPerSend.toFixed(3)}, median tps ratio ${f2Verdict.medianTps.toFixed(3)} -> ${f2Verdict.stop ? 'STOP' : 'no stop'}`,
         '', '### F2 vs final', '',
-        ...f2Verdict.ratios.map((r, i) => `- Pair ${r.pair}: WAL/send ${(r.walPerSend / verdict.ratios[i].walPerSend).toFixed(3)}, tps ${(r.tps / verdict.ratios[i].tps).toFixed(3)}`)] : [])];
+        ...f2Verdict.ratios.map((r, i) => `- Pair ${r.pair}: WAL/send ${(r.walPerSend / verdict.ratios[i].walPerSend).toFixed(3)}, tps ${(r.tps / verdict.ratios[i].tps).toFixed(3)}`)] : []),
+      ...(f2Reference ? f2ReferenceMarkdown(f2Reference) : [])];
     const title = sendsOnly ? '#519 §10 step 1 send re-measure' : '#519 §10 step 1 final-design probe';
     writeFileSync(join(out, 'summary.md'), `# ${title} (${metadata.status})\n\n${lines.join('\n')}\n`);
     console.log(lines.join('\n'));

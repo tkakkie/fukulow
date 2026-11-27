@@ -611,7 +611,7 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
     noAffinity.metadata.frequencyStage = 'formal';
     assert.deepEqual(judgeV3(noAffinity, { id: sid, thermalSampleSeconds: 5, go }, floors, 'formal', 'control-digest').invalid, []);
   });
-  await t.test('F2 uses the same v3 checks across all nine blocks', () => {
+  await t.test('F2 uses the same v3 checks across all sixteen blocks', () => {
     const order = f2Order.flat();
     const fixture = run('s1', {}, { ncpu: 16, armOrder: order });
     const comparison: RunInput = { ...r, samples: fixture.samples, sends: fixture.sends,
@@ -623,10 +623,12 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
     const bound = { id: sid, thermalSampleSeconds: 5, go };
     const assessF2 = () => judgeV3(comparison, bound, floors, 'formal', 'control-digest', order);
     assert.deepEqual(assessF2().invalid, []);
-    assert.ok(judgeV3(comparison, bound, floors, 'formal', 'control-digest').invalid.includes('9 blocks, not 6'));
-    comparison.sends[8].arm = 'f2';
-    comparison.samples = comparison.samples.filter(s => s.at !== new Date(t0 + 1_780_000).toISOString());
+    assert.ok(judgeV3(comparison, bound, floors, 'formal', 'control-digest').invalid.includes('16 blocks, not 6'));
+    const last = comparison.sends.at(-1)!;
+    last.arm = 'f2';
+    const missedTick = new Date(last.pgbenchWindow!.endMs - 20_000).toISOString();
+    comparison.samples = comparison.samples.filter(s => s.at !== missedTick);
     assert.ok(assessF2().invalid.includes('incorrect send arm order'));
-    assert.match(assessF2().invalid.join(), /block 9: missing 5 s thermal tick/);
+    assert.match(assessF2().invalid.join(), /block 16: missing 5 s thermal tick/);
   });
 });
