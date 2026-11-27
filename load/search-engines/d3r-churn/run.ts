@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { docker, save } from '../bench.ts';
 import { callerLock, checkIdle, hostPlacement } from '../d3r-leak/host.ts';
+import { guardIdle } from './host-guard.ts';
 import { refuseLeftovers } from '../runtime.ts';
 import { cleanup, containers, names, type Names } from './cluster.ts';
 import { git, loadManifest } from './manifest.ts';
@@ -34,7 +35,7 @@ async function supervise(args: Options, argv: string[], resources: Names, lock?:
   const check = (owned: string[]) => {
     try { assert.deepEqual(callerLock(), lock, 'Launcher identity changed'); }
     catch { hostBusy = false; }
-    try { checkIdle(owned, child.pid ? [child.pid] : []); }
+    try { guardIdle(owned, child.pid ? [child.pid] : []); }
     catch { idle = false; }
     try {
       appendFileSync(join(args.out, 'host-guard.jsonl'), JSON.stringify({at: new Date().toISOString(), lock, hostBusy, idle}) + '\n');

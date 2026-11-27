@@ -1,5 +1,5 @@
 {
-  "sha256": "ddaefc8f77e01317f277c06f145a9cd46a281fd7952c981d6c6f458c0c85706c",
+  "sha256": "768056823e3348c9f38145936b75092eaee137b13209d5556ca0f16ff297540b",
   "frozen": {
     "version": 20,
     "experiment": "#689 item 4c Phase A",
@@ -453,6 +453,10 @@
         "sha256": "061fa395b19e3a71091c5644012ca452c2cc8650d270f891409b3f9f9cb5638b"
       },
       {
+        "path": "load/search-engines/d3r-churn/host-guard.ts",
+        "sha256": "5a282a8d13680b854b873fa614ff79d79cee83aa687c6dcb855575a85d577840"
+      },
+      {
         "path": "load/search-engines/d3r-churn/identity.ts",
         "sha256": "0f209ae219fbfc73920e864546a3aa6ee33c15c6a8032f958eeecb1ec44a9428"
       },
@@ -474,7 +478,7 @@
       },
       {
         "path": "load/search-engines/d3r-churn/run.ts",
-        "sha256": "a1627496916821126594504c3cd5dc1a14c23ced55df3787f6f16fb18763f5ba"
+        "sha256": "76bdff0d01543f42e3eed244be1d1a95bf8b56d5d93e00f9c63a0baebdc15e95"
       },
       {
         "path": "load/search-engines/d3r-churn/sampler.ts",
@@ -498,7 +502,7 @@
       },
       {
         "path": "load/search-engines/d3r-churn/windows.ts",
-        "sha256": "72526205b780df6f076ee1f069aea5c3cc17fcf858e3717d0287b445d262fd15"
+        "sha256": "e43cd3560af84553ee8f581f33acdfe2cfb228267364d5fe5124641e0aa05897"
       },
       {
         "path": "load/search-engines/d3r-churn/worker.ts",

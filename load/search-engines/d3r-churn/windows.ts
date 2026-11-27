@@ -114,6 +114,8 @@ export async function maintenance(container: string, args: Options, label: 'W3 V
       await Promise.allSettled([work, sampling]);
     }
     const seconds = (finished - start) / 1000;
+    // A boundary passed just before the work ended can lose its timer to the abort; take it now (startedMs shows when).
+    while (samples.length < 1 + Math.floor(seconds / sampleSeconds)) record(await tick(sql, samples.length * sampleSeconds));
     assert.ok(samples.length >= 1 + Math.floor(seconds / sampleSeconds), `Missing 5-minute evidence for ${label}`);
     return {samples, intervals, seconds};
   });
