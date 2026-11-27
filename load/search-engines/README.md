@@ -16,6 +16,6 @@ The paired d3r runner lives in `d3r-leak/`. Its independent manifest pins the pr
 5. Obtain the maintainer's explicit go for one formal run. Both rehearsal and formal runs use a clean checkout and a fresh output directory. The caller owns `runs/HOST-BUSY` and supplies the launcher job and session. Run the coordinator on the #796 housekeeping CPUs. PostgreSQL and pgbench use separate #796 CPU sets.
 6. Take the formal verdict only from that run, after verified cleanup. There is no automatic rerun.
 
-The formal command accepts `--formal --out=<new-directory>`. The manifest already freezes the E, S, V and A/A assignments. Its remaining unset input is K. Select K in the smoke, freeze it in the manifest, and complete the full-size rehearsal before the formal go.
+The formal command accepts `--formal --out=<new-directory>`. The manifest freezes the E, S, V and A/A assignments and K = 128. K is the smallest smoke candidate (32, 128, 512) whose P ratios met the registered 1.5 target at both p50 and p95: 2.27 and 2.06 (32 gave 1.34 and 1.41). The full-size rehearsal must complete before the formal go.
 
 For V, each arm's fixture record contains SHA-256 fingerprints of the complete Message and search-term rows. Separate per-arm visibility records capture the heap pages occupied by the C2-Q4 slots before and after sampling. Both heaps must have every such page all-visible in the vacuumed reference and every such bit clear in the delayed-insert arm.

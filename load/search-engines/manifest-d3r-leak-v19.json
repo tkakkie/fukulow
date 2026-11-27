@@ -1,5 +1,5 @@
 {
-  "sha256": "881509e85503ad4a52623f280dcc2adcc6cb22272ae10f714c3f87f1bf94be39",
+  "sha256": "1806fb3d4dcff304a37f6cd982bde8cd266c1dd64743e1f633ec440ef309dbe9",
   "frozen": {
     "version": 19,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -84,7 +84,7 @@
       },
       "negative": "C2-Q4"
     },
-    "positiveK": null,
+    "positiveK": 128,
     "migrations": [
       "server/migrations/202611080001_auth.sql",
       "server/migrations/202611090001_channels.sql",
