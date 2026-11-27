@@ -158,17 +158,10 @@ impl<'a> Step<'a> {
                 self.out.effects.push(Effect::Unsubscribe { channel: id });
             }
             self.invalidate(id, true);
-            let mut pending = (*old.pending).clone();
-            for p in &mut pending {
-                self.cancel(p.retry_wait);
-                p.retry_wait = None;
-                if matches!(p.state, PendingState::Sending | PendingState::Throttled) {
-                    p.state = PendingState::Unknown;
-                }
-            }
+            let pending = self.interrupt_pending_sends(&old.pending);
             *self.channel(id) = ChannelView {
                 watched: old.watched,
-                pending: Rc::new(pending),
+                pending,
                 state: if old.state == Availability::Unavailable {
                     Availability::Unavailable
                 } else {
@@ -303,58 +296,17 @@ impl<'a> Step<'a> {
             self.channel(id).wait = Some(n);
         }
     }
-    pub fn attempt(&mut self, id: Uuid, mut p: Pending) {
-        self.cancel(p.retry_wait);
-        let n = self.token();
-        p.state = PendingState::Sending;
-        p.request = n;
-        p.retry_wait = None;
-        let c = self.channel(id);
-        let mut pending = (*c.pending).clone();
-        if let Some(index) = pending
-            .iter()
-            .position(|v| v.client_message_id == p.client_message_id)
-        {
-            pending[index] = p.clone();
-        } else {
-            pending.push(p.clone());
-        }
-        c.pending = Rc::new(pending);
-        self.core.requests.insert(
-            n,
-            Request::Send {
-                channel: id,
-                client_message_id: p.client_message_id,
-                stale: false,
-            },
-        );
-        self.metadata_changed = true;
-        self.out.effects.push(Effect::Send {
-            history_generation: self.core.session.history_generation,
-            id: n,
-            channel: id,
-            client_message_id: p.client_message_id,
-            body: p.body,
-            reply_to: p.reply_to,
-            topic_name: p.topic_name,
-        });
-    }
     pub fn unavailable(&mut self, id: Uuid) {
         self.invalidate(id, false);
         let c = self.channel(id).clone();
         if c.subscription.is_some() && self.core.session.connected {
             self.out.effects.push(Effect::Unsubscribe { channel: id });
         }
-        let mut pending = (*c.pending).clone();
-        for p in &mut pending {
-            self.cancel(p.retry_wait);
-            p.state = PendingState::Failed;
-            p.retry_wait = None;
-        }
+        let pending = self.fail_pending_sends(&c.pending);
         let c = self.channel(id);
         c.subscription = None;
         c.state = Availability::Unavailable;
-        c.pending = Rc::new(pending);
+        c.pending = pending;
         for r in self.core.requests.values_mut() {
             if r.channel() == id && matches!(r, Request::Send { .. }) {
                 r.invalidate();

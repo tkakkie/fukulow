@@ -27,33 +27,6 @@ fn same_message(a: &Message, b: &Message) -> bool {
         && a.mentions == b.mentions
 }
 impl Step<'_> {
-    pub fn settle(&mut self, id: Uuid, records: &[Message]) {
-        let self_id = self.core.session.self_id;
-        let settled: Vec<_> = records
-            .iter()
-            .filter(|m| m.channel_id == id && m.sender == self_id)
-            .map(|m| m.client_message_id)
-            .collect();
-        let pending = self.channel(id).pending.clone();
-        if pending
-            .iter()
-            .any(|p| settled.contains(&p.client_message_id))
-        {
-            for p in pending
-                .iter()
-                .filter(|p| settled.contains(&p.client_message_id))
-            {
-                self.cancel(p.retry_wait);
-            }
-            self.channel(id).pending = Rc::new(
-                pending
-                    .iter()
-                    .filter(|p| !settled.contains(&p.client_message_id))
-                    .cloned()
-                    .collect(),
-            );
-        }
-    }
     /// A Create's envelope position is its creation position; a mismatched Create is
     /// dropped rather than moving the cursor past a different event.
     pub(crate) fn envelope_consistent(

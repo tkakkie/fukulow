@@ -40,29 +40,7 @@ impl Step<'_> {
             } if self.core.session.running
                 || self.core.session.organization == Organization::Unavailable =>
             {
-                if let Some(c) = self.core.channel(channel)
-                    && c.pending.iter().any(|p| {
-                        p.client_message_id == client_message_id && p.state != PendingState::Sending
-                    })
-                {
-                    let pending = c.pending.clone();
-                    for p in pending
-                        .iter()
-                        .filter(|p| p.client_message_id == client_message_id)
-                    {
-                        self.cancel(p.retry_wait);
-                    }
-                    self.channel(channel).pending = Rc::new(
-                        pending
-                            .iter()
-                            .filter(|p| {
-                                p.client_message_id != client_message_id
-                                    || p.state == PendingState::Sending
-                            })
-                            .cloned()
-                            .collect(),
-                    );
-                }
+                self.user_discard(channel, client_message_id)
             }
             input if self.core.session.running => self.running(input),
             _ => {}
@@ -79,17 +57,8 @@ impl Step<'_> {
             let c = self.channel(id);
             c.state = Availability::Unavailable;
             c.subscription = None;
-            c.pending = Rc::new(
-                c.pending
-                    .iter()
-                    .map(|p| {
-                        let mut p = p.clone();
-                        p.state = PendingState::Failed;
-                        p.retry_wait = None;
-                        p
-                    })
-                    .collect(),
-            );
+            let pending = c.pending.clone();
+            self.channel(id).pending = self.fail_pending_sends(&pending);
         }
     }
     fn running(&mut self, input: Input) {
@@ -210,68 +179,18 @@ impl Step<'_> {
                 reply_to,
                 topic_name,
                 reply_root_id,
-            } => {
-                // ECMAScript trim includes BOM and excludes Unicode NEL.
-                if body
-                    .trim_matches(|ch: char| {
-                        ch == '\u{feff}' || (ch.is_whitespace() && ch != '\u{85}')
-                    })
-                    .is_empty()
-                    || (reply_to.is_some() && topic_name.as_ref().is_some_and(|s| !s.is_empty()))
-                {
-                    return;
-                }
-                let c = self.channel(id);
-                if c.state == Availability::Unavailable
-                    || c.pending
-                        .iter()
-                        .any(|p| p.client_message_id == client_message_id)
-                {
-                    return;
-                }
-                let reply_root_id = reply_to.map(|parent| {
-                    reply_root_id
-                        .or_else(|| {
-                            c.messages
-                                .iter()
-                                .find(|m| m.id == parent)
-                                .and_then(|m| m.reply_root_id)
-                        })
-                        .unwrap_or(parent)
-                });
-                self.attempt(
-                    id,
-                    Pending {
-                        client_message_id,
-                        body,
-                        state: PendingState::Sending,
-                        request: 0,
-                        retry_wait: None,
-                        failure_code: None,
-                        reply_to,
-                        topic_name: topic_name.filter(|s| !s.is_empty()),
-                        reply_root_id,
-                    },
-                );
-            }
+            } => self.user_send(
+                id,
+                client_message_id,
+                body,
+                reply_to,
+                topic_name,
+                reply_root_id,
+            ),
             Input::UserRetry {
                 channel: id,
                 client_message_id,
-            } => {
-                let c = self.channel(id);
-                if c.state != Availability::Unavailable
-                    && let Some(p) = c
-                        .pending
-                        .iter()
-                        .find(|p| {
-                            p.client_message_id == client_message_id
-                                && p.state == PendingState::Unknown
-                        })
-                        .cloned()
-                {
-                    self.attempt(id, p);
-                }
-            }
+            } => self.user_retry(id, client_message_id),
             Input::Event {
                 connection,
                 event,
@@ -389,17 +308,10 @@ impl Step<'_> {
                     self.out.effects.push(Effect::Unsubscribe { channel: id });
                     self.invalidate(id, true);
                     let pending = self.channel(id).pending.clone();
-                    let mut pending = (*pending).clone();
-                    for p in &mut pending {
-                        self.cancel(p.retry_wait);
-                        if matches!(p.state, PendingState::Sending | PendingState::Throttled) {
-                            p.state = PendingState::Unknown;
-                            p.retry_wait = None;
-                        }
-                    }
+                    let pending = self.interrupt_pending_sends(&pending);
                     *self.channel(id) = ChannelView {
                         watched: true,
-                        pending: Rc::new(pending),
+                        pending,
                         ..ChannelView::default()
                     };
                     self.history(id, Page::Latest, None);
