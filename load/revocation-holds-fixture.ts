@@ -84,3 +84,16 @@ export function holdsFixture(kind: HoldsRun['kind'] = 'fault'): HoldsRun {
   run.trace = parseTrace(jsonl([...traceLines(run), watermarkLine(4)]), true);
   return run;
 }
+
+export function holdsFence(duration: 'short' | 'long' = 'short') {
+  const run = holdsFixture();
+  run.cell = 'Hfence'; run.duration = duration;
+  run.revokedChannels = Array.from({ length: 64 }, (_, i) => channelId(i));
+  run.targets = Array.from({ length: 64 }, (_, i) => target(i));
+  run.setup.targetsReadyAtStall = 64;
+  run.accounts = [run.accounts[0], { revokeStartedAt: 37_000, revokedAt: 37_200, revokeStatus: 200, restoreStartedAt: 42_000, restoredAt: 42_050, restoreStatus: 200 }];
+  run.notices = []; run.sendTiming!.records = [];
+  run.samples = run.samples.map(s => ({ ...s, highWaterMark: s.serverMs >= 39_750 ? 4096 : 0, retryAttempts: s.serverMs >= 41_800 ? 3 * 4096 : 0 }));
+  run.metrics = { ...run.metrics!, revocation_held: 4096, revocation_delivered_after_hold: 0, revocation_retired_fenced: 2048, revocation_retired_retries: 1536 };
+  return run;
+}

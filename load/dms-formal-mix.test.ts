@@ -73,3 +73,25 @@ test('formal creates stay unused and distinct throughout the mixed window in bot
   }
   assert.throws(()=>formalCreatePair(40000),/exhausted/);
 });
+
+test('held assignment and explicit traversal demand make the five-lane mix eligible',async()=>{
+  const {retainedAssignment,demandFormalMix}=await import('./dms-formal-mix.ts');
+  const {dmListState,stepDmList}=await import('../web/src/dm-list.ts');
+  assert.deepEqual(Array.from({length:6},(_,i)=>retainedAssignment(i)),[0,50,0,50,0,50]);
+  assert.deepEqual(Array.from({length:6},(_,i)=>retainedAssignment(i,'held200')),[0,50,200,0,50,200]);
+  for(const held of [0,50,200]) {
+    let state=dmListState();
+    state.rows=Array.from({length:held},(_,i)=>({identity:{id:String(i),kind:'dm' as const,peer:{id:'peer',name:'Peer',active:true}},access:i,used:i}));
+    state=demandFormalMix(state,'absent-peer');
+    const lanes:string[]=[];
+    for(let i=0;i<5;i++) {
+      state=stepDmList(state,{type:'wake',now:0}).state;
+      assert.ok(state.request);
+      const request=state.request;lanes.push(request.lane);
+      // Failures continue to consume attempts; the next iteration checks lane fairness.
+      state=stepDmList(state,{type:'failure',request,retryAt:0,terminal:false}).state;
+    }
+    assert.ok(lanes.includes('delta')&&lanes.includes('coverage')&&lanes.includes('browse')&&lanes.includes('recovery'));
+    if(held)assert.ok(lanes.includes('held'));
+  }
+});

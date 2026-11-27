@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {budgets,judge,judgeLatencies,latencyClasses,type Latencies} from './dms-formal-judgment.ts';
+import {budgets,commonWindow,judge,judgeLatencies,latencyClasses,reconcile,type Latencies} from './dms-formal-judgment.ts';
 import {deferredNames,scenarioAcceptance} from './dms-formal-scenarios.ts';
+import { parseSend } from './dms-formal-results.ts';
 const latencies=(samples=10000):Latencies=>Object.fromEntries(Object.values(latencyClasses).map(([,key])=>[key,{samples,p95:1,p99:2}]));
 const evidence=()=>Object.fromEntries(Object.keys(budgets).map(key=>[key,0]));
 test('aggregate PASS cannot hide an Organization latency FAIL',()=>{
@@ -79,4 +80,33 @@ test('Q4 browsing FAIL cannot be hidden by ten-Organization page PASS',()=>{
   const b=browsing();b.latencies['dm_latency_ms:deep'].p99=251;
   const result=judgeLatencies(latencies(),Array.from({length:10},()=>latencies(1000)),b);
   assert.equal(judge(evidence(),'formal','main',result).rows.find(row=>row.budget==='page.p99')?.status,'FAIL');
+});
+
+test('every missing or failing budget prevents acceptance, including smoke with perfect evidence',()=>{
+  const evidence=Object.fromEntries(Object.keys(budgets).map(key=>[key,0]));
+  assert.equal(judge(evidence,'formal').acceptance,true);
+  for(const [key,limit] of Object.entries(budgets)) {
+    assert.equal(judge({...evidence,[key]:limit+1},'formal').acceptance,false,key);
+    assert.equal(judge({...evidence,[key]:undefined},'formal').acceptance,false,key);
+    assert.equal(judge({...evidence,[key]:NaN},'formal').rows.find(row=>row.budget===key)?.status,'NOT EVALUATED');
+  }
+  assert.equal(judge(evidence,'smoke').acceptance,false);assert.equal(judge(evidence,'smoke').label,'NON-ACCEPTANCE');
+});
+test('common window is minute 10–40, never an artificially shortened intersection',()=>{
+  const starts=Array<number>(11).fill(100000);
+  assert.deepEqual(commonWindow(starts,'formal'),{from:700000,to:2500000});
+  starts[10]++;assert.throws(()=>commonWindow(starts,'formal'),/exact scheduled epoch/);
+  assert.throws(()=>commonWindow(starts.slice(1),'formal'),/eleven/);
+});
+test('ledger catches missing, duplicate, unoffered and mismatched durable results',()=>{
+  const row={organization:'o',member:'m',channel:'c',client_message_id:'client',id:'message',seq:1};
+  assert.deepEqual(reconcile([row],[row]),{missing:0,duplicates:0,unexpected:0});
+  assert.equal(reconcile([row],[]).missing,1);
+  assert.equal(reconcile([row],[row,row]).duplicates,1);
+  assert.equal(reconcile([row,row],[row]).duplicates,1);
+  assert.equal(reconcile([],[row]).unexpected,1);
+  assert.equal(reconcile([row],[{...row,seq:2}]).missing,1);
+  assert.equal(parseSend('unrelated'),undefined);
+  assert.equal(parseSend('DM_SEND '+JSON.stringify(row))?.id,'message');
+  assert.throws(()=>parseSend('DM_SEND broken'));
 });
