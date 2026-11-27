@@ -2,7 +2,7 @@ import { execFile, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
@@ -28,6 +28,12 @@ import { createCutover, f2Base, f2BlockOrder, f2Migration, f2SeedSql, f2Send, f2
   f2Sources, hashFile, pref2Send, seedCreateLog, topicPageMigration, validateF2 } from './f2-arm.ts';
 import { f2ReferenceMarkdown, f2ReferenceReport } from './f2-report.ts';
 import { finalBenchOrder, finalSendPlan } from './final-plan.ts';
+import { postgresDevices } from './disk-device.ts';
+import { startDiskSampler } from './disk-sampling.ts';
+import { diskWaitMarkdown, type DiagnosticBlock } from './disk-wait-summary.ts';
+import { readThreadLogs } from './pgbench-logs.ts';
+import { sendDiagnostics } from './send-diagnostics.ts';
+import { walIoQuery } from './wal-io.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
@@ -79,6 +85,9 @@ const benchOrder = finalBenchOrder(smoke);
 const sendPlan = finalSendPlan(smoke, f2, control);
 if (request) assertHelperOrder(request.helper, Math.max(...sendPlan.map(block => block.order)));
 const attributionBlocks: AttributionBlock[] = [];
+const diagnosticBlocks: DiagnosticBlock[] = [];
+let diskSampler: Awaited<ReturnType<typeof startDiskSampler>> | undefined;
+let diskSetupReason: string | undefined = 'setup did not reach device resolution';
 
 const root = realpathSync(fileURLToPath(new URL('../../../', import.meta.url)));
 process.chdir(root);
@@ -235,11 +244,31 @@ const boundaryQueries = attribution ? [walQuery, snapshotSql] : [walQuery];
 const parseBoundaryOutput = (output: string): WalBoundary =>
   attribution ? parseBoundary<WalBoundary>(output) : JSON.parse(output);
 const boundary = (db: string) => attribution ? parseBoundaryOutput(psql(db, boundarySql)) : walStats(db);
-const serverLog = () => {
-  const child = spawnSync('docker', ['logs', container], { encoding: 'utf8', maxBuffer });
-  if (child.status !== 0) throw new Error(`server log read failed: ${(child.stderr ?? '').slice(-500) || `exit ${child.status}`}`);
+const serverLog = (timeout?: number) => {
+  const child = spawnSync('docker', ['logs', container], { encoding: 'utf8', maxBuffer, timeout });
+  if (child.status !== 0) throw new Error(`server log read failed: ${child.error?.message ?? ((child.stderr ?? '').slice(-500) || `exit ${child.status}`)}`);
   return `${child.stdout}\n${child.stderr}`;
 };
+
+async function setupDiskDiagnostics() {
+  let resolution: ReturnType<typeof postgresDevices> | undefined;
+  try {
+    if (platform() !== 'linux') throw new Error(`/proc/diskstats is unavailable on the ${platform()} Docker client host`);
+    if (!cpuSets) throw new Error('no workload CPU sets supplied for diskstats sampler placement');
+    resolution = postgresDevices(container, psql('postgres', 'SHOW data_directory;').trim(), args => run('docker', args));
+    diskSampler = await startDiskSampler(cpuSets, resolution.devices);
+    diskSetupReason = undefined;
+  } catch (error) {
+    diskSetupReason = `${smoke ? 'skipped in smoke' : 'setup failed'}: ${String(error)}`;
+  }
+  try {
+    mkdirSync(join(out, 'disk-wait'));
+    save('disk-wait/setup.json', { resolution, sampler: diskSampler?.placement, reason: diskSetupReason });
+  } catch (error) {
+    diskSetupReason = [diskSetupReason, `could not save disk-wait/setup.json: ${String(error)}`].filter(Boolean).join('. ');
+  }
+  if (!smoke && !diskSampler) throw new Error(diskSetupReason);
+}
 // Forces a checkpoint and returns its request time on the server clock (the clock of the log's %m).
 function forcedCheckpoint(db: string) {
   const requestMs = Number(psql(db, 'SELECT extract(epoch FROM clock_timestamp()) * 1000;\nCHECKPOINT;\n').trim());
@@ -262,20 +291,30 @@ function sendRole(db: string) {
 function sendBlock(db: string, label: string, order: number, arm: SendArm, reference?: ReferenceWindow) {
   let openRequestMs = NaN;
   let blockEndMs = NaN;
+  const prefix = `/tmp/pgb-${label}`;
+  const diagnostics = sendDiagnostics(out, label, diskSampler, diagnosticBlocks);
+  const readLogs = () => diagnostics.log(basename(prefix),
+    () => run('docker', ['exec', clientContainer, 'sh', '-c', readThreadLogs, 'pgbench-logs', prefix]));
+  // Give the report-only query its own timeout so the required LSN query keeps its original failure path.
+  const walIoArgv = [...psqlArgs(db, 'postgres', false), '-c', walIoQuery];
+  const walIo = (phase: 'before' | 'after') => diagnostics.wal(phase, () => {
+    const result = spawnSync('docker', walIoArgv, { encoding: 'utf8', timeout: 5000, maxBuffer });
+    if (result.status !== 0) throw new Error(result.error?.message ?? result.stderr.slice(-2000));
+    return result.stdout;
+  });
   return {
     async measure() {
       openRequestMs = forcedCheckpoint(db);
       const start = walStats(db);
       const warmArgv = sendPgbenchArgs(clientContainer, cpuSets?.client, !!request, warmSeconds, db);
-      const prefix = `/tmp/pgb-${label}`;
       // #796: measuredWindow is the wrapper around the measured pgbench run (wall and monotonic, to
       // expose a clock step); pgbenchWindow is pgbench's own interval from its log, the one the
       // thermal judge reads the launcher's samples inside.
       const argv = sendPgbenchArgs(clientContainer, cpuSets?.client, !!request, measuredSeconds, db, prefix);
       const steps = {
         run: () => run('docker', argv),
-        after: () => boundary(db),
-        log: () => run('docker', ['exec', clientContainer, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]),
+        after: () => { const after = boundary(db); walIo('after'); return after; },
+        log: readLogs,
       };
       let counters: CounterBlock | undefined;
       let affinity: Affinity | undefined;
@@ -290,16 +329,23 @@ function sendBlock(db: string, label: string, order: number, arm: SendArm, refer
           const prepare = async () => {
             pgbench((await exec('docker', warmArgv, { signal, timeout: (warmSeconds + 10) * 1000, maxBuffer })).stdout);
             const { stdout } = await exec('docker', [...psqlArgs(db, 'postgres', false), ...boundaryCommandArgs(boundaryQueries)], { signal, timeout: 5000, maxBuffer });
-            return parseBoundaryOutput(stdout);
+            const before = parseBoundaryOutput(stdout);
+            try {
+              const { stdout: counts } = await exec('docker', walIoArgv, { signal, timeout: 5000, maxBuffer });
+              diagnostics.wal('before', () => counts);
+            } catch (error) { diagnostics.error('WAL I/O before', error); }
+            return before;
           };
-          const captured = await frequency.measure(order, reference, prepare, () => {
+          const captured = await frequency.measure(order, reference, prepare, async () => {
+            diagnostics.start();
             const workload = exec('docker', argv, {
               signal, timeout: (measuredSeconds + pgbenchTimeoutGraceSeconds) * 1000, killSignal: 'SIGKILL', maxBuffer,
             });
             if (request?.stage === 'rehearsal2') {
               observed = readAffinity(container, clientContainer, prefix, db, affinitySignal).catch(error => new Error(String(error)));
             }
-            return workload.then(result => result.stdout);
+            try { return (await workload).stdout; }
+            finally { diagnostics.stop(); }
           });
           before = captured.preparation;
           counters = captured.counters;
@@ -314,9 +360,12 @@ function sendBlock(db: string, label: string, order: number, arm: SendArm, refer
       } else {
         pgbench(run('docker', warmArgv));
         before = boundary(db);
-        m = measuredPgbench(steps);
+        walIo('before');
+        diagnostics.start();
+        m = measuredPgbench({ ...steps, after: () => { diagnostics.stop(); return steps.after(); } });
       }
       const { output, measuredWindow, pgbenchWindow, after, latencies, errors } = m;
+      diagnostics.windows(measuredWindow, pgbenchWindow);
       blockEndMs = after.atMs;
       const ended = new Date().toISOString();
       const result = pgbench(output);
@@ -349,6 +398,7 @@ function sendBlock(db: string, label: string, order: number, arm: SendArm, refer
       const closeRequestMs = forcedCheckpoint(db);
       return waitForCheckpointWindow(serverLog, openRequestMs, closeRequestMs, blockEndMs, 120, () => spawnSync('sleep', ['0.5']));
     },
+    saveDiagnostics: () => diagnostics.save(readLogs).catch(error => { diagnostics.error('disk-wait artifacts', error); }),
   };
 }
 
@@ -360,6 +410,11 @@ const keepBlock = (extra: Record<string, unknown> = {}) => (row: SendRow) => {
   sends.push(row);
   save('sends.json', { ...extra, sends });
 };
+
+async function withDiagnostics<T>(steps: ReturnType<typeof sendBlock>, finish: () => Promise<T>) {
+  try { return await finish(); }
+  finally { await steps.saveDiagnostics(); }
+}
 // Send re-measure: each block gets a fresh clone of its arm's template, which was vacuumed and
 // analyzed before any block, and is dropped after the block and any consistency check.
 async function freshSends() {
@@ -384,8 +439,9 @@ async function freshSends() {
     };
     const block = async ({ role, since, host }: ReturnType<typeof clone>, reference?: ReferenceWindow) => {
       const steps = sendBlock(b.db, `block${b.order}-${b.arm}`, b.order, b.arm, reference);
-      return finishBlock({ ...b, role, host, ...await steps.measure() }, { label: `block ${b.order}`, closeCheckpoint: steps.closeCheckpoint,
-        hostAfter: () => hostState(since), keep: keepBlock() });
+      return withDiagnostics(steps, async () =>
+        finishBlock({ ...b, role, host, ...await steps.measure() }, { label: `block ${b.order}`, closeCheckpoint: steps.closeCheckpoint,
+          hostAfter: () => hostState(since), keep: keepBlock() }));
     };
     if (frequency) await frequency.runBlock(b.order, () => psql(template, 'CHECKPOINT;'), clone, block);
     else await block(clone());
@@ -408,6 +464,8 @@ async function freshSends() {
 
 const started = new Date().toISOString();
 let failed = false;
+let serverStarted = false;
+let wroteSummary = false;
 function checkHostAffinity(stage: 'preflight' | 'finish') {
   if (!request) return;
   const readback = readHostAffinity(request.session);
@@ -432,6 +490,7 @@ try {
   // With CPU sets, taskset wraps the image's entrypoint, so the postmaster and every backend inherit the server set.
   run('docker', ['run', '-d', '--rm', '--name', container, '--label', workloadLabel, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
     '-v', `${work}:/work:ro`, ...(request ? frequencyServerArgs() : serverImageArgs(cpuSets?.server)), ...postgresSettingsArgs(attribution)]);
+  serverStarted = true;
   for (let i = 0; spawnSync('docker', ['exec', container, 'pg_isready', '-U', 'postgres', '-h', '127.0.0.1']).status !== 0; i++) {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
@@ -454,6 +513,7 @@ try {
   if (cpuPins && (cpuList(cpuPins.postmasterAllowed) !== cpuList(cpuPins.server) || cpuList(cpuPins.clientAllowed) !== cpuList(cpuPins.client))) {
     throw new Error(`CPU sets did not take effect: postmaster ${cpuList(cpuPins.postmasterAllowed)}, client ${cpuList(cpuPins.clientAllowed)}`);
   }
+  await setupDiskDiagnostics();
   psql('postgres', 'CREATE DATABASE p519;');
   psql('p519', migrations.map(m => `BEGIN;\n\\i /work/server/migrations/${m}\nCOMMIT;`).join('\n') + '\n');
   psql('p519', "BEGIN;\nSELECT set_config('fukulow.app_password', 'probe', true) \\g /dev/null\n\\i /work/deploy/db-roles.sql\nCOMMIT;\n");
@@ -523,8 +583,9 @@ try {
     const sendRoles = { current: sendRole('s_current'), final: sendRole('s_final') };
     for (const b of sendBlocks(benchOrder)) {
       const steps = sendBlock(`s_${b.arm}`, `pair${b.pair}-${b.arm}`, b.order, b.arm);
-      finishBlock<SendRow, HostState>({ ...b, db: `s_${b.arm}`, ...await steps.measure(), checkpointLog: null, hostAfter: null }, { label: `block ${b.order}`,
-        closeCheckpoint: steps.closeCheckpoint, keep: keepBlock({ sendRoles }) });
+      await withDiagnostics(steps, async () =>
+        finishBlock<SendRow, HostState>({ ...b, db: `s_${b.arm}`, ...await steps.measure(), checkpointLog: null, hostAfter: null }, { label: `block ${b.order}`,
+          closeCheckpoint: steps.closeCheckpoint, keep: keepBlock({ sendRoles }) }));
     }
     countsCheck('s_final', 'after the sends');
   }
@@ -557,12 +618,19 @@ try {
       ...(f2Reference ? f2ReferenceMarkdown(f2Reference) : [])];
     const title = sendsOnly ? '#519 §10 step 1 send re-measure' : '#519 §10 step 1 final-design probe';
     writeFileSync(join(out, 'summary.md'), `# ${title} (${metadata.status})\n\n${lines.join('\n')}\n`);
+    wroteSummary = true;
     console.log(lines.join('\n'));
   }
 } catch (error) {
   failed = true;
   console.error(error);
 } finally {
+  diskSampler?.close();
+  let serverLogError: string | undefined;
+  try {
+    if (!serverStarted) throw new Error('server container never started');
+    writeFileSync(join(out, 'postgres.log'), serverLog(5000));
+  } catch (error) { serverLogError = String(error); }
   if (request) spawnSync('docker', ['rm', '-f', clientContainer]);
   spawnSync('docker', ['rm', '-f', container]);
   try { rmSync(work, { recursive: true, force: true }); } catch (e) { failed = true; console.error('work directory cleanup:', e); }
@@ -578,6 +646,10 @@ try {
       writeFileSync(join(out, 'attribution-summary.md'), attributionMarkdown(summary));
     } catch (e) { failed = true; console.error('attribution summary:', e); }
   }
+  try {
+    const title = wroteSummary ? '\n' : '# #519 send probe\n\n';
+    writeFileSync(join(out, 'summary.md'), title + diskWaitMarkdown(diagnosticBlocks, { smoke, setup: diskSetupReason, serverLogError }), { flag: 'a' });
+  } catch (error) { console.error('disk-wait summary:', error); }
   save('status.json', { complete: !failed, launchSession, finished: new Date().toISOString() });
 }
 process.exit(failed ? 1 : 0);

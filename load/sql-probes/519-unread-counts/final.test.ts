@@ -56,6 +56,10 @@ export function spawnSync(command: string, args: string[]) {
     assert.ok(checkedOrder, 'helper order must be checked before Docker commands');
     if (operation === 'ps' || operation === 'exec') return result();
     if (operation === 'inspect') return { status: 1, stdout: '', stderr: stopped };
+    if (operation === 'logs') {
+      assert.equal(removed.length, 0);
+      return result('fixture checkpoint log');
+    }
     if (operation === 'run') {
       if (args.includes('--name')) launched.push(args[args.indexOf('--name') + 1]);
       return result();
@@ -99,5 +103,6 @@ test('a final frequency run writes a fresh finish affinity file after cleaning u
   const read = (name: string) => JSON.parse(readFileSync(join(out, name), 'utf8'));
   assert.deepEqual(read('frequency-host-affinity.json'), hostAffinity());
   assert.deepEqual(read('frequency-host-affinity-after.json'), readHostAffinity(session));
+  assert.match(readFileSync(join(out, 'postgres.log'), 'utf8'), /fixture checkpoint log/);
   assert.equal(read('status.json').complete, false);
 });

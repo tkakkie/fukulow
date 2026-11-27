@@ -60,6 +60,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   - Every pair and every individual breach is reported.
   - A zero, negative or non-finite WAL/send, tps, ratio or median fails the run instead of counting as no breach (#803).
 - **Run conditions:** `--diagnostic` requires the held host-busy marker and records its line in `metadata.json`. Smoke uses 5 s blocks and one cut, and only validates the harness.
+- **Disk-wait diagnostics:** use the report-only tables in `summary.md` with `disk-wait/` and `postgres.log`. A diagnostic run stops at setup if Docker's data and WAL mounts cannot be tied to host block devices or if the sampler cannot be placed outside the workload CPU sets. Smoke records a skip on macOS. Disk rows include stacked devices separately, so do not sum them. To reconstruct the legacy log order from the archived pgbench thread files, sort by the original names without the `.gz` suffix.
 - **Limits:**
   - WAL statistics are cluster-wide, so idle clones can add background WAL.
   - The send databases are reused across pairs, so the faster arm accumulates more rows.
