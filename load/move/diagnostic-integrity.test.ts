@@ -13,9 +13,9 @@ const row = (attempted: number, droppedIterations = 0, rejected503 = 0): Lane =>
   rejected429: 0, otherErrors: 0, clientTimeouts: 0, transportErrors: 0, p95: 1, p99: 2,
 });
 
-function fixture(step = move) {
+function fixture(step = move, channelAttempts = 10_002) {
   const summary: DiagnosticSummary = {
-    lanes: { send: row(4985, 15, 497), reader: row(62), channels: row(10_002), topics: row(400),
+    lanes: { send: row(4985, 15, 497), reader: row(62), channels: row(channelAttempts), topics: row(400),
       ...(step.arm === 'move' ? { move: row(15, 5, 8) } : {}) },
     started: 1000, topicReaders: [100, 100, 100, 100],
     scenarioDrops: { send: 15, reader: 0, channels: 0, topic0: 0, topic1: 0, topic2: 0, topic3: 0,
@@ -40,6 +40,16 @@ test('diagnostic integrity allows reconciled queue-full responses and drops in b
   for (const step of [baseline, move]) {
     const { summary, stream } = fixture(step);
     assert.deepEqual(diagnosticIntegrity(p, step, 'all', summary, stream, true, {}), []);
+  }
+});
+
+test('the retained D0 Channel-list count is short even with matching counters and zero drops', () => {
+  for (const [attempted, problems] of [
+    [9998, ['channels: unreconciled k6 counters or schedule']],
+    [9999, []],
+  ] as const) {
+    const { summary, stream } = fixture(baseline, attempted);
+    assert.deepEqual(diagnosticIntegrity(p, baseline, 'all', summary, stream, true, {}), problems);
   }
 });
 

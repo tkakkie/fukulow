@@ -180,6 +180,35 @@ test('collector reconciliation detects a mismatched trend and loss of sampled re
   assert.match(check().problems.join(), /channel_list_total sample coverage/);
 });
 
+test('collector reconciliation matches the retained D0 p99 values on ARM64', async () => {
+  const { capture, summary, check } = await fixture(baseline);
+  const retained = [
+    { lane: 'reader', count: 63, neighbors: [14.969133, 21.827949], summary: 17.575483079999994, stream: 17.57548308000002 },
+    { lane: 'topics', count: 6338, neighbors: [52.763218, 53.150976], summary: 53.007505539999975, stream: 53.00750554000005 },
+  ] as const;
+  async function* lines() {
+    for (const { lane, count, neighbors } of retained) {
+      const lower = Math.floor(0.99 * (count - 1));
+      // Synthetic neighbors reproduce the retained result for each rounding path.
+      for (let i = 0; i < count; i++) {
+        const value = i < lower ? 1 : i === lower ? neighbors[0] : neighbors[1];
+        yield JSON.stringify({ type: 'Point', metric: 'move_success_ms', data: { time: iso(at), value, tags: { scenario: lane } } });
+      }
+    }
+  }
+  const arm64 = (await k6Evidence(lines(), true)).stream.latencies;
+  const amd64 = (await k6Evidence(lines(), false)).stream.latencies;
+  for (const { lane, summary: p99, stream } of retained) {
+    assert.equal(amd64[lane].p99, stream);
+    assert.equal(arm64[lane].p99, p99);
+    summary.lanes[lane]!.p99 = p99;
+    capture.k6.stream.latencies[lane] = arm64[lane];
+  }
+  assert.deepEqual(check().problems, []);
+  summary.lanes.reader!.p99 = retained[0].summary + 0.000001;
+  assert.deepEqual(check().problems, ['summary and stream latency percentiles disagree']);
+});
+
 test('required SQL groups need positive-call rows, and an empty result disables statement attribution', async () => {
   assert.deepEqual(statementProblems(['topic_page'], parseStatements('')), ['topic_page']);
   assert.deepEqual(statementProblems(['topic_page'], parseStatements('{"id":"1","group":"topic_page","calls":0,"execMs":0}')), ['topic_page']);

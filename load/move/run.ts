@@ -67,7 +67,7 @@ export function k6Started(stdout: string, generatorSamples: number) {
 }
 
 export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir: string, labels: Record<string, string>, k6: string, signal: AbortSignal,
-  startSampling: () => void, diagnosticRun = false, readLanes: ReadLanes = 'all') {
+  startSampling: () => void, diagnosticRun = false, readLanes: ReadLanes = 'all', fusedRank = false) {
   save(join(dir, 'data.json'), seeded.data);
   save(join(dir, 'tokens.json'), seeded.tokens);
   const name = `${stack.env.LOAD_PROJECT}-k6`;
@@ -83,7 +83,7 @@ export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Ste
   const prior = head(stack, seeded.data);
   const resources = diagnosticRun ? undefined : sampler(stack, () => name);
   const capture = output ? await captureDiagnostic(stack, name, output.file,
-    { partD: seeded.data.organization, reader: seeded.data.otherOrganization }) : undefined;
+    { partD: seeded.data.organization, reader: seeded.data.otherOrganization }, fusedRank) : undefined;
   const seconds = step.part === 'E' ? p.replaySeconds : p.seconds;
   let stdout = '', stderr = '';
   let problem: string | undefined;
@@ -253,7 +253,7 @@ async function main() {
     }
     run.enter('build');
     const k6 = command('make', ['-s', '-C', repo, 'load-image']);
-    const k6Id = docker('image', 'inspect', '--format', '{{.Id}}', k6);
+    const [k6Id, k6Arch] = docker('image', 'inspect', '--format', '{{.Id}} {{.Architecture}}', k6).split(' ');
     if (selection) {
       console.log(`DIAGNOSTIC ${diagnosticScope.sendLane} · ${diagnosticExclusions}`);
       console.log('DIAGNOSTIC: building the instrumented Part D image' + (attribution ? ` (${attribution})` : ''));
@@ -307,7 +307,8 @@ async function main() {
           stage = 'measurement setup';
           const measured = step.part === 'A' ? await latency(stack, seeded, p, abort.signal, startSampling)
             : step.part === 'F' ? await storage(stack, seeded, p, step, abort.signal, startSampling)
-            : await generator(stack, seeded, p, step, dir, labels, k6, abort.signal, startSampling, Boolean(selection), selection?.readLanes);
+            : await generator(stack, seeded, p, step, dir, labels, k6, abort.signal, startSampling, Boolean(selection),
+              selection?.readLanes, k6Arch === 'arm64');
           attempt.measurement = measured.measurement;
           if ('problem' in measured) attempt.problem = measured.problem;
           artifacts = measured;

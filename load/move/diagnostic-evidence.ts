@@ -206,12 +206,12 @@ export function k6CeilingWarnings(stderr: string) {
   });
 }
 
-export async function k6Evidence(lines: AsyncIterable<string>) {
+export async function k6Evidence(lines: AsyncIterable<string>, fusedRank = false) {
   const vus = new Map<number, { at: number; active?: number; allocated?: number }>();
   const drops: { at: number; scenario: Scenario; count: number }[] = [];
   const busy: Record<Lane, { at: number; change: number }[]> = { send: [], move: [] };
   const completed503: Record<Scenario, number> = Object.fromEntries(scenarios.map(s => [s, 0])) as Record<Scenario, number>;
-  const stream = diagnosticStream();
+  const stream = diagnosticStream(fusedRank);
   for await (const line of lines) {
     stream.add(line);
     if (!/"metric"\s*:\s*"(vus|vus_max|dropped_iterations|iteration_duration|http_reqs)"/.test(line)) continue;

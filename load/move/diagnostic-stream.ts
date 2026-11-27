@@ -16,19 +16,26 @@ type Points = { count: number; sum: number; first: number; last: number };
 export type Stream = { series: Record<string, Record<string, Points>>; invalidPoints: number;
   latencies: Record<string, { p95: number; p99: number }> };
 
-function percentile(sorted: number[], fraction: number) {
+function percentile(sorted: number[], fraction: 0.95 | 0.99, fusedRank: boolean) {
   // k6 TrendSink.P uses linear interpolation between adjacent ranks.
-  const i = fraction * (sorted.length - 1);
-  return sorted[Math.floor(i)] + (sorted[Math.ceil(i)] - sorted[Math.floor(i)]) * (i - Math.floor(i));
+  const span = sorted.length - 1;
+  const rank = fraction * span;
+  const lower = Math.floor(rank);
+  // ARM64 Go fuses fraction * span - lower. Both fractions are exact multiples of 2^-53.
+  const scale = 2 ** 53;
+  const weight = fusedRank
+    ? Number(BigInt(fraction * scale) * BigInt(span) - BigInt(lower) * BigInt(scale)) / scale
+    : rank - lower;
+  return sorted[lower] + (sorted[Math.ceil(rank)] - sorted[lower]) * weight;
 }
 
-export function diagnosticStream() {
+export function diagnosticStream(fusedRank: boolean) {
   const result: Stream = { series: {}, invalidPoints: 0, latencies: {} };
   const latencySamples: Record<string, number[]> = {};
   return { finish() {
     for (const [lane, samples] of Object.entries(latencySamples)) {
       samples.sort((a, b) => a - b);
-      result.latencies[lane] = { p95: percentile(samples, 0.95), p99: percentile(samples, 0.99) };
+      result.latencies[lane] = { p95: percentile(samples, 0.95, fusedRank), p99: percentile(samples, 0.99, fusedRank) };
     }
     return result;
   }, add(line: string) {

@@ -208,7 +208,7 @@ async function sampleVmClock(app: string, boundary: 'start' | 'end', failures: s
   }
 }
 
-export async function captureDiagnostic(stack: Stack, name: string, metricsFile: string, organizations: Organizations) {
+export async function captureDiagnostic(stack: Stack, name: string, metricsFile: string, organizations: Organizations, fusedRank: boolean) {
   stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT pg_stat_statements_reset();');
   let anchor: ReturnType<typeof appLogAnchor>;
   const failures: string[] = [];
@@ -230,7 +230,7 @@ export async function captureDiagnostic(stack: Stack, name: string, metricsFile:
     const [app, generator, statements] = await Promise.allSettled([
       exec('docker', ['logs', '--timestamps', '--since', since, stack.app], { timeout: 15000, maxBuffer: 128 * 1024 * 1024 })
         .then(({ stdout, stderr }) => retainedAppLog(stdout + '\n' + stderr, anchor, window, organizations)),
-      readK6(metricsFile),
+      readK6(metricsFile, fusedRank),
       exec('docker', ['exec', stack.db, 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-U', 'fukulow', '-d', 'fukulow',
         '-c', statementsSql], { timeout: 5000 }).then(result => parseStatements(result.stdout.trim())),
     ]);
@@ -252,8 +252,8 @@ export async function captureDiagnostic(stack: Stack, name: string, metricsFile:
   } };
 }
 
-async function readK6(file: string) {
+async function readK6(file: string, fusedRank: boolean) {
   // Pipeline also validates the gzip trailer, even if the parsed points looked complete.
   return pipeline(createReadStream(file), createGunzip(), source =>
-    k6Evidence(createInterface({ input: source, crlfDelay: Infinity })));
+    k6Evidence(createInterface({ input: source, crlfDelay: Infinity }), fusedRank));
 }
