@@ -65,12 +65,21 @@ pub struct AccessChanges {
     entries: Registry,
     pub(crate) activity: super::activity::Activity,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccessStatus {
+    Active,
+    ChannelLost,
+    RecheckFailed,
+    MembershipLost,
+}
+
 struct Entry {
     organization: Uuid,
     member: (Uuid, i64),
     channel: Uuid,
     grant: Mutex<Option<Uuid>>,
-    status: watch::Sender<u8>,
+    status: watch::Sender<AccessStatus>,
 }
 
 pub(crate) struct AccessWatch {
@@ -78,7 +87,7 @@ pub(crate) struct AccessWatch {
     registry: Weak<Mutex<Entries>>,
     entry: Arc<Entry>,
     activity: super::activity::Activity,
-    pub changed: watch::Receiver<u8>,
+    pub changed: watch::Receiver<AccessStatus>,
 }
 impl Drop for AccessWatch {
     fn drop(&mut self) {
@@ -88,13 +97,19 @@ impl Drop for AccessWatch {
     }
 }
 impl AccessWatch {
+    // Expose the status patterns through the existing AccessWatch re-export.
+    pub(crate) const ACTIVE: AccessStatus = AccessStatus::Active;
+    pub(crate) const CHANNEL_LOST: AccessStatus = AccessStatus::ChannelLost;
+    pub(crate) const RECHECK_FAILED: AccessStatus = AccessStatus::RecheckFailed;
+    pub(crate) const MEMBERSHIP_LOST: AccessStatus = AccessStatus::MembershipLost;
+
     pub async fn handoff<F: std::future::Future>(&self, future: F) -> Option<F::Output> {
         let mut future = std::pin::pin!(future);
         // The watch read guard excludes loss observation only through the first
         // poll (frame handoff). A pending write is then the in-flight exception.
         let first = std::future::poll_fn(|cx| {
             let status = self.entry.status.borrow();
-            std::task::Poll::Ready(if *status == 0 {
+            std::task::Poll::Ready(if *status == AccessStatus::Active {
                 Some(std::future::Future::poll(future.as_mut(), cx))
             } else {
                 None
@@ -106,7 +121,7 @@ impl AccessWatch {
             std::task::Poll::Pending => future.await,
         })
     }
-    pub fn status(&self) -> u8 {
+    pub fn status(&self) -> AccessStatus {
         *self.entry.status.borrow()
     }
     pub async fn refresh(&self, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
@@ -126,7 +141,7 @@ impl AccessChanges {
             member,
             channel,
             grant: Mutex::new(None),
-            status: watch::channel(0).0,
+            status: watch::channel(AccessStatus::Active).0,
         });
         let rows = access_rows(pool, std::slice::from_ref(&initial)).await?;
         let Some((true, grant, _)) = rows.into_iter().next() else {
@@ -137,7 +152,7 @@ impl AccessChanges {
             organization,
             member,
             channel,
-            status: watch::channel(0).0,
+            status: watch::channel(AccessStatus::Active).0,
         });
         let id = Uuid::new_v4();
         let changed = entry.status.subscribe();
@@ -164,8 +179,8 @@ impl AccessChanges {
                 && entry.member == member
             {
                 entry.status.send_if_modified(|status| {
-                    if *status == 0 {
-                        *status = 1;
+                    if *status == AccessStatus::Active {
+                        *status = AccessStatus::ChannelLost;
                         true
                     } else {
                         false
@@ -185,7 +200,7 @@ impl auth::SubscriptionRecheck for AccessChanges {
         let entries: Vec<_> = lock_ignoring_poison(&self.entries)
             .snapshot(scope)
             .into_iter()
-            .filter(|e| *e.status.borrow() == 0)
+            .filter(|e| *e.status.borrow() == AccessStatus::Active)
             .collect();
         Box::pin(async move {
             self.activity.check(pool, scope).await;
@@ -195,8 +210,8 @@ impl auth::SubscriptionRecheck for AccessChanges {
     fn failed(&self, scope: auth::SubscriptionScope) {
         for entry in lock_ignoring_poison(&self.entries).snapshot(scope) {
             entry.status.send_if_modified(|status| {
-                if *status == 0 {
-                    *status = 2;
+                if *status == AccessStatus::Active {
+                    *status = AccessStatus::RecheckFailed;
                     true
                 } else {
                     false
@@ -224,8 +239,10 @@ async fn check_entries(
         }
         if !current {
             entry.status.send_if_modified(|status| {
-                if *status < 2 {
-                    *status = 3;
+                // An in-flight recheck can observe Membership loss after Channel
+                // loss. A latched recheck failure keeps its close classification.
+                if matches!(*status, AccessStatus::Active | AccessStatus::ChannelLost) {
+                    *status = AccessStatus::MembershipLost;
                     true
                 } else {
                     false
@@ -233,8 +250,8 @@ async fn check_entries(
             });
         } else if lost {
             entry.status.send_if_modified(|status| {
-                if *status == 0 {
-                    *status = 1;
+                if *status == AccessStatus::Active {
+                    *status = AccessStatus::ChannelLost;
                     true
                 } else {
                     false
@@ -340,7 +357,7 @@ pub(crate) async fn access_row_for_test(
         member,
         channel,
         grant: Mutex::new(None),
-        status: watch::channel(0).0,
+        status: watch::channel(AccessStatus::Active).0,
     });
     access_rows(pool, &[entry])
         .await?
@@ -386,7 +403,7 @@ mod tests {
             member: (Uuid::new_v4(), 0),
             channel: Uuid::new_v4(),
             grant: Mutex::new(None),
-            status: watch::channel(0).0,
+            status: watch::channel(AccessStatus::Active).0,
         });
         let watch = Arc::new(AccessWatch {
             id: Uuid::new_v4(),
@@ -413,7 +430,7 @@ mod tests {
             })
         };
         started.await;
-        entry.status.send_replace(1);
+        entry.status.send_replace(AccessStatus::ChannelLost);
         release.notify_one();
         assert_eq!(task.await.unwrap(), Some(7));
         let polled = std::sync::atomic::AtomicBool::new(false);
@@ -462,7 +479,7 @@ mod tests {
                 member: (member, revision),
                 channel,
                 grant: Mutex::new(None),
-                status: watch::channel(0).0,
+                status: watch::channel(AccessStatus::Active).0,
             })
         };
         // Both Organizations span several query chunks, interleaved in reverse
@@ -497,7 +514,12 @@ mod tests {
                 .iter()
                 .map(|e| *e.status.borrow())
                 .collect::<Vec<_>>(),
-            [0, 1, 3].repeat(2001)
+            [
+                AccessStatus::Active,
+                AccessStatus::ChannelLost,
+                AccessStatus::MembershipLost,
+            ]
+            .repeat(2001)
         );
         counted.close().await;
         pools.app.close().await;

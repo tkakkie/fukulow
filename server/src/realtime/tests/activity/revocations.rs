@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::AccessWatch;
 use crate::realtime::tests::isolated_test::run_isolated_test;
 use crate::{
     auth::{
@@ -620,7 +621,14 @@ async fn subscription_refresh_membership_loss_fences_a_dequeued_revocation(pool:
                 .bind(case.f.organization).bind(case.target).execute(&pool).await.unwrap();
         }
         watch.refresh(&case.f.state.pool).await.unwrap();
-        assert_eq!(watch.status(), if inactive { 3 } else { 0 });
+        assert_eq!(
+            watch.status(),
+            if inactive {
+                AccessWatch::MEMBERSHIP_LOST
+            } else {
+                AccessWatch::ACTIVE
+            }
+        );
         received.push(case.received_revocations(Some(frame)).await);
     }
     assert_eq!(received, [1, 0], "current Membership then observed loss");

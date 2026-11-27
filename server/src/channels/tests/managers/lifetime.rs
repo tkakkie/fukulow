@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::access::AccessStatus;
 use crate::test_support::{Blocked, Count, wait_blocked_or};
 
 #[fukulow_test::test]
@@ -113,7 +114,7 @@ async fn channel_manager_role_changes_are_atomic_and_preserve_grant_subscription
         json!({"error":"last_channel_manager"})
     );
     assert_eq!(snapshot(&f.pools.admin).await, before);
-    assert_eq!(watch.status(), 0);
+    assert_eq!(watch.status(), AccessStatus::Active);
     assert_eq!(
         mutation(&f.app, &f.token, second, backup, true)
             .await
@@ -139,7 +140,7 @@ async fn channel_manager_role_changes_are_atomic_and_preserve_grant_subscription
         assert_eq!(positions, after);
         let after: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY channel_id,topic_id) FROM topic_read_positions p WHERE organization_id=$1 AND member_id=$2").bind(f.org).bind(f.creator).fetch_one(&f.pools.admin).await.unwrap();
         assert_eq!(topic_positions, after);
-        assert_eq!(watch.status(), 0);
+        assert_eq!(watch.status(), AccessStatus::Active);
     }
     f.pools.app.close().await;
 }
@@ -251,13 +252,13 @@ async fn channel_manager_new_lifetimes_never_revive_right_or_old_subscription(po
             .check(&f.pools.app, SubscriptionScope::All)
             .await
             .unwrap();
-        assert_eq!(watch.status(), 1);
+        assert_eq!(watch.status(), AccessStatus::ChannelLost);
         let fresh = access
             .subscribe(&f.pools.app, f.org, (target, 0), f.channel)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(fresh.status(), 0);
+        assert_eq!(fresh.status(), AccessStatus::Active);
     }
     f.pools.app.close().await;
 }
@@ -340,7 +341,7 @@ async fn channel_manager_invite_reactivation_leaves_stale_right_unusable_and_ren
         .check(&f.pools.app, SubscriptionScope::All)
         .await
         .unwrap();
-    assert_eq!(watch.status(), 3); // Membership loss retains #146's 4003 classification.
+    assert_eq!(watch.status(), AccessStatus::MembershipLost); // Membership loss retains #146's 4003 classification.
     f.add(target).await;
     assert_ne!(f.right(target).await.0, old);
     assert!(!f.right(target).await.1);

@@ -6,7 +6,7 @@ use super::{CLOSE_QUEUE_OVERFLOW, ClientMessage, ServerEvent};
 use crate::{
     AppState,
     auth::Auth,
-    channels::activity::Registration,
+    channels::{AccessWatch, activity::Registration},
     messages::{self, LIVE_QUEUE_CAPACITY, LiveQueue, MessageError},
 };
 use axum::extract::ws::{Message as Frame, WebSocket};
@@ -48,7 +48,7 @@ pub(super) struct Connection<'a> {
     auth: &'a Auth,
     pub(super) queue: LiveQueue,
     cursors: HashMap<Uuid, i64>,
-    access: HashMap<Uuid, crate::channels::AccessWatch>,
+    access: HashMap<Uuid, AccessWatch>,
     permit: super::limits::Permit,
 }
 
@@ -117,8 +117,8 @@ impl<'a> Connection<'a> {
     }
     async fn protected(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<bool, u16> {
         match self.access.get(&channel).map(|watch| watch.status()) {
-            Some(0) => Ok(true),
-            Some(1) => {
+            Some(AccessWatch::ACTIVE) => Ok(true),
+            Some(AccessWatch::CHANNEL_LOST) => {
                 self.unsubscribe(channel);
                 Self::event(
                     socket,
@@ -129,8 +129,8 @@ impl<'a> Connection<'a> {
                 .await?;
                 Ok(false)
             }
-            Some(3) => Err(super::CLOSE_ORGANIZATION_UNAVAILABLE),
-            Some(_) => Err(1011),
+            Some(AccessWatch::MEMBERSHIP_LOST) => Err(super::CLOSE_ORGANIZATION_UNAVAILABLE),
+            Some(AccessWatch::RECHECK_FAILED) => Err(1011),
             None => Ok(false),
         }
     }
@@ -149,7 +149,7 @@ impl<'a> Connection<'a> {
         let lost: Vec<_> = self
             .access
             .iter()
-            .filter(|(_, watch)| watch.status() != 0)
+            .filter(|(_, watch)| watch.status() != AccessWatch::ACTIVE)
             .map(|(id, _)| *id)
             .collect();
         for channel in lost {
@@ -157,8 +157,11 @@ impl<'a> Connection<'a> {
         }
         Ok(())
     }
-    async fn access_changed(access: &mut HashMap<Uuid, crate::channels::AccessWatch>) {
-        if access.values().any(|watch| watch.status() != 0) {
+    async fn access_changed(access: &mut HashMap<Uuid, AccessWatch>) {
+        if access
+            .values()
+            .any(|watch| watch.status() != AccessWatch::ACTIVE)
+        {
             return;
         }
         let mut waits: Vec<_> = access
