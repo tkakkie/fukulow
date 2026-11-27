@@ -34,6 +34,7 @@ if (args.includes('--help')) {
     'Options for preflight: --out /absolute/new/dir --preflight [--session ID]',
     'Options after preflight: --out /absolute/new/dir --preflight-result /absolute/path/preflight.json [--session ID]',
     '  [--rehearsal | --overhead | --overhead-summary <summary.json>] [--cells ...] [--durations short,long]',
+    '  --e6-observe-ms N keeps the original sockets open after scoring (rehearsal only for N > 0).',
     'Use a clean checkout and the same server and stall-helper binaries on the same boot.',
     `Set ${SEND_BUFFER_ENV} to the calibrated request in bytes for every stage.`,
     'Every stage uses one host ledger: by default <passwd home>/.local/state/fukulow/revocation-holds-preflights.<hostname>.ndjson (XDG_STATE_HOME and HOME are ignored), or --preflight-ledger /absolute/path. A later stage refuses a ledger other than the one its preflight.json records.',
@@ -50,7 +51,7 @@ const value = (name: string) => {
 };
 const preflight = args.includes('--preflight');
 const overhead = args.includes('--overhead');
-const fixedOptions = new Set(['--out', '--session', '--preflight-result', '--preflight-ledger']);
+const fixedOptions = new Set(['--out', '--session', '--preflight-result', '--preflight-ledger', '--e6-observe-ms']);
 if ((preflight || overhead) && args.some(arg => arg.startsWith('--') &&
   !fixedOptions.has(arg) && arg !== (preflight ? '--preflight' : '--overhead'))) {
   throw new Error('Preflight and overhead use fixed Hcap plans');
@@ -63,6 +64,7 @@ if (preflight && (!session || args.includes('--preflight-result'))) throw new Er
 const preflightFile = value('--preflight-result');
 const options = parseOptions(overhead ? [...args, '--rehearsal'] : args);
 const mode = preflight ? 'preflight' : overhead ? 'overhead' : options.rehearsal ? 'rehearsal' : 'formal';
+if (options.e6ObserveMs > 0 && mode !== 'rehearsal') throw new Error('--e6-observe-ms > 0 requires --rehearsal');
 const host = hostname();
 const ledger = outsideCheckout(preflightLedgerPath(host, value('--preflight-ledger')));
 const hostLedger = outsideCheckout(preflightLedgerPath(host));
@@ -79,6 +81,11 @@ let interrupted = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => {
   if (interrupted) return;
   interrupted = true;
+  if (active.interruptExtension) {
+    process.exitCode = 130;
+    active.interruptExtension();
+    return;
+  }
   void cleanup(active).then(() => process.exit(130));
 });
 const readIdentity = async () => {
@@ -95,7 +102,7 @@ const environmentFor = (identity: SessionIdentity, correctionKb?: RssCorrectionK
 });
 const save = (name: string, value: unknown) => writeFileSync(resolve(output, name), JSON.stringify(value, null, 2));
 const contextFor = (setup: Setup) => ({
-  binary, helperBinary, output, stall: options.stall, active, interrupted: () => interrupted, setup, linuxPlacement,
+  binary, helperBinary, output, stall: options.stall, e6ObserveMs: options.e6ObserveMs, active, interrupted: () => interrupted, setup, linuxPlacement,
 });
 const runAttempt: typeof measure = async (...args) => {
   try { return await measure(...args); }
@@ -164,7 +171,7 @@ async function runLaterStage() {
         }
         save('rehearsal.json', rehearsal);
         save('summary.json', { environment, q2Trigger: q2Runs.length ? Q2_TRIGGER : undefined, q2Runs, rehearsal, setupAborts, stopped });
-        if (stopped) break;
+        if (stopped || interrupted) break;
         continue;
       }
       if (run) {
