@@ -1,5 +1,5 @@
 use crate::counters::{CPU_COUNT, groups, pmu_type, sweep, text, tsc, tsc_sweep};
-use crate::protocol::{check_delta, commands};
+use crate::protocol::{block_order, check_delta, commands};
 use serde_json::{Value, json};
 use std::{
     env,
@@ -57,6 +57,11 @@ fn invariant_tsc() -> Result<()> {
 
 pub fn run() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
+    if let [flag, order] = args.as_slice()
+        && flag == "--check-order"
+    {
+        return block_order(order).map(|_| ());
+    }
     let pmu = pmu_type()?;
     let host = identity(pmu)?;
     match args.as_slice() {
@@ -86,10 +91,7 @@ pub fn run() -> Result<()> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-') =>
         {
-            let order = block.parse::<u8>()?;
-            if !(1..=6).contains(&order) {
-                return Err("invalid block number".into());
-            }
+            let order = block_order(block)?;
             let mut groups = groups(pmu)?;
             emit(json!({"ready": true}))?;
             let mut input = io::stdin().lock().lines();
@@ -105,7 +107,7 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         _ => Err(
-            "usage: fukulow-perf-helper --check | calibrate | (block|control) SESSION ORDER".into(),
+            "usage: fukulow-perf-helper --check | --check-order ORDER | calibrate | (block|control) SESSION ORDER".into(),
         ),
     }
 }

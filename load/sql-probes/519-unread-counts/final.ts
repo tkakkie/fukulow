@@ -12,6 +12,7 @@ import { hostRecord, linuxViolations } from '../../harness-core/host-record.ts';
 import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, finishBlock, listCountsAtCommit, measuredPgbench, member, migrationOutcome, organization, pgbench, pgbenchEvidence, planSummary,
   quantile, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
+import { assertHelperOrder } from './frequency-collector.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
 import { frequencyClientArgs, frequencyContainerReadbacks, frequencyServerArgs, probeImage as image,
   serverImageArgs } from './frequency-containers.ts';
@@ -23,9 +24,10 @@ import { attributionSettings, boundaryCommandArgs, postgresSettingsArgs, sendPgb
 import { attributionMetadata, diffSnapshots, walWindowBytes, type AttributionBlock, type Snapshot } from './attribution.ts';
 import { inspectWal, installAttributionSql, parseBoundary, snapshotSql, walDiskPreflight } from './attribution-sql.ts';
 import { attributionMarkdown, summarizeAttribution } from './attribution-summary.ts';
-import { createCutover, f2Base, f2BlockOrder, f2Blocks, f2Migration, f2SeedSql, f2Send, f2SmokeMessagesPerChannel, f2SmokeSeed,
+import { createCutover, f2Base, f2BlockOrder, f2Migration, f2SeedSql, f2Send, f2SmokeMessagesPerChannel, f2SmokeSeed,
   f2Sources, hashFile, pref2Send, seedCreateLog, topicPageMigration, validateF2 } from './f2-arm.ts';
 import { f2ReferenceMarkdown, f2ReferenceReport } from './f2-report.ts';
+import { finalBenchOrder, finalSendPlan } from './final-plan.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
@@ -73,7 +75,9 @@ const cuts = smoke ? [75] : [75, 150, 575, 2150];
 const samples = smoke ? 5 : 30;
 const warmSeconds = smoke ? 5 : 60;
 const measuredSeconds = smoke ? 5 : frequencyWorkSeconds;
-const benchOrder: FinalArm[][] = smoke ? [['current', 'final']] : [['current', 'final'], ['final', 'current'], ['current', 'final']];
+const benchOrder = finalBenchOrder(smoke);
+const sendPlan = finalSendPlan(smoke, f2, control);
+if (request) assertHelperOrder(request.helper, Math.max(...sendPlan.map(block => block.order)));
 const attributionBlocks: AttributionBlock[] = [];
 
 const root = realpathSync(fileURLToPath(new URL('../../../', import.meta.url)));
@@ -370,8 +374,7 @@ async function freshSends() {
     psql(db, 'VACUUM (ANALYZE);');
     if (arm !== 'current') countsCheck(db, `${arm} template, before the sends`);
   }
-  const plan = f2 ? f2Blocks(smoke) : control ? [1, 2, 3].map(order => ({ order, pair: 1, arm: 'current' as const, db: `s${order}_current` })) : sendBlocks(benchOrder);
-  for (const b of plan) {
+  for (const b of sendPlan) {
     const template = `t_${b.arm}`;
     const clone = () => {
       psql('postgres', `CREATE DATABASE ${b.db} TEMPLATE ${template};`);

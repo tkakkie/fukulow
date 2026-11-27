@@ -107,6 +107,8 @@ node load/sql-probes/519-unread-counts/stability.ts --stage formal --f2 \
   --queue /absolute/519-f2-queue.json --out /absolute/new/f2-placement.json
 ```
 
+The installed helper must accept all 16 planned block orders. The harness checks order 16 before setup. See the [helper installation instructions](../../harness-core/README.md#796-frequency-validity-v3) to replace the older six-block helper.
+
 - Current stays at `5ef561e5` and final applies only A3 from `fd6a5949` and UPDATE-first from `c672b0a4`. Both use `sql/send-current.sql`. Pre-F2 (`pref2`) applies the exact migration chain at `6e2d1d4d`, and F2 adds only the F2 migration. Both use the same seed with a reconstructed Create log for #620's bijection guard.
 - `sql/send-pref2.sql` and `sql/send-f2.sql` mirror the Rust sequence UPSERT, Topic join and update, Message INSERT and Mention writes. Their only SQL differences are `main_appended`, `scope_appended` and `scope_append_recorded`. Both arms include #620's removal of the Create-log write and the Topic paging index. The probe measures the database writes in one routine call per send and skips application authorization, search indexing, HTTP and delivery.
 - Every block uses a fresh clone, the same settings and RLS role, 8 clients/4 threads, a forced checkpoint, 60 s warm and 120 s measured. `message_counts_check` runs on the final, pre-F2 and F2 templates and after each of their blocks with the 45 min statement timeout. Migration drift outside the pinned chain fails setup. `metadata.json` records the source pins and hashes of the SQL and Rust send files for pre-F2 and F2.

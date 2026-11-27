@@ -4,6 +4,17 @@ use serde_json::json;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+// #519 F2's four-by-four Williams square is the largest plan; the load tests check all plans.
+const MAX_BLOCK_ORDER: u8 = 16;
+
+pub fn block_order(arg: &str) -> Result<u8> {
+    let order = arg.parse::<u8>()?;
+    if !(1..=MAX_BLOCK_ORDER).contains(&order) {
+        return Err("invalid block number".into());
+    }
+    Ok(order)
+}
+
 pub fn commands(control: bool) -> &'static [&'static str] {
     if control {
         &["open", "idle", "close"]
@@ -41,6 +52,18 @@ pub fn check_delta(before: &Value, after: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_order_accepts_only_the_planned_range() {
+        assert_eq!(block_order("1").unwrap(), 1);
+        assert_eq!(
+            block_order(&MAX_BLOCK_ORDER.to_string()).unwrap(),
+            MAX_BLOCK_ORDER
+        );
+        assert!(block_order("0").is_err());
+        assert!(block_order(&(MAX_BLOCK_ORDER + 1).to_string()).is_err());
+        assert!(block_order("not-a-number").is_err());
+    }
 
     #[test]
     fn formal_has_exactly_two_reads_and_control_has_an_idle_sweep() {
