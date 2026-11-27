@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { sets796 } from '../../harness-core/frequency-layout.ts';
-import { boundaryCommandArgs, postgresSettingsArgs, sendPgbenchArgs, validateAttribution } from './final-commands.ts';
+import { boundaryCommandArgs, parseCandidate, postgresSettingsArgs, sendPgbenchArgs, validateAttribution } from './final-commands.ts';
 
 test('the CLI refuses attribution without sends-only before host setup', () => {
   const entry = fileURLToPath(new URL('final.ts', import.meta.url));
@@ -12,6 +12,25 @@ test('the CLI refuses attribution without sends-only before host setup', () => {
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /--attribution requires --sends-only with --diagnostic or --smoke/);
   }
+});
+
+test('the CLI refuses F1 without a mode and sends-only before host setup', () => {
+  const entry = fileURLToPath(new URL('final.ts', import.meta.url));
+  for (const args of [['--smoke'], ['--diagnostic'], ['--sends-only'], ['--sends-only', '--smoke', '--diagnostic']]) {
+    const result = spawnSync(process.execPath, [entry, ...args, '--candidate', 'f1', '--out', '/unused'], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /--candidate f1 requires --sends-only|--smoke \| --diagnostic/);
+  }
+});
+
+test('F1 accepts formal placement and keeps other stages available without a candidate', () => {
+  assert.equal(parseCandidate('f1', true, 'formal'), 'f1');
+  assert.equal(parseCandidate('f1', true, undefined), 'f1');
+  for (const stage of ['control', 'rehearsal2']) {
+    assert.throws(() => parseCandidate('f1', true, stage), /uses --frequency-v3 formal/);
+    assert.equal(parseCandidate(undefined, true, stage), undefined);
+  }
+  assert.throws(() => parseCandidate('f2', true, 'formal'), /unknown --candidate f2/);
 });
 
 test('a smoke attribution run takes no frequency stage on any platform', () => {

@@ -1,6 +1,7 @@
 import { attributionMetadata, functionKeys, mapMetrics, statementKeys, walKeys, type AttributionBlock, type Metrics } from './attribution.ts';
 
 type Comparison = { current: number; final: number; delta: number };
+type FinalArm = Exclude<AttributionBlock['arm'], 'current'>;
 const median = (values: number[]) => {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -9,7 +10,7 @@ const median = (values: number[]) => {
 const compare = (current: number, final: number): Comparison => ({ current, final, delta: final - current });
 
 function medians<K extends string>(
-  blocks: AttributionBlock[], keys: readonly K[], read: (block: AttributionBlock) => { label: string; perSend: Metrics<K> }[],
+  blocks: AttributionBlock[], finalArm: FinalArm, keys: readonly K[], read: (block: AttributionBlock) => { label: string; perSend: Metrics<K> }[],
 ) {
   const groups = blocks.map(block => {
     const items = new Map<string, Metrics<K>>();
@@ -20,7 +21,7 @@ function medians<K extends string>(
     return { arm: block.arm, items };
   });
   const current = groups.filter(b => b.arm === 'current');
-  const final = groups.filter(b => b.arm === 'final');
+  const final = groups.filter(b => b.arm === finalArm);
   const labels = new Set(groups.flatMap(b => [...b.items.keys()]));
   const armMedian = (arm: typeof groups, label: string) => mapMetrics(keys, key => median(arm.map(b => b.items.get(label)?.[key] ?? 0)));
   return [...labels].sort().map(label => {
@@ -45,26 +46,26 @@ function rank<K extends string>(
   return { items, unattributed };
 }
 
-export function summarizeAttribution(blocks: AttributionBlock[], plannedBlocks: number, runComplete = true) {
+export function summarizeAttribution(blocks: AttributionBlock[], plannedBlocks: number, runComplete = true, finalArm: FinalArm = 'final') {
   const current = blocks.filter(b => b.arm === 'current');
-  const final = blocks.filter(b => b.arm === 'final');
+  const final = blocks.filter(b => b.arm === finalArm);
   const coverage = blocks.map(b => ({ order: b.order, arm: b.arm, committedSends: b.transactions,
     statsIssues: b.stats.issues, walIssue: b.wal.complete ? null : b.wal.reason }));
   const complete = runComplete && blocks.length === plannedBlocks && coverage.every(b => b.walIssue === null && b.statsIssues.length === 0);
-  const status = { ...attributionMetadata, complete, runComplete, plannedBlocks, coverage };
+  const status = { ...attributionMetadata, complete, runComplete, plannedBlocks, coverage, ...(finalArm === 'final' ? {} : { finalArm }) };
   if (current.length === 0 || final.length === 0) {
     return { ...status, comparison: null };
   }
   const acrossArms = (value: (b: AttributionBlock) => number) => compare(median(current.map(value)), median(final.map(value)));
   const timeMsPerSend = acrossArms(b => b.latencyMs);
   const walBytesPerSend = acrossArms(b => b.walBytesPerSend);
-  const statements = (topLevel: boolean) => medians(blocks, statementKeys, b => b.stats.statements
+  const statements = (topLevel: boolean) => medians(blocks, finalArm, statementKeys, b => b.stats.statements
     .filter(s => s.topLevel === topLevel)
     .map(s => ({ label: s.query?.trim() || `[queryid ${s.queryId}, text unavailable]`, perSend: s.perSend })));
   const topLevel = statements(true);
   const nested = statements(false);
-  const functions = medians(blocks, functionKeys, b => b.stats.functions.map(f => ({ label: f.name, perSend: f.perSend })));
-  const walTypes = blocks.every(b => b.wal.complete) ? medians(blocks, walKeys, b => b.wal.complete
+  const functions = medians(blocks, finalArm, functionKeys, b => b.stats.functions.map(f => ({ label: f.name, perSend: f.perSend })));
+  const walTypes = blocks.every(b => b.wal.complete) ? medians(blocks, finalArm, walKeys, b => b.wal.complete
     ? b.wal.records.map(w => ({ label: `${w.resourceManager}/${w.recordType}`, perSend: w.perSend })) : []) : null;
   return {
     ...status,
@@ -98,7 +99,8 @@ export function attributionMarkdown(summary: ReturnType<typeof summarizeAttribut
   const { timeMsPerSend, walBytesPerSend, rankings } = comparison;
   const tableRow = (label: string, x: Comparison, share = '—') =>
     `| ${label} | ${fmt(x.current)} | ${fmt(x.final)} | ${fmt(x.delta)} | ${share} |`;
-  const header = ['| Item | Current | Final | Final − current | Share of total delta |', '|---|---:|---:|---:|---:|'];
+  const finalLabel = summary.finalArm ?? 'Final';
+  const header = [`| Item | Current | ${finalLabel} | ${finalLabel} − current | Share of total delta |`, '|---|---:|---:|---:|---:|'];
   const walBreakdown = new Map(comparison.medians.walTypes?.map(w => [w.label, w.delta]));
   const table = (title: string, ranking: typeof rankings.walByRecordType, includeWalBreakdown = false) => {
     lines.push('', `## ${title}`, '');

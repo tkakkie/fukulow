@@ -1,5 +1,13 @@
 import { pinned } from '../../harness-core/cpusets.ts';
 
+export function parseCandidate(candidate: string | undefined, sendsOnly: boolean, stage: string | undefined) {
+  if (candidate === undefined) return undefined;
+  if (candidate !== 'f1') throw new Error(`unknown --candidate ${candidate}; expected f1`);
+  if (!sendsOnly) throw new Error('--candidate f1 requires --sends-only with --diagnostic or --smoke');
+  if (stage !== undefined && stage !== 'formal') throw new Error('--candidate f1 uses --frequency-v3 formal');
+  return candidate;
+}
+
 export function validateAttribution(
   diagnostic: boolean, smoke: boolean, sendsOnly: boolean, stage: string | undefined, linux: boolean,
 ) {

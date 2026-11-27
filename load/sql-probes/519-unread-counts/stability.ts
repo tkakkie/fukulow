@@ -25,6 +25,9 @@ const json = (path: string) => { const t = text(path); return t === null ? null 
 const runs: RunInput[] = q.jobs.map(job => {
   const metadata = json(join(job.out, 'metadata.json'));
   if (metadata?.attribution || job.command.includes('--attribution')) throw new Error('Attribution output is diagnostic and cannot qualify the #796 host');
+  if (metadata?.candidate !== undefined || job.command.some(arg => arg === '--candidate' || arg.startsWith('--candidate='))) {
+    throw new Error('Candidate output cannot qualify the #796 host');
+  }
   if (metadata && metadata.frequencyStage !== stage) throw new Error('STOP: report is only for newly collected #796 v3 evidence of the selected stage');
   const frequencyStart = json(join(job.out, 'frequency-start.json'));
   const frequencyEnd = json(join(job.out, 'frequency-end.json'));

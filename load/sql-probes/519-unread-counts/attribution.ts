@@ -114,7 +114,7 @@ export function walWindowBytes(beforeLsn: string, afterLsn: string) {
 
 export type AttributionBlock = {
   order: number;
-  arm: 'current' | 'final';
+  arm: 'current' | 'final' | 'final+f1';
   transactions: number;
   latencyMs: number;
   walBytesPerSend: number;

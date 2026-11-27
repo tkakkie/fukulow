@@ -51,3 +51,20 @@ test('the #796 stability report refuses attribution evidence', t => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Attribution output is diagnostic and cannot qualify the #796 host/);
 });
+
+test('the #796 stability report refuses F1 from command argv or metadata', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'fukulow-stability-candidate-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const queue = join(dir, 'queue.json');
+  for (const args of [['--candidate', 'f1'], ['--candidate=f1'], []]) {
+    if (args.length === 0) writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ candidate: 'f1', frequencyStage: 'formal' }));
+    writeFileSync(queue, JSON.stringify({ name: 'candidate', chainDir: dir, hostBusy: join(dir, 'HOST-BUSY'), jobs: [{
+      name: 'candidate', issue: 796, go: { quote: 'go', date: '2026-11-27' }, worktree: dir, commit: '1234567',
+      command: ['node', 'final.ts', ...args], out: dir,
+    }] }));
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('stability.ts', import.meta.url)),
+      '--stage', 'control', '--queue', queue, '--out', join(dir, 'report.json')], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Candidate output cannot qualify the #796 host/);
+  }
+});

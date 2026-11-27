@@ -68,6 +68,18 @@ test('rankings retain negative deltas and omit shares when the total delta is ze
   assert.equal(ranking?.unattributed?.delta, 10);
 });
 
+test('F1 attribution compares the candidate blocks and labels the report', () => {
+  const candidateBlocks = blocks.map((b): AttributionBlock => b.arm === 'final' ? { ...b, arm: 'final+f1' } : b);
+  const original = summarizeAttribution(blocks, 6);
+  const candidate = summarizeAttribution(candidateBlocks, 6, true, 'final+f1');
+  assert.equal(candidate.finalArm, 'final+f1');
+  assert.ok(!Object.hasOwn(original, 'finalArm'));
+  assert.equal(candidate.complete, true);
+  assert.deepEqual(candidate.comparison, original.comparison);
+  assert.match(attributionMarkdown(candidate), /\| Current \| final\+f1 \| final\+f1 − current \|/);
+  assert.match(attributionMarkdown(original), /\| Current \| Final \| Final − current \|/);
+});
+
 test('missing WAL remains visible while time and statement WAL comparisons are retained', () => {
   const incomplete: AttributionBlock = { ...blocks[0], wal: { complete: false, reason: 'segment missing' } };
   const summary = summarizeAttribution([incomplete, ...blocks.slice(1)], 6);

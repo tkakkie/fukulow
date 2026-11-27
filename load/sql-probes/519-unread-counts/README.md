@@ -111,3 +111,25 @@ node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --attr
 Attribution requires diagnostic sends-only. Formal v3 supplies the Ubuntu placement and host gates for the same six blocks. Control changes the arm order and caps a block. Rehearsal 2 is reserved for floor qualification. The stability report rejects attribution runs.
 
 The probe checks for 40 GiB free on PostgreSQL's WAL filesystem and retains at least 8 GiB of recent WAL. It writes `block*/attribution.json` plus `attribution-summary.json` and `attribution-summary.md`. Unavailable WAL marks attribution incomplete and preserves the block's statement and function data.
+
+### F1 row-trigger candidate (`--candidate f1`)
+
+F1 applies [the candidate SQL](sql/f1-row-trigger.sql) in its own transaction on the final send template immediately after the UPDATE-first migration. It replaces the INSERT statement trigger with an AFTER INSERT row trigger. The comparison uses the pinned `current` arm and reports the modified arm as `final+f1`. `metadata.json` records the candidate name and SHA-256 of the SQL applied.
+
+The server's concurrent bulk-insert test demonstrates a deadlock with F1. A batch can acquire locks in row order across scopes, while the statement trigger sorts all counter keys in the batch.
+
+On idle Ubuntu, validate setup and counts with the five-second sends-only smoke:
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --candidate f1 --out /absolute/new/smoke-f1
+```
+
+For the scored #519 run, wait for the maintainer's go and use one job with the [#796 formal launcher setup](../../harness-core/README.md#796-frequency-validity-v3). Keep the host, image and disk checks, frozen floors and `issue: 796` for launcher routing. Put this command in the job's `command` argv and run `node load/launch.ts --queue /absolute/519-f1-queue.json`.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --candidate f1 \
+  --cpu-sets 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15' \
+  --frequency-v3 formal --perf-helper /absolute/fukulow-perf-helper --out /absolute/new/scored-f1
+```
+
+The scored run uses the same six blocks and the existing stop rule in `stop-rule.json`. Adding `--attribution` enables the instrumented diagnostic and omits scoring. The #796 stability report rejects all candidate output.
