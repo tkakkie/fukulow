@@ -8,7 +8,7 @@ import { parseArgs, promisify } from 'node:util';
 import { diagnosticScope, k6CeilingWarnings } from './diagnostic-evidence.ts';
 import type { DiagnosticSummary } from './diagnostic-integrity.ts';
 import { diagnosticLaneLabels, diagnosticRunComplete, reconcileDiagnostic } from './diagnostic-reconcile.ts';
-import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnostic.ts';
+import { buildDiagnosticK6, captureDiagnostic, diagnosticImage, diagnosticK6Sources, diagnosticOutput } from './diagnostic.ts';
 import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage, remainingArmsSkipped,
   type ReadLanes } from './diagnostic-mode.ts';
 import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
@@ -220,6 +220,7 @@ async function main() {
   // status.json: setup-failure before the first measured sample, result-failure after it (#769).
   const run = stages(output, mode, project);
   const tag = `fukulow-move-diagnostic:${project}`;
+  const k6Tag = `fukulow-move-k6:${project}`;
   const scratch = mkdtempSync(join(platform() === 'darwin' ? '/private/tmp' : tmpdir(), 'fukulow-move-'));
   const abort = new AbortController();
   const stop = () => abort.abort();
@@ -231,6 +232,7 @@ async function main() {
   let stoppedEarly: string | undefined;
   const cleanupIssues: string[] = [];
   let image: { id: string; revision: string; patchSha256?: string } | undefined;
+  let diagnosticK6Built = false;
   try {
     run.enter('source');
     if (!selection) {
@@ -252,23 +254,27 @@ async function main() {
       headroom = assertDockerHeadroom(postgresImage(), headroomBytes);
     }
     run.enter('build');
-    const k6 = command('make', ['-s', '-C', repo, 'load-image']);
-    const [k6Id, k6Arch] = docker('image', 'inspect', '--format', '{{.Id}} {{.Architecture}}', k6).split(' ');
+    const k6Base = command('make', ['-s', '-C', repo, 'load-image']);
+    const k6 = selection ? k6Tag : k6Base;
     if (selection) {
       console.log(`DIAGNOSTIC ${diagnosticScope.sendLane} · ${diagnosticExclusions}`);
+      console.log('DIAGNOSTIC: building k6 with the finite arrival schedule');
+      await buildDiagnosticK6(repo, k6Base, k6Tag, abort.signal);
+      diagnosticK6Built = true;
       console.log('DIAGNOSTIC: building the instrumented Part D image' + (attribution ? ` (${attribution})` : ''));
       image = await diagnosticImage(repo, scratch, tag, abort.signal, selection);
     }
+    const [k6Id, k6Arch] = docker('image', 'inspect', '--format', '{{.Id}} {{.Architecture}}', k6).split(' ');
     if (!image) throw new Error('Missing app image');
     const harnessFiles = command('git', ['-C', repo, 'ls-files', '--cached', '--others', '--exclude-standard', '--', 'load/move'])
-      .split('\n').filter(file => file.endsWith('.ts') || (selection && file === selection.patch));
+      .split('\n').filter(file => file.endsWith('.ts') || (selection && (file === selection.patch || diagnosticK6Sources.includes(file))));
     const tracked = ['load/seed.ts', 'load/events.ts', 'load/compose.yml', 'load/channel-log.sql', 'load/slice5/stack.ts',
       'load/slice5/fixture.ts', 'load/slice5/judge.ts', 'load/pool-before-after-summary.ts',
       'load/harness-core/stages.ts', 'load/harness-core/host.ts', ...harnessFiles];
     save(join(output, selection ? 'DIAGNOSTIC-metadata.json' : 'metadata.json'), {
       // Formal metadata keeps its pre-diagnostic key order; a rehearsal says so first.
       ...(selection ? { mode: diagnosticMode, evidence: false, ...(p.rehearsal && { rehearsal: true }),
-        scope: diagnosticScope, laneLabels: diagnosticLaneLabels, sendTimingSampleEvery: 32, readTimingSampleEvery: selection.readTimingSampleEvery, readLanes: selection.readLanes, attribution, commit, image, k6, k6Id, project, plan: p }
+        scope: diagnosticScope, laneLabels: diagnosticLaneLabels, sendTimingSampleEvery: 32, readTimingSampleEvery: selection.readTimingSampleEvery, readLanes: selection.readLanes, attribution, commit, image, k6, k6Base, k6Id, project, plan: p }
         : { ...(p.rehearsal && { mode, evidence: false }), commit, image, k6, k6Id, project, plan: p,
           thresholds: { ...thresholds, moveP95Ms: moveLimits } }),
       orderedSteps,
@@ -373,6 +379,9 @@ async function main() {
     try { cleanup(project); cleaned = true; } catch { cleanupIssues.push('run cleanup failed'); }
     if (selection && image) {
       try { docker('image', 'rm', tag); } catch { cleanupIssues.push('DIAGNOSTIC image tag cleanup failed'); }
+    }
+    if (diagnosticK6Built) {
+      try { docker('image', 'rm', k6Tag); } catch { cleanupIssues.push('DIAGNOSTIC k6 image tag cleanup failed'); }
     }
     rmSync(scratch, { recursive: true, force: true });
     process.removeListener('SIGINT', stop);

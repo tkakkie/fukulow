@@ -167,6 +167,28 @@ test('k6 parser pairs VU gauges and uses full iterations to reconstruct write oc
     [{ scenario: 'send', at: Date.parse('2026-11-20T00:00:02Z'), maxVUs: 2000 }]);
 });
 
+test('k6 dispatch evidence retains count and time bounds outside the integrity stream', async () => {
+  const point = (time: string, scenario: string, value = 1) => JSON.stringify({
+    type: 'Point', metric: 'move_request_dispatch', data: { time, value, tags: { scenario } },
+  });
+  const first = '2026-11-20T00:00:00.001Z', last = '2026-11-20T00:00:20.002Z';
+  async function* lines() {
+    yield point(last, 'channels');
+    yield point(first, 'channels');
+    yield point(first, 'reader');
+    yield point(first, 'unknown');
+    yield point('bad timestamp', 'channels');
+    yield point(first, 'channels', 2);
+    yield '{"metric":"move_request_dispatch",';
+  }
+  const evidence = await k6Evidence(lines());
+  assert.deepEqual(evidence.dispatches, {
+    channels: { count: 2, firstMs: Date.parse(first), lastMs: Date.parse(last) },
+    reader: { count: 1, firstMs: Date.parse(first), lastMs: Date.parse(first) },
+  });
+  assert.deepEqual(evidence.stream, { series: {}, invalidPoints: 0, latencies: {} });
+});
+
 test('PostgreSQL aggregation keeps query IDs precise and leaves sampling gaps unweighted', () => {
   const id = '-9223372036854775808';
   const waits = [{ id, type: 'Lock', event: 'advisory', count: 2 }, { id, type: 'IO', event: 'WALSync', count: 1 }];

@@ -15,6 +15,13 @@ import { diagnosticLabel } from './diagnostic-mode.ts';
 const exec = promisify(execFile);
 const topStatementTexts = 25;
 
+export const diagnosticK6Sources = ['load/move/k6-diagnostic.Dockerfile', 'load/move/k6-exact-arrivals.patch'];
+
+export async function buildDiagnosticK6(repo: string, base: string, tag: string, signal: AbortSignal) {
+  await exec('docker', ['buildx', 'build', '--load', '--tag', tag, '--build-arg', `K6_IMAGE=${base}`,
+    '-f', join(repo, diagnosticK6Sources[0]), join(repo, 'load/move')], { signal, maxBuffer: 16 * 1024 * 1024 });
+}
+
 export async function diagnosticImage(repo: string, scratch: string, tag: string, signal: AbortSignal,
   target: { commit: string; patch: string }) {
   const source = join(scratch, 'source');

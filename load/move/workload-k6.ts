@@ -31,6 +31,7 @@ const start = new Counter('move_start_ms');
 const topicItems = new Counter('move_topic_reads');
 const diagnostic = __ENV.MOVE_DIAGNOSTIC === '1';
 const scenarioStart = new Counter('move_scenario_start_ms');
+const dispatch = diagnostic ? new Counter('move_request_dispatch') : undefined;
 export const options: Options = workload;
 
 function observe(lane: LaneName, outcome: Outcome, ms: number) {
@@ -51,6 +52,7 @@ function recordScenarioStart() {
 export function reader() {
   recordScenarioStart();
   if (execution.scenario.iterationInTest === 0) start.add(execution.scenario.startTime);
+  dispatch?.add(1);
   const r = http.get(`${base}/api/v1/orgs/${data.otherOrganization}/channels`, params('other_organization', data.reader));
   observe('reader', httpOutcome(r, 200), r.timings.duration);
 }
@@ -60,6 +62,7 @@ export function send() {
   const i = execution.scenario.iterationInTest;
   const member = i % tokens.length;
   const target = step.part === 'C' ? otherChannels[i % otherChannels.length] : data.chain.channel;
+  dispatch?.add(1);
   const r = publish(base, data.organization, target, tokens[member], member, { client_message_id: uuid(), body: 'Load test message' }, 'send');
   observe('send', httpOutcome(r, 201), r.timings.duration);
 }
@@ -69,6 +72,7 @@ export function move() {
   recordScenarioStart();
   const topic = data.chain.topics[destination];
   const input: MoveChainRequest = { operation_id: uuid(), expected_version: version, history_generation: data.generation, topic_id: topic };
+  dispatch?.add(1);
   const r = http.post(`${channel}/messages/${data.chain.root}/move`, JSON.stringify(input),
     { ...params('move', data.owner), responseType: 'text' });
   const ack = r.status === 200 ? json<MoveChainResponse>(r) : undefined;
@@ -82,6 +86,7 @@ export function move() {
 
 export function channels() {
   recordScenarioStart();
+  dispatch?.add(1);
   const r = http.get(`${org}/channels`, { ...params('channel_list', data.reader), responseType: 'text' });
   const full = r.status === 200 && json<ChannelList>(r)?.channels?.length === data.channels.length;
   observe('channels', r.status === 200 && !full ? 'otherErrors' : httpOutcome(r, 200), r.timings.duration);
@@ -89,6 +94,7 @@ export function channels() {
 
 export function topics() {
   recordScenarioStart();
+  dispatch?.add(1);
   const r = http.get(`${channel}/topics?limit=${p.topicLimit}`, { ...params('topic_list', data.reader), responseType: 'text' });
   const full = r.status === 200 && json<TopicPage>(r)?.topics?.length === p.topicLimit;
   topicItems.add(1);

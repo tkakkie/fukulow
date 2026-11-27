@@ -209,19 +209,31 @@ export function k6CeilingWarnings(stderr: string) {
 export async function k6Evidence(lines: AsyncIterable<string>, fusedRank = false) {
   const vus = new Map<number, { at: number; active?: number; allocated?: number }>();
   const drops: { at: number; scenario: Scenario; count: number }[] = [];
+  const dispatches: Partial<Record<Scenario, { count: number; firstMs: number; lastMs: number }>> = {};
   const busy: Record<Lane, { at: number; change: number }[]> = { send: [], move: [] };
   const completed503: Record<Scenario, number> = Object.fromEntries(scenarios.map(s => [s, 0])) as Record<Scenario, number>;
   const stream = diagnosticStream(fusedRank);
   for await (const line of lines) {
     stream.add(line);
-    if (!/"metric"\s*:\s*"(vus|vus_max|dropped_iterations|iteration_duration|http_reqs)"/.test(line)) continue;
-    const { type, metric, data } = parseLine(line);
+    const match = /"metric"\s*:\s*"(vus|vus_max|dropped_iterations|iteration_duration|http_reqs|move_request_dispatch)"/.exec(line);
+    if (!match) continue;
+    let point;
+    try { point = parseLine(line); } catch (error) {
+      if (match[1] !== 'move_request_dispatch') throw error;
+      continue;
+    }
+    const { type, metric, data } = point;
     if (type !== 'Point') continue;
     const { time: timestamp, value, tags } = object(data);
     const at = time(timestamp);
     const { scenario, status } = object(tags);
     if (!Number.isFinite(at) || !nonnegative(value)) continue;
-    if ((metric === 'vus' || metric === 'vus_max') && integer(value)) {
+    if (metric === 'move_request_dispatch' && value === 1 && member(scenarios, scenario)) {
+      const group = dispatches[scenario] ??= { count: 0, firstMs: at, lastMs: at };
+      group.count++;
+      group.firstMs = Math.min(group.firstMs, at);
+      group.lastMs = Math.max(group.lastMs, at);
+    } else if ((metric === 'vus' || metric === 'vus_max') && integer(value)) {
       const sample = vus.get(at) ?? { at };
       sample[metric === 'vus' ? 'active' : 'allocated'] = value;
       vus.set(at, sample);
@@ -243,7 +255,7 @@ export async function k6Evidence(lines: AsyncIterable<string>, fusedRank = false
       activeAtDrop.set(drop, inFlight);
     }
   }
-  return { stream: stream.finish(), vus: [...vus.values()].sort((a, b) => a.at - b.at), completed503,
+  return { stream: stream.finish(), dispatches, vus: [...vus.values()].sort((a, b) => a.at - b.at), completed503,
     drops: drops.map(drop => ({ ...drop, reconstructedWriteIterationsInFlight: activeAtDrop.get(drop) ?? null })) };
 }
 
