@@ -9,8 +9,8 @@ import { cleanupCluster, names, type Names } from './cluster.ts';
 import { callerLock, checkIdle, hostPlacement } from './host.ts';
 import { judge } from './judge.ts';
 import { git, loadManifest, verifyPinnedSchema } from './manifest.ts';
-import { formalPairs, reviewedAssignments } from './arms.ts';
-import { options, smokeLabel } from './options.ts';
+import { formalPairs } from './arms.ts';
+import { options, rehearsalLabel, smokeLabel } from './options.ts';
 import { worker, type Evidence } from './worker.ts';
 
 const workerResources = 'FUKULOW_D3R_LEAK_RESOURCES';
@@ -47,14 +47,22 @@ async function supervise(args: ReturnType<typeof options>, argv: string[], resou
       save(join(args.out, 'run-status.json'), {label: smokeLabel, cleanupVerified, completed: exitCode === 0});
       return exitCode;
     }
+    let hostBusy = true, idle = true;
+    try { callerLock(); }
+    catch { hostBusy = false; }
+    try { checkIdle([], []); }
+    catch { idle = false; }
+    if (args.mode === 'rehearsal') {
+      const completed = exitCode === 0 && hostBusy && idle;
+      save(join(args.out, 'run-status.json'), {label: rehearsalLabel, cleanupVerified, hostBusy, idle, completed});
+      return exitCode || Number(!completed);
+    }
     let evidence: Evidence;
     try { evidence = JSON.parse(readFileSync(join(args.out, 'evidence.json'), 'utf8')); }
     catch { evidence = {checks: {}, pairs: []}; }
     evidence.checks.cleanup = cleanupVerified;
-    try { callerLock(); }
-    catch { evidence.checks.hostBusy = false; }
-    try { checkIdle([], []); }
-    catch { evidence.checks.idle = false; }
+    if (!hostBusy) evidence.checks.hostBusy = false;
+    if (!idle) evidence.checks.idle = false;
     if (interrupted || workerCode) delete evidence.checks.identity;
     save(join(args.out, 'evidence.json'), evidence);
     const verdict = judge(evidence);
@@ -79,12 +87,12 @@ async function main(argv: string[]) {
   }
   const manifest = loadManifest();
   verifyPinnedSchema();
-  if (args.mode === 'formal') {
+  if (args.mode !== 'smoke') {
+    formalPairs(manifest.frozen.positiveK, manifest.frozen.reviewedAssignments);
     assert.equal(git('status', '--porcelain'), '', 'Formal checkout must be clean');
     callerLock();
     hostPlacement();
     checkIdle([], []);
-    formalPairs(manifest.frozen.positiveK, reviewedAssignments);
   }
   refuseLeftovers(docker);
   mkdirSync(args.out, {mode: 0o700});

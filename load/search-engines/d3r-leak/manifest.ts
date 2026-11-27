@@ -5,7 +5,8 @@ import { command } from '../bench.ts';
 import { hash } from '../manifest.ts';
 import { manifestFile as d3rManifest, removedSettings } from '../d3r/manifest.ts';
 import { productionPath, readSource, sources } from '../d3r/path.ts';
-import { formal, smoke } from './design.ts';
+import { reviewedAssignments } from './arms.ts';
+import { formal, rehearsal, smoke } from './design.ts';
 import { bootstrap } from './samples.ts';
 
 export const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -22,7 +23,7 @@ export const base = JSON.parse(readSource(d3rManifest)).frozen as {
 };
 
 export const settings = {...base.settings, autovacuum: 'off'};
-export const freeze = {formal, smoke, bootstrap, smokeCandidates, initialSeed};
+export const freeze = {formal, smoke, rehearsal, bootstrap, smokeCandidates, initialSeed};
 
 export function snapshot(positiveK: number | null) {
   const inputs = [...base.sourceHashes.map(s => s.path), ...Object.values(sources),
@@ -34,7 +35,8 @@ export function snapshot(positiveK: number | null) {
     ...readdirSync(new URL('.', import.meta.url)).filter(file => file.endsWith('.ts') && !file.endsWith('.test.ts'))
       .map(file => `${harness}/${file}`),
   ];
-  return {version: 19, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze, positiveK,
+  return {version: 19, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze,
+    reviewedAssignments, positiveK,
     migrations: base.migrations, node: base.node,
     sourceHashes: [...new Set(inputs)].sort().map(path => ({path, sha256: hash(readSource(path))}))};
 }
@@ -56,7 +58,10 @@ export function verifyPinnedSchema() {
 }
 
 export function loadManifest() {
-  const text = readSource(manifestFile);
+  return verify(readSource(manifestFile));
+}
+
+export function verify(text: string) {
   const doc = JSON.parse(text) as {sha256: string; frozen: ReturnType<typeof snapshot>};
   assert.equal(doc.sha256, hash(JSON.stringify(doc.frozen)), 'Frozen leak manifest hash mismatch');
   assert.deepEqual(snapshot(doc.frozen.positiveK), doc.frozen, 'Frozen leak manifest contents differ from checkout');

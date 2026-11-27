@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { save, SqlStatementTimeoutError } from '../bench.ts';
 import { readSource, sources } from '../d3r/path.ts';
-import { formalPairs, judgedPairs, positiveControl, reviewedAssignments } from './arms.ts';
+import { formalPairs, judgedPairs, positiveControl } from './arms.ts';
 import { migrate, placement, serverIdentity, start, type Names } from './cluster.ts';
-import { formal, schedule, smoke } from './design.ts';
+import { schedule } from './design.ts';
 import { PlanIdentityError } from './page.ts';
 import { callerLock, checkIdle, hostPlacement } from './host.ts';
 import { invalidChecks, type PairEvidence } from './judge.ts';
 import { freeze, git, loadManifest, verifyPinnedSchema } from './manifest.ts';
-import { smokeLabel, type options } from './options.ts';
+import { rehearsalLabel, smokeLabel, type options } from './options.ts';
 import { runPair, type Stage } from './pair.ts';
 import { SampleCountError } from './samples.ts';
 
@@ -28,16 +28,17 @@ function recordFailure(evidence: Evidence, step: Step, error: unknown) {
 
 export async function worker(args: Options, resources: Names) {
   const mode = args.mode;
+  const label = mode === 'smoke' ? smokeLabel : mode === 'rehearsal' ? rehearsalLabel : null;
   const reportPath = join(args.out, 'evidence.json');
   const evidence: Evidence = {checks: {}, pairs: []};
   let stage: Step = 'identity';
   try {
     const manifest = loadManifest();
     const path = verifyPinnedSchema();
-    const design = mode === 'smoke' ? smoke : formal;
+    const design = freeze[mode];
     const pairs = mode === 'smoke' ? [...judgedPairs(design),
       ...args.ks.map(k => ({...positiveControl(k), id: `P-${k}`}))] :
-      formalPairs(manifest.frozen.positiveK, reviewedAssignments);
+      formalPairs(manifest.frozen.positiveK, manifest.frozen.reviewedAssignments);
     const seed = freeze.initialSeed;
     const plan = schedule(pairs.map(pair => pair.id), seed, design.blocksPerArm);
     const sourceIdentity = () => {
@@ -50,7 +51,7 @@ export async function worker(args: Options, resources: Names) {
     };
     const initial = sourceIdentity();
     stage = 'hostBusy';
-    const lock = mode === 'formal' ? callerLock() : undefined;
+    const lock = mode === 'smoke' ? undefined : callerLock();
     stage = 'identity';
     const coordinator = lock ? hostPlacement() : null;
     const recheckHost = () => {
@@ -63,7 +64,7 @@ export async function worker(args: Options, resources: Names) {
     recheckHost();
     stage = 'identity';
     const startup = await start(resources, lock?.session);
-    save(join(args.out, 'identity.json'), {mode, label: mode === 'smoke' ? smokeLabel : null,
+    save(join(args.out, 'identity.json'), {mode, label,
       ...initial, ...startup, coordinator, lock, node: process.version, design, plan, pairs,
       cacheCondition: 'fixture and RLS readbacks before block sampling; first transaction per client per block separate'});
     save(join(args.out, 'manifest.json'), manifest);
@@ -71,8 +72,7 @@ export async function worker(args: Options, resources: Names) {
     migrate(resources.client);
     for (const [index, pair] of pairs.entries()) {
       const result = await runPair(resources.client, pair, plan[index].blocks, design, seed, args.out,
-        {page: path.page, engine: readSource(sources.engine)}, name => { stage = name; }, recheckHost,
-        mode === 'smoke' ? smokeLabel : null);
+        {page: path.page, engine: readSource(sources.engine)}, name => { stage = name; }, recheckHost, label);
       evidence.pairs.push(result);
       if (mode === 'smoke' && pair.id.startsWith('P-')) {
         console.log(`${smokeLabel} ${pair.id}: p50 ${result.ratios.p50.toFixed(3)}, p95 ${result.ratios.p95.toFixed(3)}`);
@@ -86,15 +86,17 @@ export async function worker(args: Options, resources: Names) {
     if (mode === 'formal') {
       for (const check of invalidChecks) if (check !== 'cleanup') evidence.checks[check] = true;
       save(reportPath, evidence);
-    } else {
+    } else if (mode === 'smoke') {
       const positiveControls = evidence.pairs.filter(pair => pair.id.startsWith('P-'))
         .map(pair => ({k: Number(pair.id.slice(2)), ratios: pair.ratios}));
       save(join(args.out, 'smoke.json'), {label: smokeLabel, positiveControls, completedPairs: pairs.map(pair => pair.id)});
+    } else {
+      save(join(args.out, 'rehearsal.json'), {label, pairs: evidence.pairs});
     }
   } catch (error) {
     recordFailure(evidence, stage, error);
     if (mode === 'formal') save(reportPath, evidence);
-    else save(join(args.out, 'smoke-error.json'), {label: smokeLabel, stage, error: evidence.error});
+    else save(join(args.out, `${mode}-error.json`), {label, stage, error: evidence.error});
     throw error;
   }
 }

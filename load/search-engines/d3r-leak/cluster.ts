@@ -109,6 +109,7 @@ COMMIT;
 CREATE DATABASE ${template} TEMPLATE template0;`);
   const setup = database(client, template).owner;
   setup(base.migrations.map(file => `BEGIN;\n${readSource(file)}\nCOMMIT;`).join('\n'));
+  setup('CREATE EXTENSION pg_visibility WITH SCHEMA public;');
   setup(`${forceSearchRls}\n${readSource('deploy/db-grants.sql')}\n${baseFixtureSql()}`);
 }
 

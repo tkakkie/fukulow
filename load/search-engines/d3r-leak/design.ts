@@ -1,5 +1,6 @@
 export const formal = {blocksPerArm: 10, clients: 5, measuredPerClient: 20, messages: 24_000, many: 1_000};
 export const smoke = {blocksPerArm: 2, clients: 2, measuredPerClient: 8, messages: 600, many: 40};
+export const rehearsal = {...formal, blocksPerArm: 1};
 export type Design = typeof formal;
 
 export const queries = {Q2: 'zx', Q4: 'qvwx'};

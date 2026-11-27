@@ -1,5 +1,5 @@
 {
-  "sha256": "bb4bbeccafa3ad049b697b994d899e531d718104287fd6592039274a90149ade",
+  "sha256": "23bfea5d738bd8f19a43ca52d79224e2ca85a69537a02350af62ebf71bfe9157",
   "frozen": {
     "version": 19,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -43,6 +43,13 @@
         "messages": 600,
         "many": 40
       },
+      "rehearsal": {
+        "blocksPerArm": 1,
+        "clients": 5,
+        "measuredPerClient": 20,
+        "messages": 24000,
+        "many": 1000
+      },
       "bootstrap": {
         "resamples": 10000,
         "seed": 689202611,
@@ -55,6 +62,27 @@
         512
       ],
       "initialSeed": 689202610
+    },
+    "reviewedAssignments": {
+      "E": {
+        "scope": "C1",
+        "query": "Q2"
+      },
+      "S": {
+        "query": "Q4"
+      },
+      "V": {
+        "scope": "C2",
+        "query": "Q4",
+        "reference": {
+          "scope": "C2",
+          "query": "Q4",
+          "slots": 1000,
+          "matches": 1000,
+          "candidates": 0
+        }
+      },
+      "negative": "C2-Q4"
     },
     "positiveK": null,
     "migrations": [
@@ -185,7 +213,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/arms.ts",
-        "sha256": "3735f3e5afdef1273bad30c39973edbbdb21fcc4634e96e0712d2f791d525531"
+        "sha256": "cf7e086f04ab64844958089f8e03b25b940c0e23050e9b3872f8ed3c8d71e950"
       },
       {
         "path": "load/search-engines/d3r-leak/block.ts",
@@ -193,15 +221,15 @@
       },
       {
         "path": "load/search-engines/d3r-leak/cluster.ts",
-        "sha256": "82c2e7f25a0ff6e104f38177664fce5c70c322e092098bdad80f99475851e41c"
+        "sha256": "5bb66bcb6ca992664ae206fa3d27e7c4c096a9c59b7fb3a6b2a53f2040e02dc3"
       },
       {
         "path": "load/search-engines/d3r-leak/design.ts",
-        "sha256": "532c34b3d1858c000f661e3915080cee21f84821e59e767049edcf564ec817e3"
+        "sha256": "5e493e942c11c9703695aaa1aba67e61387a1342fbf3d50e8223eb2ee30d815d"
       },
       {
         "path": "load/search-engines/d3r-leak/fixture.ts",
-        "sha256": "82f8085e7536926cc5a4446dc17094540cd983cde922f7cf8ccc7ac1bf17da1e"
+        "sha256": "ec1e09f289531f57f753d4ff457559718cc9506a8b17abeb836de933c28abd82"
       },
       {
         "path": "load/search-engines/d3r-leak/host.ts",
@@ -213,11 +241,11 @@
       },
       {
         "path": "load/search-engines/d3r-leak/manifest.ts",
-        "sha256": "5264492b37e12145f00c9ffcde1a74f93c957cd66045294ed95137f7a1724330"
+        "sha256": "6f747dca30a3f23b330eeed0294db3162606fcfadf2deb4a0c71f1541d9163bd"
       },
       {
         "path": "load/search-engines/d3r-leak/options.ts",
-        "sha256": "d6d9ae0cfdbb42876ad34e6164e58453be1067e6bf762f3eba68a0dd81e52393"
+        "sha256": "ff226c8f360de153e84d01ab2be1436b72add575a079ef02b36cf10eccedb7f3"
       },
       {
         "path": "load/search-engines/d3r-leak/page.ts",
@@ -225,7 +253,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/pair.ts",
-        "sha256": "25d67fa9f671837ac926769b8b9a84a5452af01681c24a8d915c29efaab28856"
+        "sha256": "02a29844465739ae147cfc3801e99f4e74d4ed47c941e7b886a328ef8a63df96"
       },
       {
         "path": "load/search-engines/d3r-leak/plan.ts",
@@ -233,15 +261,19 @@
       },
       {
         "path": "load/search-engines/d3r-leak/run.ts",
-        "sha256": "05b87de22824b4b231e1513b2aaf88fe029468b637bdf98c4580049d4431b141"
+        "sha256": "d3e0863dd08463fdf11bd5ea21e0f4d510ad07c1917b25b4a45e94f7f80d52dd"
       },
       {
         "path": "load/search-engines/d3r-leak/samples.ts",
         "sha256": "84ebdc92e3b6ff44626aa1ad53f13bc49d41da35fa2c3785eb216c28ecc3564c"
       },
       {
+        "path": "load/search-engines/d3r-leak/visibility.ts",
+        "sha256": "a80f8b5a05ce89fd5a79ee2c4889cb8d8734608e4a870f8fd9fbb2815a77c54d"
+      },
+      {
         "path": "load/search-engines/d3r-leak/worker.ts",
-        "sha256": "d6d3f0e3609db703b1ae7366d50b6e722f74874676a6394f5ecfd2bd7375abc6"
+        "sha256": "7dd88673bf766e851071b05d9ac1883dc23b2f708dcf0859455a8d11073b08be"
       },
       {
         "path": "load/search-engines/d3r/acceptance.ts",

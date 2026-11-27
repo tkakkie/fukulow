@@ -63,6 +63,8 @@ export function visibilityMap(scope: Scope, query: Query, design: Design, refere
 }
 
 export const slotScope = (arm: ArmFixture) => arm.scope ? hidden[arm.scope] : {o: 1, c: 0};
+export const slotIds = (column: string, arm: ArmFixture) =>
+  `${column} BETWEEN '${uuid(3_000_001)}' AND '${uuid(3_000_000 + arm.slots)}'`;
 export const backgroundCount = (arm: ArmFixture, design: Design) => design.messages - arm.slots - 1;
 export function foreignMessageCount(arm: ArmFixture, design: Design) {
   const otherOrg = allScopes.findIndex(scope => scope.o === 2);
@@ -141,8 +143,12 @@ export type DiagnosticAssignments = {
   negative: string;
 };
 
-// A formal run needs the confirmed assignments in its manifest.
-export const reviewedAssignments: DiagnosticAssignments | null = null;
+export const reviewedAssignments = {
+  E: {scope: 'C1', query: 'Q2'},
+  S: {query: 'Q4'},
+  V: {scope: 'C2', query: 'Q4', reference: foreignArm('C2', 'Q4', formal.many, formal.many)},
+  negative: 'C2-Q4',
+} satisfies DiagnosticAssignments;
 
 export function formalPairs(positiveK: number | null, assignments: DiagnosticAssignments | null): Pair[] {
   assert.ok(assignments, 'Formal fixture assignments are unresolved for E, S, V and A/A');

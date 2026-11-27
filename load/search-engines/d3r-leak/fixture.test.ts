@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { formalPairs, reviewedAssignments, hit, existence, foreignMessageCount, globalSize, judgedPairs, negativeControl, positiveControl,
+import { formalPairs, hit, existence, foreignMessageCount, globalSize, judgedPairs, negativeControl, positiveControl,
   slotBody, visible, visibilityMap } from './arms.ts';
-import { formal, judgedIds, queries } from './design.ts';
+import { formal, judgedIds, queries, rehearsal } from './design.ts';
+import { loadManifest } from './manifest.ts';
 import { checkPage } from './page.ts';
 import { options } from './options.ts';
 import { productionPath } from '../d3r/path.ts';
@@ -61,8 +62,33 @@ test('page readback requires all five visible scopes and exactly the expected ro
   assert.throws(() => checkPage(app(hitRow, visible.slice(1)), page, 'qvwx'));
 });
 
-test('formal cannot proceed with unresolved pre-registration assignments or a caller-supplied K', () => {
-  assert.throws(() => formalPairs(128, reviewedAssignments), /assignments are unresolved/);
+test('the frozen assignments wire E, S, V and A/A to the reviewed fixtures', () => {
+  const {frozen} = loadManifest();
+  const pairs = new Map(formalPairs(128, frozen.reviewedAssignments).map(pair => [pair.id, pair]));
+  const {few, many} = pairs.get('C2-Q4')!;
+  const e = pairs.get('E')!;
+  assert.deepEqual([e.few.scope, e.few.query, e.few.matches], ['C1', 'Q2', 0]);
+  assert.deepEqual([e.many.scope, e.many.query, e.many.matches], ['C1', 'Q2', formal.many]);
+  const s = pairs.get('S')!;
+  assert.deepEqual([s.few.query, s.many.query], ['Q4', 'Q4']);
+  assert.equal(s.many.extraForeignMessages, 9 * foreignMessageCount(s.few, formal));
+  assert.deepEqual(pairs.get('V'), {id: 'V', few: many, many: {...many, afterVacuum: true}});
+  assert.deepEqual(pairs.get('A/A'), {id: 'A/A', few, many: few});
+  assert.notEqual(pairs.get('A/A')!.few, pairs.get('A/A')!.many);
+});
+
+test('formal proceeds past the confirmed assignments and requires K from the frozen manifest', () => {
+  assert.throws(() => formalPairs(128, null), /assignments are unresolved/);
+  const {frozen} = loadManifest();
+  assert.throws(() => formalPairs(null, frozen.reviewedAssignments), /Freeze P K/);
   assert.throws(() => options(['--formal', '--out=out', '--k=128']), /frozen manifest/);
   assert.deepEqual(options(['--smoke', '--out=out', '--k=32,128']).ks, [32, 128]);
+});
+
+test('rehearsal uses full-size fixtures, one block per arm and the frozen K', () => {
+  const {frozen} = loadManifest();
+  assert.equal(options(['--rehearsal', '--out=out']).mode, 'rehearsal');
+  assert.throws(() => options(['--rehearsal', '--out=out', '--k=128']), /frozen manifest/);
+  assert.deepEqual(frozen.freeze.rehearsal, rehearsal);
+  assert.deepEqual(rehearsal, {...formal, blocksPerArm: 1});
 });

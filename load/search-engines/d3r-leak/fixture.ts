@@ -4,7 +4,7 @@ import { scopeContext } from '../d3r/path.ts';
 import { channel, literal, org, uuid } from '../seed.ts';
 import { directRls, directRlsExpected, verifyRls } from '../d3r/rls.ts';
 import { appSessionSettings } from '../manifest.ts';
-import { backgroundSql, finishSequencesSql, foreignMessageCount, hit, slotScope, slotsSql, visible, type ArmFixture } from './arms.ts';
+import { backgroundSql, finishSequencesSql, foreignMessageCount, hit, slotIds, slotScope, slotsSql, visible, type ArmFixture } from './arms.ts';
 import { queries, type Design } from './design.ts';
 
 export type SyncSql = (text: string) => string;
@@ -58,7 +58,7 @@ export function readFixture(owner: SyncSql, arm: ArmFixture, design: Design) {
   const scopeList = visible.map(literal).join(', ');
   const see = `organization_id = '${org(1)}' AND channel_id IN (${scopeList})`;
   const visibleRows = `(${see})`;
-  const slots = `id BETWEEN '${uuid(3_000_001)}' AND '${uuid(3_000_000 + arm.slots)}'`;
+  const slots = slotIds('id', arm);
   const extra = `id BETWEEN '${uuid(4_000_001)}' AND '${uuid(4_000_000 + (arm.extraForeignMessages ?? 0))}'`;
   const {o, c} = slotScope(arm);
   const inScope = `organization_id = '${org(o)}' AND channel_id = '${channel(o, c)}'`;
