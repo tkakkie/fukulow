@@ -85,3 +85,9 @@ test('wall-clock reversal is not sorted away',()=>{
   const rows=fixture();rows[10].timestamp=rows[9].timestamp;
   assert.match(evaluate(rows).reasons.join(),/Non-monotonic.*timestamps/);
 });
+
+test('production pool parser rejects instrumented and malformed lines',async()=>{
+  const {parseProductionPoolLine,productionPoolEvidence}=await import('./dms-formal-pool.ts');
+  for(const line of ['','{}','event=measure_pool us=1 active=0 size=32 error=false','event=measure_hold op=x wait_us=1 hold_us=1 active=0 waiting=0 http=0 acquired=true'])assert.equal(parseProductionPoolLine(line),undefined);
+  assert.match(productionPoolEvidence(['{}'],0,1000,{complete:true,startedAt:0,endedAt:1000}).reasons.join(),/Missing pool_stats/);
+});
