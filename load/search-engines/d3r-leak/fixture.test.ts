@@ -1,0 +1,101 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { formalPairs, hit, existence, foreignMessageCount, globalSize, judgedPairs, negativeControl, positiveControl,
+  slotBody, slotsSql, visible, visibilityMap } from './arms.ts';
+import { formal, judgedIds, queries, rehearsal } from './design.ts';
+import { loadManifest } from './manifest.ts';
+import { checkPage } from './page.ts';
+import { options } from './options.ts';
+import { productionPath } from '../d3r/path.ts';
+
+test('the judged matrix replaces same-length foreign decoys with exactly 1 or 1,000 whole query tokens', () => {
+  assert.deepEqual(judgedPairs(formal).map(pair => pair.id), judgedIds);
+  for (const {few, many} of judgedPairs(formal)) {
+    assert.equal(few.slots, 1_000);
+    assert.equal(few.slots, many.slots);
+    assert.equal(few.scope, many.scope);
+    assert.equal(few.query, many.query);
+    for (const arm of [few, many]) {
+      const slots = Array.from({length: arm.slots}, (_, i) => slotBody(arm, i + 1));
+      assert.equal(slots.filter(body => body.includes(queries[arm.query])).length, arm === few ? 1 : 1_000);
+      assert.ok(slots.every(body => body.length === 4));
+    }
+  }
+});
+
+test('P shares Q4’s trigram in exactly K slots while failing the full token recheck', () => {
+  const {few, many} = positiveControl(128);
+  assert.equal(few.query, 'Q4');
+  assert.equal(few.candidates, 0);
+  assert.equal(many.candidates, 128);
+  assert.equal(few.scope, undefined);
+  assert.equal(many.scope, undefined);
+  const body = slotBody(many, 128);
+  assert.ok(body.includes(queries.Q4.slice(0, 3)));
+  assert.ok(!body.includes(queries.Q4));
+  assert.equal(body.length, slotBody(few, 128).length);
+});
+
+test('candidate SQL uses the candidate body even when earlier slots match', () => {
+  const arm = {...positiveControl(128).many, matches: 1};
+  assert.match(slotsSql(arm, formal), /WHEN i <= 1 THEN 'qvwx'\s+WHEN i <= 128 THEN 'qvwy'/);
+});
+
+test('reported-only builders apply exact counts to explicitly supplied reference assignments', () => {
+  const e = existence('C3', 'Q2', formal);
+  assert.deepEqual([e.few.matches, e.many.matches], [0, 1_000]);
+  const s = globalSize('Q4', formal);
+  assert.equal(s.many.extraForeignMessages, 9 * foreignMessageCount(s.few, formal));
+  assert.equal(s.many.matches, 0);
+  const ref = judgedPairs(formal).at(-1)!.few;
+  const v = visibilityMap('C3', 'Q4', formal, ref);
+  assert.equal(v.few, ref);
+  assert.equal(v.many.afterVacuum, true);
+  assert.equal(v.many.matches, 1_000);
+  const negative = negativeControl(ref);
+  assert.notEqual(negative.few, negative.many);
+  assert.deepEqual(negative.few, negative.many);
+});
+
+test('page readback requires all five visible scopes and exactly the expected row', () => {
+  const page = productionPath().page;
+  const app = (response: string, scope = visible) => (sql: string) =>
+    sql.includes('PREPARE') ? `scope-context\n${response}` : JSON.stringify([scope, true, 'qvwx']);
+  const hitRow = `${hit}|at`;
+  assert.equal(checkPage(app(hitRow), page, 'qvwx').visiblePage, hitRow);
+  assert.throws(() => checkPage(app(`other|at\n${hitRow}`), page, 'qvwx'), /exactly one row/);
+  assert.throws(() => checkPage(app(hitRow, visible.slice(1)), page, 'qvwx'));
+});
+
+test('the frozen assignments wire E, S, V and A/A to the reviewed fixtures', () => {
+  const {frozen} = loadManifest();
+  const pairs = new Map(formalPairs(128, frozen.reviewedAssignments).map(pair => [pair.id, pair]));
+  const {few, many} = pairs.get('C2-Q4')!;
+  const e = pairs.get('E')!;
+  assert.deepEqual([e.few.scope, e.few.query, e.few.matches], ['C1', 'Q2', 0]);
+  assert.deepEqual([e.many.scope, e.many.query, e.many.matches], ['C1', 'Q2', formal.many]);
+  const s = pairs.get('S')!;
+  assert.deepEqual([s.few.query, s.many.query], ['Q4', 'Q4']);
+  assert.equal(s.many.extraForeignMessages, 9 * foreignMessageCount(s.few, formal));
+  assert.deepEqual(pairs.get('V'), {id: 'V', few: many, many: {...many, afterVacuum: true}});
+  assert.deepEqual(pairs.get('A/A'), {id: 'A/A', few, many: few});
+  assert.notEqual(pairs.get('A/A')!.few, pairs.get('A/A')!.many);
+});
+
+test('formal proceeds past the confirmed assignments and requires K from the frozen manifest', () => {
+  assert.throws(() => formalPairs(128, null), /assignments are unresolved/);
+  const {frozen} = loadManifest();
+  for (const k of [null, 0, -1, 1.5, formal.messages]) {
+    assert.throws(() => formalPairs(k, frozen.reviewedAssignments), /Freeze P K/);
+  }
+  assert.throws(() => options(['--formal', '--out=out', '--k=128']), /frozen manifest/);
+  assert.deepEqual(options(['--smoke', '--out=out', '--k=32,128']).ks, [32, 128]);
+});
+
+test('rehearsal uses full-size fixtures, one block per arm and the frozen K', () => {
+  const {frozen} = loadManifest();
+  assert.equal(options(['--rehearsal', '--out=out']).mode, 'rehearsal');
+  assert.throws(() => options(['--rehearsal', '--out=out', '--k=128']), /frozen manifest/);
+  assert.deepEqual(frozen.freeze.rehearsal, rehearsal);
+  assert.deepEqual(rehearsal, {...formal, blocksPerArm: 1});
+});
