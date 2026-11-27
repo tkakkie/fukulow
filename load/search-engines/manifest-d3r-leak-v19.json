@@ -1,5 +1,5 @@
 {
-  "sha256": "23bfea5d738bd8f19a43ca52d79224e2ca85a69537a02350af62ebf71bfe9157",
+  "sha256": "51563721f22e4945222d897c556c3e604c066264620528d407f283342c87ca11",
   "frozen": {
     "version": 19,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -213,7 +213,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/arms.ts",
-        "sha256": "cf7e086f04ab64844958089f8e03b25b940c0e23050e9b3872f8ed3c8d71e950"
+        "sha256": "07a8c5b0549960b4074c579a858ed5e2ac3147d702974f27da444f856532f5d0"
       },
       {
         "path": "load/search-engines/d3r-leak/block.ts",
@@ -261,7 +261,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/run.ts",
-        "sha256": "d3e0863dd08463fdf11bd5ea21e0f4d510ad07c1917b25b4a45e94f7f80d52dd"
+        "sha256": "78ad3716c7993b450e7f58af704412ad6fd641933ddb134ac9e2eae7fac6b6af"
       },
       {
         "path": "load/search-engines/d3r-leak/samples.ts",

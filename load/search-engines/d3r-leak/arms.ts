@@ -10,6 +10,7 @@ export const hidden = {
 };
 export const allScopes = [...visible.map((_, c) => ({o: 1, c})), ...Object.values(hidden)];
 const decoy = 'lmno';
+const candidateBody = 'qvwy';
 
 export type ArmFixture = {
   query: Query;
@@ -25,7 +26,7 @@ export type Pair = {id: string; few: ArmFixture; many: ArmFixture};
 
 export const matchedBody = (query: Query) => query === 'Q2' ? queries.Q2 + 'ab' : queries.Q4;
 export const slotBody = (arm: ArmFixture, slot: number) =>
-  slot <= arm.matches ? matchedBody(arm.query) : slot <= arm.candidates ? 'qvwy' : decoy;
+  slot <= arm.matches ? matchedBody(arm.query) : slot <= arm.candidates ? candidateBody : decoy;
 
 function foreignArm(scope: Scope, query: Query, slots: number, matches: number): ArmFixture {
   return {scope, query, slots, matches, candidates: 0};
@@ -122,8 +123,11 @@ export function backgroundSql(arm: ArmFixture, design: Design) {
 
 export function slotsSql(arm: ArmFixture, design: Design) {
   const {o, c} = slotScope(arm);
-  const body = `CASE WHEN i <= ${arm.matches} THEN '${matchedBody(arm.query)}'
-    WHEN i <= ${arm.candidates} THEN '${slotBody(arm, 1)}' ELSE '${decoy}' END`;
+  const match = matchedBody(arm.query);
+  // Preserve the SQL text of the unreachable candidate branch for zero-candidate arms.
+  const candidate = arm.candidates > 0 ? candidateBody : (arm.matches > 0 ? match : decoy);
+  const body = `CASE WHEN i <= ${arm.matches} THEN '${match}'
+    WHEN i <= ${arm.candidates} THEN '${candidate}' ELSE '${decoy}' END`;
   const slots = insert(o, c, `SELECT ${nextId(3_000_000)}, i + ${design.messages}, ${body}
     FROM generate_series(1, ${arm.slots}) AS i`);
   return slots + insert(2, 0, `SELECT ${nextId(4_000_000)}, i + ${design.messages + arm.slots}, '${decoy}'
@@ -152,7 +156,8 @@ export const reviewedAssignments = {
 
 export function formalPairs(positiveK: number | null, assignments: DiagnosticAssignments | null): Pair[] {
   assert.ok(assignments, 'Formal fixture assignments are unresolved for E, S, V and A/A');
-  assert.ok(positiveK && positiveK < formal.messages, 'Freeze P K in the harness PR');
+  assert.ok(positiveK !== null && Number.isSafeInteger(positiveK) && positiveK > 0 && positiveK < formal.messages,
+    'Freeze P K in the harness PR');
   const judged = judgedPairs(formal);
   const reference = judged.find(pair => pair.id === assignments.negative);
   assert.ok(reference, 'A/A must name its judged few-arm reference');

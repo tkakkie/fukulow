@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { formalPairs, hit, existence, foreignMessageCount, globalSize, judgedPairs, negativeControl, positiveControl,
-  slotBody, visible, visibilityMap } from './arms.ts';
+  slotBody, slotsSql, visible, visibilityMap } from './arms.ts';
 import { formal, judgedIds, queries, rehearsal } from './design.ts';
 import { loadManifest } from './manifest.ts';
 import { checkPage } from './page.ts';
@@ -34,6 +34,11 @@ test('P shares Q4’s trigram in exactly K slots while failing the full token re
   assert.ok(body.includes(queries.Q4.slice(0, 3)));
   assert.ok(!body.includes(queries.Q4));
   assert.equal(body.length, slotBody(few, 128).length);
+});
+
+test('candidate SQL uses the candidate body even when earlier slots match', () => {
+  const arm = {...positiveControl(128).many, matches: 1};
+  assert.match(slotsSql(arm, formal), /WHEN i <= 1 THEN 'qvwx'\s+WHEN i <= 128 THEN 'qvwy'/);
 });
 
 test('reported-only builders apply exact counts to explicitly supplied reference assignments', () => {
@@ -80,7 +85,9 @@ test('the frozen assignments wire E, S, V and A/A to the reviewed fixtures', () 
 test('formal proceeds past the confirmed assignments and requires K from the frozen manifest', () => {
   assert.throws(() => formalPairs(128, null), /assignments are unresolved/);
   const {frozen} = loadManifest();
-  assert.throws(() => formalPairs(null, frozen.reviewedAssignments), /Freeze P K/);
+  for (const k of [null, 0, -1, 1.5, formal.messages]) {
+    assert.throws(() => formalPairs(k, frozen.reviewedAssignments), /Freeze P K/);
+  }
   assert.throws(() => options(['--formal', '--out=out', '--k=128']), /frozen manifest/);
   assert.deepEqual(options(['--smoke', '--out=out', '--k=32,128']).ks, [32, 128]);
 });

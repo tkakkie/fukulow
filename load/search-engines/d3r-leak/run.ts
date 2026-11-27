@@ -15,6 +15,23 @@ import { worker, type Evidence } from './worker.ts';
 
 const workerResources = 'FUKULOW_D3R_LEAK_RESOURCES';
 
+export function finalizeFormalRun(out: string, {cleanupVerified, hostBusy, idle, workerFailed}: {
+  cleanupVerified: boolean; hostBusy: boolean; idle: boolean; workerFailed: boolean;
+}) {
+  const evidencePath = join(out, 'evidence.json');
+  let evidence: Evidence;
+  try { evidence = JSON.parse(readFileSync(evidencePath, 'utf8')); }
+  catch { evidence = {checks: {}, pairs: []}; }
+  evidence.checks.cleanup = cleanupVerified;
+  if (!hostBusy) evidence.checks.hostBusy = false;
+  if (!idle) evidence.checks.idle = false;
+  if (workerFailed && evidence.checks.identity !== false) delete evidence.checks.identity;
+  save(evidencePath, evidence);
+  const verdict = judge(evidence);
+  save(join(out, 'verdict.json'), verdict);
+  return verdict;
+}
+
 async function supervise(args: ReturnType<typeof options>, argv: string[], resources: Names) {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...argv], {
     detached: true, stdio: 'inherit',
@@ -57,16 +74,7 @@ async function supervise(args: ReturnType<typeof options>, argv: string[], resou
       save(join(args.out, 'run-status.json'), {label: rehearsalLabel, cleanupVerified, hostBusy, idle, completed});
       return exitCode || Number(!completed);
     }
-    let evidence: Evidence;
-    try { evidence = JSON.parse(readFileSync(join(args.out, 'evidence.json'), 'utf8')); }
-    catch { evidence = {checks: {}, pairs: []}; }
-    evidence.checks.cleanup = cleanupVerified;
-    if (!hostBusy) evidence.checks.hostBusy = false;
-    if (!idle) evidence.checks.idle = false;
-    if (interrupted || workerCode) delete evidence.checks.identity;
-    save(join(args.out, 'evidence.json'), evidence);
-    const verdict = judge(evidence);
-    save(join(args.out, 'verdict.json'), verdict);
+    const verdict = finalizeFormalRun(args.out, {cleanupVerified, hostBusy, idle, workerFailed: Boolean(interrupted || workerCode)});
     console.log(verdict.verdict);
     return exitCode || Number(verdict.verdict !== 'PASS');
   } finally {
