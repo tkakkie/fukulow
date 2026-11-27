@@ -158,7 +158,7 @@ export type Message = components['schemas']['Message']
 export type ChannelEventPage = components['schemas']['ChannelEventPage']
 export type ListChannelEventsQuery = NonNullable<import('./api-schema').operations['list_channel_events']['parameters']['query']>
 export const listChannelEvents = (organizationId: string, channelId: string, query: ListChannelEventsQuery, f: typeof fetch = fetch) =>
-  call<ChannelEventPage>(f, `${channelPath(organizationId, channelId)}/events${querySuffix(query)}`, { cache: 'no-store' }, true)
+  call<ChannelEventPage>(f, `${channelPath(organizationId, channelId)}/events${querySuffix(query) || '?'}`, { cache: 'no-store' }, true)
 export type MessagePage = components['schemas']['MessagePage']
 export type SendMessageRequest = components['schemas']['SendMessageRequest']
 export type ListMessagesQuery = NonNullable<
