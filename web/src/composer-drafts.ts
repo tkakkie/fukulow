@@ -156,7 +156,9 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
     if (!tempDraft) return
     const toTarget: ComposerTarget = { channelId, topicId: toTopicId, replyRootId: toReplyRootId }
     const existing = getRaw(toTarget).draft
-    setDraft(fromTarget, '')
+    const fromKey = keyOf(fromTarget)
+    if (revisions.has(fromKey)) bumpRevision(fromKey)
+    set(fromTarget, { draft: '', composerError: null })
     bumpRevision(keyOf(toTarget))
     set(toTarget, {
       draft: existing ? `${existing}\n${tempDraft}` : tempDraft,
@@ -173,6 +175,7 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
 
     subscribe(target: ComposerTarget, listener: () => void) {
       const key = keyOf(target)
+      const isChannel = isChannelTarget(target)
       let setForKey = listeners.get(key)
       if (!setForKey) {
         setForKey = new Set()
@@ -181,7 +184,7 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
       setForKey.add(listener)
       return () => {
         setForKey.delete(listener)
-        if (setForKey.size === 0 && listeners.get(key) === setForKey) listeners.delete(key)
+        if (!isChannel && setForKey.size === 0 && listeners.get(key) === setForKey) listeners.delete(key)
       }
     },
 
@@ -221,13 +224,9 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
       const dt = draftTargetOf(target)
       const storeRevision = drafts?.revision(dt)
       const restore = () => {
+        if (revisionOf(key) !== revision || drafts?.revision(dt) !== storeRevision) return
         const now = getRaw(target)
-        const unchanged =
-          revisionOf(key) === revision &&
-          drafts?.revision(dt) === storeRevision &&
-          now.draft === '' &&
-          (!isChannel || (now as ChannelComposerState).topicDraft === '')
-        if (unchanged) {
+        if (now.draft === '' && (!isChannel || (now as ChannelComposerState).topicDraft === '')) {
           set(target, isChannel ? { draft: text, topicDraft: channelTopicDraft } : { draft: text })
         }
       }
@@ -292,7 +291,15 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
     },
 
     resetSession(mode: 'start' | 'stop'): () => void {
-      const changedKeys = [...states.keys()]
+      const channelKeys: string[] = []
+      const topicKeys: string[] = []
+      const replyKeys: string[] = []
+      for (const key of states.keys()) {
+        const tupleLen = (JSON.parse(key) as unknown[]).length
+        if (tupleLen === 1) channelKeys.push(key)
+        else if (tupleLen === 2) topicKeys.push(key)
+        else replyKeys.push(key)
+      }
       states.clear()
       for (const [id, entry] of submitted) {
         if (!entry.detached) submitted.delete(id)
@@ -326,7 +333,9 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
         })
       }
       return () => {
-        for (const key of changedKeys) notifyKey(key)
+        for (const key of channelKeys) notifyKey(key)
+        for (const key of topicKeys) notifyKey(key)
+        for (const key of replyKeys) notifyKey(key)
       }
     },
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createComposerDrafts, DEFINITE_REFUSAL_STATUSES } from './composer-drafts'
+import { createComposerDrafts } from './composer-drafts'
 import { createDraftStore } from './drafts'
 import type { Result } from './api'
 
@@ -186,7 +186,7 @@ describe('createComposerDrafts', () => {
   })
 
   it('restores detached sends only on definite refusal statuses (400/403/404/409/413/415) and never on ACK or unknown', async () => {
-    const definiteCases: readonly number[] = DEFINITE_REFUSAL_STATUSES
+    const definiteCases = [400, 403, 404, 409, 413, 415] as const
     for (const status of definiteCases) {
       const store = createDraftStore()
       const drafts = createComposerDrafts({ organizationId: 'o1', drafts: store.scope() })
@@ -337,5 +337,61 @@ describe('createComposerDrafts', () => {
     expect(localOnly.hasDrafts()).toBe(true)
     localOnly.setTopicDraft('c1', '')
     expect(localOnly.hasDrafts()).toBe(false)
+  })
+
+  it('notifies Channel, then Topic, then Reply listeners on resetSession regardless of insertion order', () => {
+    const drafts = createComposerDrafts({ organizationId: 'o1' })
+    const order: string[] = []
+
+    drafts.setDraft({ channelId: 'c1', topicId: 't1', replyRootId: 'r1' }, 'reply draft')
+    drafts.setDraft({ channelId: 'c1', topicId: 't1' }, 'topic draft')
+    drafts.setDraft({ channelId: 'c1' }, 'channel draft')
+
+    drafts.subscribe({ channelId: 'c1', topicId: 't1', replyRootId: 'r1' }, () => order.push('reply'))
+    drafts.subscribe({ channelId: 'c1', topicId: 't1' }, () => order.push('topic'))
+    drafts.subscribe({ channelId: 'c1' }, () => order.push('channel'))
+
+    drafts.resetSession('stop')()
+    expect(order).toEqual(['channel', 'topic', 'reply'])
+  })
+
+  it('does not cache a newer external draft during a detached refusal on a stopped controller', async () => {
+    const store = createDraftStore()
+    const drafts = createComposerDrafts({ organizationId: 'o1', drafts: store.scope() })
+    const target = { channelId: 'c1' }
+
+    drafts.setDraft(target, 'first draft')
+    await drafts.submit({
+      target,
+      topicName: { value: '', required: false },
+      canSend: () => true,
+      send: async (_body, restore) => {
+        drafts.trackSubmitted('m1', 'c1', restore)
+        return true
+      },
+    })
+    drafts.detachSubmitted(() => true)
+    drafts.resetSession('stop')()
+
+    // Another session writes a newer draft before the detached refusal arrives, then clears it
+    store.set({ organizationId: 'o1', channelId: 'c1' }, 'newer draft')
+    drafts.observeSendResult('m1', { ok: false, kind: 'http', status: 403 })
+    store.set({ organizationId: 'o1', channelId: 'c1' }, '')
+
+    expect(drafts.hasDrafts()).toBe(false)
+  })
+
+  it('invokes a replacement Channel listener added when the last listener unsubscribes during notification', () => {
+    const drafts = createComposerDrafts({ organizationId: 'o1' })
+    const replacement = vi.fn()
+    let unsubFirst = () => {}
+
+    unsubFirst = drafts.subscribe({ channelId: 'c1' }, () => {
+      unsubFirst()
+      drafts.subscribe({ channelId: 'c1' }, replacement)
+    })
+
+    drafts.setDraft({ channelId: 'c1' }, 'hello')
+    expect(replacement).toHaveBeenCalledTimes(1)
   })
 })
