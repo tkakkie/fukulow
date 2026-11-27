@@ -239,64 +239,150 @@ impl Drop for AllPassGuard<'_> {
     }
 }
 
+struct PermitSample<'a> {
+    counters: &'a PermitCounters,
+    waits: [u64; WAIT_BUCKETS],
+    granted: u64,
+    abandoned: u64,
+}
+
 impl NoticePermitGauges {
+    fn sample(&self, caller: NoticeCaller) -> PermitSample<'_> {
+        let counters = self.caller(caller);
+        PermitSample {
+            counters,
+            waits: self.cumulative_waits(caller),
+            granted: counters.granted.load(Relaxed),
+            abandoned: counters.wait_abandoned.load(Relaxed),
+        }
+    }
+
     pub(super) fn emit(&self) {
+        let retry = self.sample(NoticeCaller::Retry);
+        let handoff = self.sample(NoticeCaller::Handoff);
+        let publish = self.sample(NoticeCaller::Publish);
+        let revoked = self.sample(NoticeCaller::Revoked);
+        let scoped = self.sample(NoticeCaller::Scoped);
+
         // Dotted fields keep each caller's numbers together in the single tracing event.
-        macro_rules! sample {
-            ($($tag:ident: $caller:ident, $wait:ident, $granted:ident, $abandoned:ident);+ $(;)?) => {
-                $(
-                    let $tag = self.caller(NoticeCaller::$caller);
-                    let $wait = self.cumulative_waits(NoticeCaller::$caller);
-                    let $granted = $tag.granted.load(Relaxed);
-                    let $abandoned = $tag.wait_abandoned.load(Relaxed);
-                )+
-                let retry = self.caller(NoticeCaller::Retry);
-                let handoff = self.caller(NoticeCaller::Handoff);
-                tracing::trace!(
-                    target: REVOCATION_MEASUREMENT_TARGET,
-                    parent: None,
-                    event = "notice_permit_sample",
-                    server_ms = measurement_ms(),
-                    permits_total = self.permits_total.load(Relaxed),
-                    all_pass_in_flight = self.all_pass_in_flight.load(Relaxed),
-                    all_pass_statements = self.all_pass_statements.load(Relaxed),
-                    all_pass_us_total = self.all_pass_us_total.load(Relaxed),
-                    retry.deadline_exits_before_attempt = retry.deadline_exits_before_attempt.load(Relaxed),
-                    retry.deadline_exits_after_attempt = retry.deadline_exits_after_attempt.load(Relaxed),
-                    handoff.deadline_exits_before_attempt = handoff.deadline_exits_before_attempt.load(Relaxed),
-                    handoff.deadline_exits_after_attempt = handoff.deadline_exits_after_attempt.load(Relaxed),
-                    $(
-                        $tag.waiting = $tag.waiting.load(Relaxed),
-                        $tag.holding = $tag.holding.load(Relaxed),
-                        $tag.holding_checked_out = $tag.holding_checked_out.load(Relaxed),
-                        $tag.granted = $granted,
-                        $tag.wait_abandoned = $abandoned,
-                        $tag.wait_count = $granted + $abandoned,
-                        $tag.wait_granted_us_total = $tag.wait_granted_us_total.load(Relaxed),
-                        $tag.wait_abandoned_us_total = $tag.wait_abandoned_us_total.load(Relaxed),
-                        $tag.hold_us_total = $tag.hold_us_total.load(Relaxed),
-                        $tag.pool_wait_us_total = $tag.pool_wait_us_total.load(Relaxed),
-                        $tag.statement_us_total = $tag.statement_us_total.load(Relaxed),
-                        $tag.wait_le_1_ms = $wait[0],
-                        $tag.wait_le_5_ms = $wait[1],
-                        $tag.wait_le_10_ms = $wait[2],
-                        $tag.wait_le_50_ms = $wait[3],
-                        $tag.wait_le_100_ms = $wait[4],
-                        $tag.wait_le_250_ms = $wait[5],
-                        $tag.wait_le_500_ms = $wait[6],
-                        $tag.wait_le_1000_ms = $wait[7],
-                        $tag.wait_le_2500_ms = $wait[8],
-                        $tag.wait_le_5000_ms = $wait[9],
-                    )+
-                );
-            };
-        }
-        sample! {
-            retry: Retry, retry_wait, retry_granted, retry_abandoned;
-            handoff: Handoff, handoff_wait, handoff_granted, handoff_abandoned;
-            publish: Publish, publish_wait, publish_granted, publish_abandoned;
-            revoked: Revoked, revoked_wait, revoked_granted, revoked_abandoned;
-            scoped: Scoped, scoped_wait, scoped_granted, scoped_abandoned;
-        }
+        tracing::trace!(
+            target: REVOCATION_MEASUREMENT_TARGET,
+            parent: None,
+            event = "notice_permit_sample",
+            server_ms = measurement_ms(),
+            permits_total = self.permits_total.load(Relaxed),
+            all_pass_in_flight = self.all_pass_in_flight.load(Relaxed),
+            all_pass_statements = self.all_pass_statements.load(Relaxed),
+            all_pass_us_total = self.all_pass_us_total.load(Relaxed),
+            retry.deadline_exits_before_attempt = retry.counters.deadline_exits_before_attempt.load(Relaxed),
+            retry.deadline_exits_after_attempt = retry.counters.deadline_exits_after_attempt.load(Relaxed),
+            handoff.deadline_exits_before_attempt = handoff.counters.deadline_exits_before_attempt.load(Relaxed),
+            handoff.deadline_exits_after_attempt = handoff.counters.deadline_exits_after_attempt.load(Relaxed),
+            retry.waiting = retry.counters.waiting.load(Relaxed),
+            retry.holding = retry.counters.holding.load(Relaxed),
+            retry.holding_checked_out = retry.counters.holding_checked_out.load(Relaxed),
+            retry.granted = retry.granted,
+            retry.wait_abandoned = retry.abandoned,
+            retry.wait_count = retry.granted + retry.abandoned,
+            retry.wait_granted_us_total = retry.counters.wait_granted_us_total.load(Relaxed),
+            retry.wait_abandoned_us_total = retry.counters.wait_abandoned_us_total.load(Relaxed),
+            retry.hold_us_total = retry.counters.hold_us_total.load(Relaxed),
+            retry.pool_wait_us_total = retry.counters.pool_wait_us_total.load(Relaxed),
+            retry.statement_us_total = retry.counters.statement_us_total.load(Relaxed),
+            retry.wait_le_1_ms = retry.waits[0],
+            retry.wait_le_5_ms = retry.waits[1],
+            retry.wait_le_10_ms = retry.waits[2],
+            retry.wait_le_50_ms = retry.waits[3],
+            retry.wait_le_100_ms = retry.waits[4],
+            retry.wait_le_250_ms = retry.waits[5],
+            retry.wait_le_500_ms = retry.waits[6],
+            retry.wait_le_1000_ms = retry.waits[7],
+            retry.wait_le_2500_ms = retry.waits[8],
+            retry.wait_le_5000_ms = retry.waits[9],
+            handoff.waiting = handoff.counters.waiting.load(Relaxed),
+            handoff.holding = handoff.counters.holding.load(Relaxed),
+            handoff.holding_checked_out = handoff.counters.holding_checked_out.load(Relaxed),
+            handoff.granted = handoff.granted,
+            handoff.wait_abandoned = handoff.abandoned,
+            handoff.wait_count = handoff.granted + handoff.abandoned,
+            handoff.wait_granted_us_total = handoff.counters.wait_granted_us_total.load(Relaxed),
+            handoff.wait_abandoned_us_total = handoff.counters.wait_abandoned_us_total.load(Relaxed),
+            handoff.hold_us_total = handoff.counters.hold_us_total.load(Relaxed),
+            handoff.pool_wait_us_total = handoff.counters.pool_wait_us_total.load(Relaxed),
+            handoff.statement_us_total = handoff.counters.statement_us_total.load(Relaxed),
+            handoff.wait_le_1_ms = handoff.waits[0],
+            handoff.wait_le_5_ms = handoff.waits[1],
+            handoff.wait_le_10_ms = handoff.waits[2],
+            handoff.wait_le_50_ms = handoff.waits[3],
+            handoff.wait_le_100_ms = handoff.waits[4],
+            handoff.wait_le_250_ms = handoff.waits[5],
+            handoff.wait_le_500_ms = handoff.waits[6],
+            handoff.wait_le_1000_ms = handoff.waits[7],
+            handoff.wait_le_2500_ms = handoff.waits[8],
+            handoff.wait_le_5000_ms = handoff.waits[9],
+            publish.waiting = publish.counters.waiting.load(Relaxed),
+            publish.holding = publish.counters.holding.load(Relaxed),
+            publish.holding_checked_out = publish.counters.holding_checked_out.load(Relaxed),
+            publish.granted = publish.granted,
+            publish.wait_abandoned = publish.abandoned,
+            publish.wait_count = publish.granted + publish.abandoned,
+            publish.wait_granted_us_total = publish.counters.wait_granted_us_total.load(Relaxed),
+            publish.wait_abandoned_us_total = publish.counters.wait_abandoned_us_total.load(Relaxed),
+            publish.hold_us_total = publish.counters.hold_us_total.load(Relaxed),
+            publish.pool_wait_us_total = publish.counters.pool_wait_us_total.load(Relaxed),
+            publish.statement_us_total = publish.counters.statement_us_total.load(Relaxed),
+            publish.wait_le_1_ms = publish.waits[0],
+            publish.wait_le_5_ms = publish.waits[1],
+            publish.wait_le_10_ms = publish.waits[2],
+            publish.wait_le_50_ms = publish.waits[3],
+            publish.wait_le_100_ms = publish.waits[4],
+            publish.wait_le_250_ms = publish.waits[5],
+            publish.wait_le_500_ms = publish.waits[6],
+            publish.wait_le_1000_ms = publish.waits[7],
+            publish.wait_le_2500_ms = publish.waits[8],
+            publish.wait_le_5000_ms = publish.waits[9],
+            revoked.waiting = revoked.counters.waiting.load(Relaxed),
+            revoked.holding = revoked.counters.holding.load(Relaxed),
+            revoked.holding_checked_out = revoked.counters.holding_checked_out.load(Relaxed),
+            revoked.granted = revoked.granted,
+            revoked.wait_abandoned = revoked.abandoned,
+            revoked.wait_count = revoked.granted + revoked.abandoned,
+            revoked.wait_granted_us_total = revoked.counters.wait_granted_us_total.load(Relaxed),
+            revoked.wait_abandoned_us_total = revoked.counters.wait_abandoned_us_total.load(Relaxed),
+            revoked.hold_us_total = revoked.counters.hold_us_total.load(Relaxed),
+            revoked.pool_wait_us_total = revoked.counters.pool_wait_us_total.load(Relaxed),
+            revoked.statement_us_total = revoked.counters.statement_us_total.load(Relaxed),
+            revoked.wait_le_1_ms = revoked.waits[0],
+            revoked.wait_le_5_ms = revoked.waits[1],
+            revoked.wait_le_10_ms = revoked.waits[2],
+            revoked.wait_le_50_ms = revoked.waits[3],
+            revoked.wait_le_100_ms = revoked.waits[4],
+            revoked.wait_le_250_ms = revoked.waits[5],
+            revoked.wait_le_500_ms = revoked.waits[6],
+            revoked.wait_le_1000_ms = revoked.waits[7],
+            revoked.wait_le_2500_ms = revoked.waits[8],
+            revoked.wait_le_5000_ms = revoked.waits[9],
+            scoped.waiting = scoped.counters.waiting.load(Relaxed),
+            scoped.holding = scoped.counters.holding.load(Relaxed),
+            scoped.holding_checked_out = scoped.counters.holding_checked_out.load(Relaxed),
+            scoped.granted = scoped.granted,
+            scoped.wait_abandoned = scoped.abandoned,
+            scoped.wait_count = scoped.granted + scoped.abandoned,
+            scoped.wait_granted_us_total = scoped.counters.wait_granted_us_total.load(Relaxed),
+            scoped.wait_abandoned_us_total = scoped.counters.wait_abandoned_us_total.load(Relaxed),
+            scoped.hold_us_total = scoped.counters.hold_us_total.load(Relaxed),
+            scoped.pool_wait_us_total = scoped.counters.pool_wait_us_total.load(Relaxed),
+            scoped.statement_us_total = scoped.counters.statement_us_total.load(Relaxed),
+            scoped.wait_le_1_ms = scoped.waits[0],
+            scoped.wait_le_5_ms = scoped.waits[1],
+            scoped.wait_le_10_ms = scoped.waits[2],
+            scoped.wait_le_50_ms = scoped.waits[3],
+            scoped.wait_le_100_ms = scoped.waits[4],
+            scoped.wait_le_250_ms = scoped.waits[5],
+            scoped.wait_le_500_ms = scoped.waits[6],
+            scoped.wait_le_1000_ms = scoped.waits[7],
+            scoped.wait_le_2500_ms = scoped.waits[8],
+            scoped.wait_le_5000_ms = scoped.waits[9],
+        );
     }
 }
