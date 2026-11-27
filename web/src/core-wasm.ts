@@ -46,6 +46,14 @@ const sameMessage = (a: Message, b: Message) => a.history_generation === b.histo
   (!a.deleted || (!('body' in a) && !('mentions' in a))) && a.topic_id === b.topic_id && a.reply_to === b.reply_to && a.reply_root_id === b.reply_root_id &&
   (a.mentions ?? []).length === (b.mentions ?? []).length && (a.mentions ?? []).every((m, i) => m.member_id === b.mentions![i].member_id && m.name === b.mentions![i].name)
 
+export function inputMessages(input: Input): Message[] {
+  return input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
+    : input.type === 'ack' ? [input.message]
+    : input.type === 'history_result' ? input.page.messages
+    : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : [])
+    : []
+}
+
 export function createCore(selfId: string): SyncCore {
   const { coreId, coreInput, coreOutput } = createValues()
   const read = <T>(json: string): T => coreOutput(JSON.parse(json)) as T
@@ -59,9 +67,7 @@ export function createCore(selfId: string): SyncCore {
     step(input: Input): CoreResult {
       const out = read<Delta>(core.step(JSON.stringify(coreInput(input))))
       const { bodies } = out
-      const incoming = input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
-        : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : []) : []
-      const originals = new Map(incoming.map(m => [m.id, m]))
+      const originals = new Map(inputMessages(input).map(m => [m.id, m]))
       const channelViews = out.changedChannels.length ? { ...view.channels } : view.channels
       const records = new Map(out.records.map(([id, messages]) => [id, messages.map(encoded => {
         const m = expandBody<Message>(encoded, bodies)

@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest'
 import { initialState, step, MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT, REPLY_MESSAGE_LIMIT,
   INACTIVE_CHANNEL_LIMIT, INACTIVE_CHANNEL_MESSAGE_LIMIT, SYNC_MESSAGE_LIMIT, TOTAL_MESSAGE_LIMIT,
-  type Input } from './protocol-driver'
+  type Input } from './protocol-driver-test-helpers'
 import { record } from './protocol-test-helpers'
 import { windowClient } from './message-window-test-helpers'
 import { replyPage, topicClient, deferred, msg, ok } from './topic-test-helpers'

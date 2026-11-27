@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { initialState, step, type Effect, type Input } from './protocol-driver'
+import { initialState, step, type Effect, type Input } from './protocol-driver-test-helpers'
 import { record } from './protocol-test-helpers'
 
 function effectId(effects: Effect[], type: 'fetch_history' | 'wait' | 'send'): number {

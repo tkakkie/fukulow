@@ -24,7 +24,7 @@ export const observe = (state: SyncView): Observed => ({
   }])),
 })
 
-export function makeProtocolClient(onInput: (input: Input) => void, { initialState, step }: Pick<typeof import('../src/protocol-driver.ts'), 'initialState' | 'step'>) {
+export function makeProtocolClient(onInput: (input: Input) => void, { initialState, step }: Pick<typeof import('../src/protocol-driver-test-helpers.ts'), 'initialState' | 'step'>) {
   let state = initialState('me')
   return {
     get: () => state, observe: () => observe(state),

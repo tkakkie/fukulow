@@ -3,7 +3,7 @@ import type { TimelineApi } from './sync'
 import openapiRaw from '../../openapi.json?raw'
 import { describe, expect, it, vi } from 'vitest'
 import { createDraftStore } from './drafts'
-import { initialState, step } from './protocol-driver'
+import { initialState, step } from './protocol-driver-test-helpers'
 import { createSync, MESSAGE_BODY_MAX, messageBodyError, TOPIC_NAME_MAX, topicNameError } from './sync'
 
 const samples: [string, string][] = [
