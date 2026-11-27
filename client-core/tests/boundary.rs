@@ -1,6 +1,9 @@
+mod support;
+
 use fukulow_client_core::{Core, StepInput};
 use serde_json::json;
 use std::{error::Error, rc::Rc};
+use support::message as message_fixture;
 use uuid::Uuid;
 
 #[test]
@@ -63,11 +66,7 @@ fn event_page_records_replace_each_identity_in_native_output() -> Result<(), Box
     let self_id = Uuid::from_u128(2);
     let mut core = Core::new(self_id);
     let mut feed = |value| core.step(serde_json::from_value::<StepInput>(value).unwrap());
-    let message = |seq, version| {
-        json!({"history_generation":Uuid::nil(),"id":Uuid::from_u128(seq), "channel_id":channel,
-        "created_seq":seq, "version":version, "deleted":false, "client_message_id":Uuid::from_u128(seq + 1000),
-        "sender":Uuid::from_u128(3), "body":"body", "created_at":"2026-01-01T00:00:00Z", "topic_id":null, "reply_to":null,"reply_root_id":null,"mentions":[]})
-    };
+    let message = |seq, version| message_fixture(channel, Uuid::from_u128(3), seq, version);
     feed(json!({"type":"session_start","selfId":self_id}));
     feed(json!({"type":"connection_ready","connection":1}));
     let watched = feed(json!({"type":"watch","channel":channel}));
@@ -122,14 +121,7 @@ fn move_positions_advance_live_replay_and_gap_fill_without_creating_state() {
     let channel = Uuid::from_u128(1);
     let self_id = Uuid::from_u128(2);
     let generation = Uuid::nil();
-    let message = |seq| {
-        json!({
-            "history_generation":generation,"id":Uuid::from_u128(seq),"channel_id":channel,
-            "created_seq":seq,"version":seq,"deleted":false,"client_message_id":Uuid::from_u128(seq+1000),
-            "sender":self_id,"body":"body","created_at":"2026-01-01T00:00:00Z","topic_id":null,
-            "reply_to":null,"reply_root_id":null,"mentions":[]
-        })
-    };
+    let message = |seq| message_fixture(channel, self_id, seq, seq);
     let moved = json!({
         "type":"message","kind":"move","seq":101,"version":101,"channel_id":channel,
         "history_generation":generation,"root_id":Uuid::from_u128(100),"source_topic_id":null,
@@ -359,12 +351,8 @@ fn a_new_move_is_reported_once_in_step_moves() {
             _ => None,
         })
         .unwrap();
-    let message = json!({
-        "history_generation":generation,"id":root,"channel_id":channel,
-        "created_seq":100,"version":100,"deleted":false,"client_message_id":Uuid::from_u128(1100),
-        "sender":self_id,"body":"body","created_at":"2026-01-01T00:00:00Z","topic_id":null,
-        "reply_to":null,"reply_root_id":null,"mentions":[]
-    });
+    let mut message = message_fixture(channel, self_id, 100, 100);
+    message["id"] = json!(root);
     let settled = feed(json!({"type":"history_result","request":latest,
         "page":{"history_generation":generation,"as_of_seq":100,"messages":[message],"has_more":false}}));
     assert!(settled.moves.is_empty());
