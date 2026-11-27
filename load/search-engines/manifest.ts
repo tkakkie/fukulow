@@ -41,7 +41,8 @@ export const smokeLabel = 'SMOKE / NON-EVALUATION';
 // v11 freezes the NULL-safe B1 policy. v10 stays unused: #694 merged first.
 // v12 (#654) records the section placement lookup migration with v11's conditions.
 // v13 (#725) preserves v12's schema and conditions, and pins the runners to them.
-export const manifestFile = 'load/search-engines/manifest-v13.json';
+// B1 v14 freezes the #620 deploy grants with v13's schema and conditions.
+export const manifestFile = 'load/search-engines/manifest-b1-v14.json';
 const migrationPrefix = 'server/migrations/';
 type SourceHash = {path:string;sha256:string};
 const frozenMigrations = (sources: SourceHash[]) => sources.filter(source=>source.path.startsWith(migrationPrefix));
@@ -75,7 +76,7 @@ export function snapshot() {
     ...qualityMigrations(),
     'load/search-engines/Dockerfile','deploy/db-grants.sql','deploy/db-roles.sql','deploy/db-role-settings.sql'].sort();
   const data = corpus();
-  return {version:13,date:'2026-11-20',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
+  return {version:14,date:'2026-11-27',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
     node:readSource('.node-version').trim(),
     sourceHashes:files.map(path=>({path,sha256:hash(readSource(path))})),
     quality:{querySet:qualityQueries.map(({gold,...q})=>({...q,relevantKeys:gold.map(id=>data.find(m=>m.id===id)?.key)})),

@@ -1,15 +1,31 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings, appSessionSettings, runKind, manifestFile, qualityMigrations } from './manifest.ts';
+import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings, appSessionSettings, runKind, loadManifest, manifestFile, qualityMigrations } from './manifest.ts';
 import { boundedCommand } from './bench.ts';
 
 const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 const recorded = (version: number) => JSON.parse(readFileSync(new URL(`./manifest-v${version}.json`,import.meta.url),'utf8'));
 test('checked-in current manifest matches the evaluation inputs',()=>{
-  assert.equal(manifestFile,'load/search-engines/manifest-v13.json');
-  assert.equal(verifyManifest(recorded(13)),document.sha256);
+  assert.equal(manifestFile,'load/search-engines/manifest-b1-v14.json');
+  assert.equal(loadManifest().sha256,document.sha256);
+});
+test('B1 v14 records the deploy grants with v13 conditions',()=>{
+  const text = readFileSync(new URL('./manifest-v13.json',import.meta.url),'utf8');
+  assert.equal(hash(text),'8f251bfd2c646cbf73fc8028de145af4505ad3f5711cc1b585f60bab284f82fc');
+  const v13 = JSON.parse(text);
+  assert.equal(v13.sha256,'cc8c5649ad629649a24ed016524cafeac79b9de3238bef15a614714e53fe0b82');
+  assert.equal(hash(JSON.stringify(v13.frozen)),v13.sha256);
+  const {version,date,sourceHashes,...conditions} = frozen;
+  const {version:previousVersion,date:previousDate,sourceHashes:previousSources,...previousConditions} = v13.frozen;
+  assert.equal(version,previousVersion+1);
+  assert.deepEqual([previousDate,date],['2026-11-20','2026-11-27']);
+  assert.deepEqual(conditions,previousConditions);
+  const before = new Map<string,string>(previousSources.map((source: {path:string;sha256:string})=>[source.path,source.sha256]));
+  assert.deepEqual(sourceHashes.map(source=>source.path),[...before.keys()]);
+  assert.deepEqual(sourceHashes.filter(source=>before.get(source.path)!==source.sha256).map(source=>source.path),
+    ['.gitattributes','deploy/db-grants.sql','load/search-engines/manifest.ts','load/search-engines/summarize.ts']);
 });
 test('v13 pins the quality migration set to v12 and preserves the B1 baseline',()=>{
   const v12 = recorded(12), v13 = recorded(13);
@@ -174,7 +190,7 @@ test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));
   assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),
-    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json','load/search-engines/manifest-v7.json','load/search-engines/manifest-v8.json','load/search-engines/manifest-v9.json','load/search-engines/manifest-v11.json','load/search-engines/manifest-v12.json',manifestFile]
+    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json','load/search-engines/manifest-v7.json','load/search-engines/manifest-v8.json','load/search-engines/manifest-v9.json','load/search-engines/manifest-v11.json','load/search-engines/manifest-v12.json','load/search-engines/manifest-v13.json',manifestFile]
     .sort().map(path=>`/${path} text eol=lf`));
 });
 test('manifest content tampering is refused',()=>{

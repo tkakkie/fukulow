@@ -14,6 +14,7 @@
 /load/search-engines/cleanup.ts text eol=lf
 /load/search-engines/definer.sql text eol=lf
 /load/search-engines/definer.ts text eol=lf
+/load/search-engines/manifest-b1-v14.json text eol=lf
 /load/search-engines/manifest-v1.json text eol=lf
 /load/search-engines/manifest-v11.json text eol=lf
 /load/search-engines/manifest-v12.json text eol=lf

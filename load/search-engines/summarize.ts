@@ -191,8 +191,8 @@ export function summarize(root: string, publication: 'evaluation'|'smoke' = 'eva
   }
   if (!manifestHash || runs.some(r=>r.manifestHash!==manifestHash || (r.runKind ?? 'evaluation')!==kind)) throw new Error('Result manifest hash mismatch');
   if (manifest.frozen.b1) {
-    const approved = [11, 13].some(version=>{
-      const frozen = JSON.parse(readFileSync(new URL(`manifest-v${version}.json`,import.meta.url),'utf8'));
+    const approved = ['manifest-v11.json','manifest-v13.json','manifest-b1-v14.json'].some(file=>{
+      const frozen = JSON.parse(readFileSync(new URL(file,import.meta.url),'utf8'));
       return manifestHash===frozen.sha256;
     });
     if (!approved) throw new Error('B1 artifact must match a checked-in B1 manifest');
