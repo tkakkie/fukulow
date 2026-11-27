@@ -82,7 +82,7 @@ function startupClient() {
   }
 }
 
-it('characterizes three startup Channel list reads when the local read notice follows the Ready replacement (#1084)', async () => {
+it('keeps two startup Channel list reads when the local ACK precedes its notice (#1084)', async () => {
   const c = startupClient()
   try {
     await vi.advanceTimersByTimeAsync(0)
@@ -111,10 +111,8 @@ it('characterizes three startup Channel list reads when the local read notice fo
     expect(c.reasons()).toEqual([['initial'], ['reconcile', 'initial']])
 
     c.deliverReadNotice()
-    await vi.advanceTimersByTimeAsync(199)
-    expect(c.reasons()).toHaveLength(2)
-    await vi.advanceTimersByTimeAsync(1)
-    expect(c.reasons()).toEqual([['initial'], ['reconcile', 'initial'], ['notice']])
+    await vi.advanceTimersByTimeAsync(400)
+    expect(c.reasons()).toEqual([['initial'], ['reconcile', 'initial']])
   } finally { c.close() }
 })
 
