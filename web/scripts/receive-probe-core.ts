@@ -10,7 +10,11 @@ export function resetParts(): void {
   parts.input = 0; parts.wasm = 0; parts.output = 0; parts.steps = 0
 }
 
-const inner = (await import(`${new URL('../src/core-wasm.ts', import.meta.url).href}?probe`)) as { createCore(selfId: string): SyncCore }
+const inner = (await import(`${new URL('../src/core-wasm.ts', import.meta.url).href}?probe`)) as {
+  createCore(selfId: string): SyncCore
+  inputMessages: typeof import('#sync-core').inputMessages
+}
+export const { inputMessages } = inner
 
 export function createCore(selfId: string): SyncCore {
   const core = inner.createCore(selfId)

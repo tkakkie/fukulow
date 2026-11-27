@@ -6,7 +6,7 @@ import { createRequestDeadlines } from './request-deadlines'
 import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
-import { createCore } from '#sync-core'
+import { createCore, inputMessages } from '#sync-core'
 import { messageBodyError, topicNameError } from './message-rules'
 import type { SyncCore } from './protocol-types'
 import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
@@ -240,9 +240,7 @@ export function createSync(options: SyncOptions) {
     else if (input.type === 'ack') rememberIdentityResponse(input.message)
     else if (input.type === 'history_result' || input.type === 'events_result') rememberIdentityResponse(input.page)
     else if (input.type === 'settle_history') rememberIdentityResponse(input.messages)
-    const incoming = input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
-      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : []) : []
-    if (incoming.some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
+    if (inputMessages(input).some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
       input = { ...input, refreshMentionNames: true }
     const previous = state
     if (input.type === 'stop') {

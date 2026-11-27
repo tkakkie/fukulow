@@ -8,7 +8,7 @@ it('ships exactly one implementation and rejects mixed missing or duplicate wasm
     [[...wasm, ...ts], ['assets/core.wasm']], [[...wasm, ...ts], []],
     [wasm, []], [wasm, ['a.wasm', 'b.wasm']], [ts, ['core.wasm']],
     [[...wasm, '/scripts/core-test-values.ts'], ['assets/core.wasm']],
-    [[...wasm, '/src/protocol-driver.ts'], ['assets/core.wasm']],
+    [[...wasm, '/src/protocol-driver-test-helpers.ts'], ['assets/core.wasm']],
     [[], ['core.wasm']], [[], []], [[wasm[0]], ['core.wasm']],
   ] as [string[], string[]][]) expect(() => checkCoreBundle(modules, assets)).toThrow()
 })
