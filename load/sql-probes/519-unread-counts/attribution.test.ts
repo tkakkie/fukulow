@@ -96,3 +96,8 @@ test('disk preflight reads available space on the WAL filesystem and fails close
   assert.throws(() => walDiskPreflight(df('10000'), 40), /needs 40 GiB free/);
   assert.throws(() => walDiskPreflight(df('?'), 40), /unreadable/);
 });
+
+test('the snapshot leaves out the harness extension functions', async () => {
+  const { snapshotSql } = await import('./attribution-sql.ts');
+  assert.match(snapshotSql, /FROM pg_stat_user_functions\s+-- [^\n]*\n\s+WHERE schemaname <> 'send_attribution'/);
+});

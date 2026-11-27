@@ -29,6 +29,8 @@ SELECT json_build_object(
       'counters', json_build_object('calls', calls, 'totalMs', total_time, 'selfMs', self_time)
     ) ORDER BY funcid)
     FROM pg_stat_user_functions
+    -- The snapshot's own extension calls are not send work.
+    WHERE schemaname <> 'send_attribution'
   ), '[]'::json)
 )
 FROM send_attribution.pg_stat_statements_info;`;

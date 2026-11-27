@@ -19,7 +19,7 @@ import { hostAffinityProblems, readHostAffinity } from './frequency-host-affinit
 import type { CounterBlock, ReferenceWindow } from './frequency-evidence.ts';
 import { frequencyWorkSeconds, pgbenchTimeoutGraceSeconds } from './frequency-timing.ts';
 import { makeTraversable, stageSql } from './stage-sql.ts';
-import { attributionSettings, postgresSettingsArgs, sendPgbenchArgs, validateAttribution, walKeepGiB } from './final-commands.ts';
+import { attributionSettings, boundaryCommandArgs, postgresSettingsArgs, sendPgbenchArgs, validateAttribution, walKeepGiB } from './final-commands.ts';
 import { attributionMetadata, diffSnapshots, walWindowBytes, type AttributionBlock, type Snapshot } from './attribution.ts';
 import { inspectWal, installAttributionSql, parseBoundary, snapshotSql, walDiskPreflight } from './attribution-sql.ts';
 import { attributionMarkdown, summarizeAttribution } from './attribution-summary.ts';
@@ -192,6 +192,7 @@ type WalBoundary = {
 };
 const walStats = (db: string): WalBoundary => JSON.parse(psql(db, walQuery));
 const boundarySql = attribution ? `${walQuery}\n${snapshotSql}` : walQuery;
+const boundaryQueries = attribution ? [walQuery, snapshotSql] : [walQuery];
 const parseBoundaryOutput = (output: string): WalBoundary =>
   attribution ? parseBoundary<WalBoundary>(output) : JSON.parse(output);
 const boundary = (db: string) => attribution ? parseBoundaryOutput(psql(db, boundarySql)) : walStats(db);
@@ -249,7 +250,7 @@ function sendBlock(db: string, label: string, order: number, arm: FinalArm, refe
         try {
           const prepare = async () => {
             pgbench((await exec('docker', warmArgv, { signal, timeout: (warmSeconds + 10) * 1000, maxBuffer })).stdout);
-            const { stdout } = await exec('docker', [...psqlArgs(db, 'postgres', false), '-c', boundarySql], { signal, timeout: 5000, maxBuffer });
+            const { stdout } = await exec('docker', [...psqlArgs(db, 'postgres', false), ...boundaryCommandArgs(boundaryQueries)], { signal, timeout: 5000, maxBuffer });
             return parseBoundaryOutput(stdout);
           };
           const captured = await frequency.measure(order, reference, prepare, () => {

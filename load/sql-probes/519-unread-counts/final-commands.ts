@@ -31,3 +31,6 @@ export function sendPgbenchArgs(container: string, clientCpus: number[] | undefi
     ['pgbench', '-U', 'fukulow_app', '-n', '-c', '8', '-j', '4', '-T', String(seconds), '-f', '/work/sql/bench.pgb']),
   ...(logPrefix === undefined ? [] : ['-l', `--log-prefix=${logPrefix}`]), db];
 }
+
+// psql -c with several statements prints only the last result, so each boundary query gets its own -c.
+export const boundaryCommandArgs = (queries: string[]) => queries.flatMap(query => ['-c', query]);

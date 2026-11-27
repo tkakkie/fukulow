@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { sets796 } from '../../harness-core/frequency-layout.ts';
-import { postgresSettingsArgs, sendPgbenchArgs, validateAttribution } from './final-commands.ts';
+import { boundaryCommandArgs, postgresSettingsArgs, sendPgbenchArgs, validateAttribution } from './final-commands.ts';
 
 test('the CLI refuses attribution without sends-only before host setup', () => {
   const entry = fileURLToPath(new URL('final.ts', import.meta.url));
@@ -52,4 +52,9 @@ test('warm and logged pgbench argv equal the original arrays across smoke and di
     ['exec', '--user', 'postgres', 'client', ...pinned, ...bench(60), 's1_current']);
   assert.deepEqual(sendPgbenchArgs('client', sets796.client, true, 120, 's1_current', '/tmp/pgb-block1-current'),
     ['exec', '--user', 'postgres', 'client', ...pinned, ...bench(120), '-l', '--log-prefix=/tmp/pgb-block1-current', 's1_current']);
+});
+
+test('each boundary query gets its own psql -c so every result is printed', () => {
+  assert.deepEqual(boundaryCommandArgs(['SELECT 1;']), ['-c', 'SELECT 1;']);
+  assert.deepEqual(boundaryCommandArgs(['SELECT 1;', 'SELECT 2;']), ['-c', 'SELECT 1;', '-c', 'SELECT 2;']);
 });
