@@ -138,8 +138,17 @@ test('v16 stays pinned and v17 differs from it only by the new migration and its
     ['load/search-engines/d3r/manifest.ts', added]);
 });
 
+function pinnedV18(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v18.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), '094587ccf3aee1068fe0d4af7ca72917e3ec000282ada33fa7580617e2bc9454');
+  const v18 = JSON.parse(text);
+  assert.equal(v18.sha256, 'a038803ee87a8ef066dccef4b88f6f354ddc4ee45e0efa061b92e9492e7c38c8');
+  assert.equal(v18.sha256, hash(JSON.stringify(v18.frozen)));
+  return v18;
+}
+
 test('v18 records the replay and Search 429 sources with v17 conditions', () => {
-  const {version, date, migrations, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version, date, migrations, sourceHashes, ...conditions} = pinnedV18().frozen;
   const {version: previousVersion, date: previousDate, migrations: previousMigrations,
     sourceHashes: previousSources, ...previousConditions} = pinnedV17().frozen;
   assert.equal(version, previousVersion + 1);
@@ -153,6 +162,21 @@ test('v18 records the replay and Search 429 sources with v17 conditions', () => 
     '.gitattributes', 'load/search-engines/d3r/manifest.ts', 'load/search-engines/manifest.ts', 'load/search-engines/summarize.ts',
     'deploy/db-grants.sql', 'server/src/messages/search.rs', added,
   ].sort());
+});
+
+test('v19 adds the F2 migration with v18 conditions', () => {
+  const {version, migrations, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, migrations: previousMigrations,
+    sourceHashes: previousSources, ...previousConditions} = pinnedV18().frozen;
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual(conditions, previousConditions);
+  const added = 'server/migrations/202611271100_unread_counts_scope_total.sql';
+  assert.deepEqual(migrations, [...previousMigrations, added].sort());
+  assert.deepEqual(sourceHashes.map(source => source.path), [...previousSources.map(source => source.path), added].sort());
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path), [
+    'load/search-engines/d3r/manifest.ts', added,
+  ]);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {

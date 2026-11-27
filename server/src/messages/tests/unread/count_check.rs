@@ -2,6 +2,8 @@ use super::*;
 use sqlx::PgConnection;
 use std::collections::BTreeSet;
 
+mod rollback;
+
 type Discrepancy = (String, Uuid, Uuid, Uuid, Option<i64>, Option<i64>);
 
 async fn compare_checks(conn: &mut PgConnection, org: Uuid) -> Vec<Discrepancy> {
@@ -36,15 +38,30 @@ async fn message_counts_check_matches_its_previous_definition(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    sqlx::raw_sql(&definition.replacen(
-        "FUNCTION public.message_counts_check(",
-        "FUNCTION public.message_counts_check_before_update_first(",
-        1,
-    ))
+    sqlx::migrate!().run(&pool).await.unwrap();
+    sqlx::raw_sql(
+        "CREATE VIEW legacy_append_counts AS
+         SELECT organization_id, channel_id, scope_id, member_id, sum(appended)::bigint AS appended
+         FROM (SELECT * FROM message_append_counts
+               UNION ALL
+               SELECT organization_id, channel_id, uuid_nil, uuid_nil, main_appended
+               FROM channel_message_sequences CROSS JOIN (VALUES ('00000000-0000-0000-0000-000000000000'::uuid)) n(uuid_nil)
+               UNION ALL
+               SELECT organization_id, channel_id, id, '00000000-0000-0000-0000-000000000000', scope_appended FROM topics) k
+         GROUP BY 1,2,3,4",
+    ).execute(&pool).await.unwrap();
+    sqlx::raw_sql(
+        &definition
+            .replacen(
+                "FUNCTION public.message_counts_check(",
+                "FUNCTION public.message_counts_check_before_update_first(",
+                1,
+            )
+            .replace("message_append_counts", "legacy_append_counts"),
+    )
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::migrate!().run(&pool).await.unwrap();
 
     let (app, org, sender, channel, owner) = fixture(&pool).await;
     // Channel IDs are scoped to an Organization, including in the counter join.
@@ -120,7 +137,8 @@ async fn message_counts_check_matches_its_previous_definition(pool: PgPool) {
     sqlx::query("DELETE FROM topic_read_positions WHERE organization_id=$1 AND channel_id=$2 AND topic_id=$3 AND member_id=$4")
         .bind(org).bind(channel).bind(topic_id).bind(newcomer).execute(&mut *tx).await.unwrap();
     sqlx::query(
-        "UPDATE channel_message_sequences SET seq=3 WHERE organization_id=$1 AND channel_id=$2",
+        "UPDATE channel_message_sequences SET seq=3, main_appended=main_appended+2
+         WHERE organization_id=$1 AND channel_id=$2",
     )
     .bind(org)
     .bind(channel)
@@ -152,6 +170,7 @@ async fn message_counts_check_matches_its_previous_definition(pool: PgPool) {
     )));
     assert!(differences.contains(&("appended".into(), channel, nil, sender, Some(2), Some(0))));
     assert!(differences.contains(&("appended".into(), channel, nil, other, Some(0), Some(7))));
+    assert!(differences.contains(&("appended".into(), channel, nil, nil, Some(2), Some(4))));
     assert!(
         !differences
             .iter()

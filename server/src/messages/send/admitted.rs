@@ -168,7 +168,8 @@ async fn persist_admitted(
         input.reply_to,
     )
     .await?;
-    let seq = log::allocate(tx.connection()?, organization_id, channel_id).await?;
+    let main = parent.map_or(input.topic_name.is_none(), |(topic, _)| topic.is_none());
+    let seq = log::allocate(tx.connection()?, organization_id, channel_id, main).await?;
     let topic_id = if let Some((topic, _)) = parent {
         topic
     } else {
@@ -183,8 +184,8 @@ async fn persist_admitted(
     };
     let reply_root_id = parent.map(|(_, root)| root);
     let message = sqlx::query(
-        "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+        "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id, scope_append_recorded) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true) \
          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
          RETURNING id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions, $11::uuid AS history_generation",

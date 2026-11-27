@@ -32,7 +32,7 @@ channel_counter AS MATERIALIZED (
         AND (SELECT visible FROM access)
 ),
 unchanged_topics AS (
-    SELECT t.id AS topic_id, t.first_seq, t.last_seq, t.last_seq AS current_last_seq, t.message_count, t.name
+    SELECT t.id AS topic_id, t.first_seq, t.last_seq, t.last_seq AS current_last_seq, t.message_count, t.scope_appended, t.name
     FROM topics t
     WHERE t.organization_id = $1 AND t.channel_id = $4 AND $9::uuid IS NULL
         AND {unchanged_range}
@@ -40,13 +40,13 @@ unchanged_topics AS (
     ORDER BY t.last_seq {order} LIMIT $7
 ),
 topics_to_position AS (
-    SELECT t.id, t.first_seq, t.last_seq, t.message_count, t.name
+    SELECT t.id, t.first_seq, t.last_seq, t.message_count, t.scope_appended, t.name
     FROM topics t
     WHERE t.organization_id = $1 AND t.channel_id = $4 AND $9 IS NULL
         AND t.last_seq > $5 AND t.last_seq <= (SELECT seq FROM channel_counter)
         AND t.first_seq <= $5 AND (SELECT visible FROM access)
     UNION ALL
-    SELECT t.id, t.first_seq, t.last_seq, t.message_count, t.name
+    SELECT t.id, t.first_seq, t.last_seq, t.message_count, t.scope_appended, t.name
     FROM topics t
     WHERE t.organization_id = $1 AND t.channel_id = $4 AND t.id = $9
         AND t.first_seq <= $5 AND (SELECT visible FROM access)
@@ -59,13 +59,13 @@ positioned_topics AS (
                 AND NOT m.deleted AND m.seq <= $5
             ORDER BY m.seq DESC LIMIT 1
         ) END AS last_seq,
-        t.last_seq AS current_last_seq, t.message_count, t.name
+        t.last_seq AS current_last_seq, t.message_count, t.scope_appended, t.name
     FROM topics_to_position t
     OFFSET 0
 ),
 main_messages AS (
     SELECT m.topic_id, m.seq AS first_seq, m.seq AS last_seq,
-        m.seq AS current_last_seq, 1::bigint AS message_count, NULL::text AS name
+        m.seq AS current_last_seq, 1::bigint AS message_count, 0::bigint AS scope_appended, NULL::text AS name
     FROM messages m
     WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NULL
         AND {main_range}
@@ -115,7 +115,8 @@ CROSS JOIN LATERAL (
 -- The #519 A3 identity at the snapshot counter can then subtract that entire suffix.
 CROSS JOIN LATERAL (
     SELECT CASE WHEN p.topic_id IS NULL OR p.last_seq <= p.read_seq THEN 0 ELSE
-        (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
+        p.scope_appended
+        + (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
               - COALESCE(sum(k.appended) FILTER (WHERE k.member_id = $2), 0))::bigint
          FROM message_append_counts k WHERE k.organization_id = $1 AND k.channel_id = $4
             AND k.scope_id = p.topic_id AND k.member_id IN ('00000000-0000-0000-0000-000000000000', $2))

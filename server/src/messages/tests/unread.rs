@@ -45,16 +45,18 @@ async fn historical_post(
     channel: Uuid,
     topic: Option<&str>,
 ) {
+    let mut tx = pool.begin().await.unwrap();
     let seq:i64=sqlx::query_scalar("INSERT INTO channel_message_sequences VALUES ($1,$2,1) ON CONFLICT (organization_id,channel_id) DO UPDATE SET seq=channel_message_sequences.seq+1 RETURNING seq")
-        .bind(org).bind(channel).fetch_one(pool).await.unwrap();
+        .bind(org).bind(channel).fetch_one(&mut *tx).await.unwrap();
     let topic = if let Some(name) = topic {
         Some(sqlx::query_scalar::<_,Uuid>("INSERT INTO topics (organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES ($1,$2,gen_random_uuid(),$3,$4,$4,1) ON CONFLICT (organization_id,channel_id,name_key) DO UPDATE SET last_seq=$4,message_count=topics.message_count+1 RETURNING id")
-            .bind(org).bind(channel).bind(name).bind(seq).fetch_one(pool).await.unwrap())
+            .bind(org).bind(channel).bind(name).bind(seq).fetch_one(&mut *tx).await.unwrap())
     } else {
         None
     };
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES ($1,gen_random_uuid(),$2,$3,$4,gen_random_uuid(),'Historical fixture',$5)")
-        .bind(org).bind(channel).bind(seq).bind(sender).bind(topic).execute(pool).await.unwrap();
+        .bind(org).bind(channel).bind(seq).bind(sender).bind(topic).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
 }
 
 async fn topics(app: &Router, token: &str, channel: Uuid) -> Value {

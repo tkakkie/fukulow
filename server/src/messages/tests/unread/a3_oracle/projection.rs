@@ -260,13 +260,12 @@ async fn topic_page_clamps_negative_unread_and_logs_drift(pool: PgPool) {
     assert_eq!(before["topics"][0]["unread_count"], 1);
     // Zeroing the total leaves a raw count of -1 after the post-W append is subtracted.
     let updated = sqlx::query(
-        "UPDATE message_append_counts SET appended=0
-         WHERE organization_id=$1 AND channel_id=$2 AND scope_id=$3 AND member_id=$4",
+        "UPDATE topics SET scope_appended=0
+         WHERE organization_id=$1 AND channel_id=$2 AND id=$3",
     )
     .bind(org)
     .bind(channel)
     .bind(topic)
-    .bind(Uuid::nil())
     .execute(&pool)
     .await
     .unwrap();
