@@ -13,12 +13,18 @@ pub(crate) enum NoticeCaller {
     Publish,
     Revoked,
     Scoped,
-    AllPass,
 }
 
 const WAIT_MS: [u64; 10] = [1, 5, 10, 50, 100, 250, 500, 1000, 2500, 5000];
 const WAIT_BUCKETS: usize = WAIT_MS.len();
-const PERMIT_CALLERS: usize = NoticeCaller::AllPass as usize;
+const PERMIT_CALLERS: usize = [
+    NoticeCaller::Retry,
+    NoticeCaller::Handoff,
+    NoticeCaller::Publish,
+    NoticeCaller::Revoked,
+    NoticeCaller::Scoped,
+]
+.len();
 
 pub(crate) struct PermitCounters {
     pub waiting: AtomicI64,
