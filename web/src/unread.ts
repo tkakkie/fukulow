@@ -3,6 +3,7 @@ import { markChannelsRead } from './channels'
 import { createRequestDeadlines } from './request-deadlines'
 import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
 import type { createSync } from './sync'
+import { observeGeneration } from './observe-generation'
 import { coversTopicCounts, ordinarySummaryFailure, stampTopicEvidence, topicBaselineStarts, type TopicCountRequirement } from './topic-summary-requests'
 import type { Topics } from './topics'
 import type { TopicBaseline } from './topic-selectors'
@@ -165,9 +166,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     try {
       const result = await Promise.race([operation, deadline.until])
       if (historyEpoch !== sync.get().historyEpoch) return { ok: false, kind: 'network' }
-      const generation = result.ok && result.data && typeof result.data === 'object' && 'history_generation' in result.data ? result.data.history_generation : undefined
-      if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { ok: false, kind: 'network' }
-      if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return { ok: false, kind: 'network' } }
+      if (observeGeneration(sync, result) === 'stale') return { ok: false, kind: 'network' }
       return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' } : result
     } finally { deadline.clear() }
   }
