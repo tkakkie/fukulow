@@ -129,7 +129,7 @@ export function createSections(options: {
     },
     accept,
     error: error => { layoutCurrent = false; state = { ...state, error }; notify() },
-    terminal: result => !result.ok && result.kind === 'http' && (result.status === 401 || api.isOrganizationUnavailable(result)),
+    terminal: result => !result.ok && result.kind === 'http' && (api.isSessionEnded(result) || api.isOrganizationUnavailable(result)),
     random: options.random,
     timeoutMs: options.timeoutMs,
   })

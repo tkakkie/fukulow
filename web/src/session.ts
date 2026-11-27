@@ -87,7 +87,7 @@ export function createSession(options: SessionOptions) {
   let dms: Dms | undefined
   let history: ReturnType<typeof createTopicSync>['sync'] | undefined
   const reportAccess: NonNullable<SyncOptions['reportSyncAccess']> = (result, source?) => {
-    if (!result.ok && result.kind === 'http' && result.status === 401) {
+    if (api.isSessionEnded(result)) {
       if (notifyEnded() && !closed) void source?.close()
     } else if (api.isOrganizationUnavailable(result)) terminate()
   }
@@ -359,7 +359,7 @@ export function createSession(options: SessionOptions) {
       listAccess = null
       activity.invalidateMemberLists()
     },
-    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.error === 'organization_unavailable'),
+    terminal: r => !r.ok && r.kind === 'http' && (api.isSessionEnded(r) || r.error === 'organization_unavailable'),
   })
   activity.hold('capabilities', capabilities)
   let historyEpoch = sync.get().historyEpoch

@@ -1,4 +1,4 @@
-import { isOrganizationUnavailable, type ChannelList, type listTimeline, type Result, type TimelinePage } from './api'
+import { isOrganizationUnavailable, isSessionEnded, type ChannelList, type listTimeline, type Result, type TimelinePage } from './api'
 import type { Navigation } from './navigation'
 import type { NavigationTarget } from './navigation-url'
 import { createRequestDeadlines } from './request-deadlines'
@@ -55,7 +55,7 @@ export function startInitialTimeline(options: {
       const result = await options.load(options.organizationId, channel, { history_generation }, undefined,
         AbortSignal.any([options.accountSignal, transport.signal]))
       if (options.accountSignal.aborted) return
-      if (!result.ok && result.kind === 'http' && result.status === 401) options.onEnded()
+      if (isSessionEnded(result)) options.onEnded()
       else if (isOrganizationUnavailable(result)) options.onUnavailable()
       // Retry transient failures through the normal first-page path.
       if (result.ok || (result.kind === 'http' && (result.status === 403 || result.status === 404))) return result

@@ -394,7 +394,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       s.timer = setTimeout(() => { s.timer = undefined; void submit(v, c, s) }, retryDelay(s.attempt++, r))
     } else {
       stopScope(s); s.error = true; s.stopped = true
-      if (!api.isOrganizationUnavailable(r) && r.kind === 'http' && r.status === 404 && r.error !== 'topic_not_found') {
+      if (!api.isOrganizationUnavailable(r) && api.isChannelDenial(r, { statuses: [404], localNotFound: 'topic_not_found' })) {
         fence(v.scope.channel, c); c.stopped = true
       }
       notify(v.scope.channel)
@@ -450,7 +450,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       else if (!retryable(r)) {
         s.stopped = true
         if (!r.ok && r.kind === 'http' && r.status === 404 && r.error === 'topic_not_found') s.topicMissing = true
-        if (!r.ok && !api.isOrganizationUnavailable(r) && r.kind === 'http' && r.status === 404 && r.error !== 'topic_not_found') {
+        if (!r.ok && !api.isOrganizationUnavailable(r) && api.isChannelDenial(r, { statuses: [404], localNotFound: 'topic_not_found' })) {
           fence(id, c); c.stopped = true
         }
       }

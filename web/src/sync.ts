@@ -86,7 +86,7 @@ export function createSync(options: SyncOptions) {
   const cancel = options.cancel ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
   const reportOrganizationUnavailable = options.reportOrganizationUnavailable ?? (apply => { void apply() })
   const reportAccess: NonNullable<SyncOptions['reportSyncAccess']> = options.reportSyncAccess ?? ((result, source) => {
-    if (!result.ok && result.kind === 'http' && result.status === 401) {
+    if (api.isSessionEnded(result)) {
       void (source?.close() ?? dispatch({ type: 'stop' }))
       options.onSessionEnded?.()
     } else if (api.isOrganizationUnavailable(result)) {
@@ -417,7 +417,7 @@ export function createSync(options: SyncOptions) {
                 if (state.connection !== effect.id || !state.running) return
                 if (api.isOrganizationUnavailable(result)) {
                   reportOrganizationUnavailable(() => dispatch({ type: 'organization_unavailable' }))
-                } else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
+                } else if (api.isSessionEnded(result)) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
                 else void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
               }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
             },

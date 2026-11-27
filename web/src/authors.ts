@@ -1,6 +1,6 @@
 import { identityOrder, rememberIdentityResponse } from './identity-order'
 import type { Message } from './api'
-import { lookupAuthors, isOrganizationUnavailable, type DisplayIdentity, type Member } from './api'
+import { lookupAuthors, isOrganizationUnavailable, isSessionEnded, type DisplayIdentity, type Member } from './api'
 
 export const FIRST_DISPLAY_AUTHORS_TIMEOUT_MS = 1_500
 
@@ -51,7 +51,7 @@ export function createAuthors(
       try {
         const result = await lookup(organizationId, { ids: batch })
         // A late 401 still belongs to the Account Session owner.
-        if (!result.ok && result.kind === 'http' && result.status === 401) { onEnded(); return }
+        if (isSessionEnded(result)) { onEnded(); return }
         if (closed || unavailable) return
         // Freshness changes cannot invalidate Membership loss within this selection.
         if (!result.ok) {

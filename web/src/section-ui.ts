@@ -1,3 +1,4 @@
+import { isSessionEnded } from './api'
 import type { SectionResult } from './sections'
 
 /** Max section name length in Unicode scalar values (spec R1). */
@@ -116,7 +117,7 @@ export function sectionWriteError(result: Extract<SectionResult<unknown>, { ok: 
   if (result.error === 'lock_contention') {
     return '他の更新と重なったため完了できませんでした。少し待ってからもう一度お試しください。'
   }
-  if (result.status === 401) {
+  if (isSessionEnded(result)) {
     return 'ログインの有効期限が切れました。もう一度ログインしてください。'
   }
   if (result.status === 404 && result.error === 'organization_unavailable') {

@@ -107,7 +107,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       .then(result => {
         // C6: cancellation/timeout/unwatch does not hide a same-Account-Session late 401.
         if (account !== session) return
-        if (!result.ok && result.kind === 'http' && (result.status === 401 || (!closed && api.isOrganizationUnavailable(result)))) {
+        if (!result.ok && result.kind === 'http' && (api.isSessionEnded(result) || (!closed && api.isOrganizationUnavailable(result)))) {
           sync.reportAccess(result, sync)
           return
         }
@@ -142,7 +142,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
             c.expired.add(t.root)
           }
           recover(c, false)
-        } else if (result.kind === 'http' && [403, 404].includes(result.status)) {
+        } else if (api.isChannelDenial(result, { statuses: [403, 404] })) {
           void sync.channelUnavailable(id)
         } else if (result.kind === 'network' || (result.kind === 'http' && (result.status >= 500 || result.status === 429))) backoff(c, result.retryAfterMs)
         else c.stopped = true

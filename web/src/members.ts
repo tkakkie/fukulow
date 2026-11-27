@@ -1,7 +1,7 @@
 import { createInvites } from './invites'
 import { sessionEndedMessage } from './auth'
 import { createActivityTarget, type Invalidation } from './activity'
-import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
+import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, isSessionEnded, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
 import { createAuthors } from './authors'
 import type { lookupAuthors } from './api'
@@ -86,7 +86,7 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   if (r.error === 'member_already_active') return 'すでにこの組織のメンバーです。'
   if (r.error === 'invite_unavailable') return 'この招待は利用できません。招待先アドレスと有効期限を確認してください。'
   if (r.error === 'invite_limit_reached') return '有効な招待が上限に達しています。不要な招待を取り消してから、もう一度お試しください。'
-  if (r.status === 401) return sessionEndedMessage
+  if (isSessionEnded(r)) return sessionEndedMessage
   if (r.status === 403) return 'この操作の権限がありません。'
   return '入力内容と権限を確認してください。'
 }
@@ -129,7 +129,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     onUnavailable()
   }
   function failed(r: Exclude<Result<unknown>, { ok: true }>) {
-    if (r.kind === 'http' && r.status === 401) onEnded()
+    if (isSessionEnded(r)) onEnded()
     else if (isOrganizationUnavailable(r)) membershipLost()
     set({ error: memberError(r), retryable: false })
   }
@@ -143,7 +143,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       notifyLoad()
       const r = await deps.listMembers(organizationId, undefined, signal)
       // Account rejection and current-selection Membership loss outlive freshness fences.
-      if (!r.ok && (r.kind === 'http' && r.status === 401 || !closed && isOrganizationUnavailable(r))) failed(r)
+      if (!r.ok && (isSessionEnded(r) || !closed && isOrganizationUnavailable(r))) failed(r)
       return r.ok ? { ok: true as const, data: { members: r.data.members, sequence } } : r
     },
     accept: data => {
@@ -157,7 +157,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       if (access === null || access === 'guest') set({ members: [], loading: true })
     },
     error: listFailed,
-    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r)),
+    terminal: r => !r.ok && r.kind === 'http' && (isSessionEnded(r) || isOrganizationUnavailable(r)),
   })
   async function load() {
     if (closed) return
@@ -168,7 +168,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     const sequence = ++loadSequence
     notifyLoad()
     const r = await deps.listMembers(organizationId)
-    if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
+    if (!r.ok && isSessionEnded(r)) { failed(r); return }
     if (closed) return
     // Freshness changes cannot invalidate Membership loss within this selection.
     if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
@@ -328,7 +328,7 @@ export function createInviteAcceptance(invite: ReturnType<typeof takeInvite>, ap
           .catch((): Result<Identity> => ({ ok: false, kind: 'network' }))
         if (!isCurrent()) return null
         if (!r.ok) {
-          const sessionRejected = r.kind === 'http' && r.status === 401
+          const sessionRejected = isSessionEnded(r)
           if (sessionRejected) onEnded()
           set({ error: memberError(r), sessionRejected })
           return null

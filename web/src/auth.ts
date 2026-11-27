@@ -2,6 +2,7 @@ import {
   deleteSession,
   getMe,
   getSetupStatus,
+  isSessionEnded,
   postSession,
   postSetup,
   type AccountIdentity,
@@ -47,7 +48,7 @@ export function errorMessage(r: Extract<Result<unknown>, { ok: false }>, context
 export async function restore(f?: Fetch): Promise<AuthState> {
   const me = await getMe(f)
   if (me.ok) return { screen: 'app', identity: me.data }
-  if (me.kind === 'network' || me.status !== 401) return { screen: 'error' }
+  if (!isSessionEnded(me)) return { screen: 'error' }
   const setup = await getSetupStatus(f)
   if (!setup.ok) return { screen: 'error' }
   return { screen: setup.data.setup_required ? 'setup' : 'signin' }
@@ -86,5 +87,5 @@ export async function setupAndSignIn(
 /** Sign out; 401 means already signed out. Network/5xx keeps the user signed in. */
 export async function signOut(f?: Fetch): Promise<boolean> {
   const r = await deleteSession(f)
-  return r.ok || (r.kind === 'http' && r.status === 401)
+  return r.ok || isSessionEnded(r)
 }

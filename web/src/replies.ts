@@ -195,8 +195,8 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; requestTim
       }
       if (!result.ok) {
         w.error = true
-        if (!api.isOrganizationUnavailable(result) && result.kind === 'http' && [403, 404].includes(result.status) &&
-          result.error !== 'reply_chain_not_found') {
+        if (!api.isOrganizationUnavailable(result) &&
+          api.isChannelDenial(result, { statuses: [403, 404], localNotFound: 'reply_chain_not_found' })) {
           void sync.channelUnavailable(channel)
         }
       } else if (result.data.root_id !== w.rootId) {

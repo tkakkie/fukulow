@@ -1,5 +1,6 @@
 import {
   isOrganizationUnavailable,
+  isSessionEnded,
   searchMessages,
   type SearchPage,
   type SearchQuery,
@@ -67,7 +68,7 @@ export function createDefaultSearchSource(
       if (result.status === 400 && result.error === 'invalid_cursor') {
         return { ok: false, failure: { kind: 'invalid_cursor' } }
       }
-      if (result.status === 401) {
+      if (isSessionEnded(result)) {
         options.onEnded?.()
         return { ok: false, failure: { kind: 'error', retryable: false } }
       }
