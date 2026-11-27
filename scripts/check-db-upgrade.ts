@@ -64,13 +64,13 @@ async function request(url: string, path: string, data?: unknown, token?: string
   return response.json()
 }
 
-// Compare original fields here. Check #515 Message state/receipts and epochs
-// and the #141 deletion marker separately below.
+// Compare original fields here. Check #515 Message state/receipts and epochs,
+// the #141 deletion marker and the #519 F2 append marker separately below.
 const snapshot = () => JSON.parse(sql(`SELECT json_build_object(
   'organizations', (SELECT json_agg(to_jsonb(t) - 'history_generation' ORDER BY organization_id) FROM organizations t),
   'accounts', (SELECT json_agg(t ORDER BY id) FROM accounts t),
   'members', (SELECT json_agg(t ORDER BY organization_id, id) FROM users t),
-  'messages', (SELECT json_agg(to_jsonb(t) - 'version' - 'send_digest' - 'deleted' ORDER BY organization_id, id) FROM messages t),
+  'messages', (SELECT json_agg(to_jsonb(t) - 'version' - 'send_digest' - 'deleted' - 'scope_append_recorded' ORDER BY organization_id, id) FROM messages t),
   'sessions', (SELECT json_agg(t ORDER BY token_hash) FROM account_sessions t))`))
 
 async function check() {
@@ -154,6 +154,8 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     dc('exec', '-T', 'app', 'fukulow-server', 'probe')
     assert.deepEqual(snapshot(), before)
     assert.equal(sql("SELECT count(*) FROM messages WHERE version = seq AND octet_length(send_digest) = 32 AND deleted IS FALSE"), '1')
+    // Rows written before F2 keep the unmarked two-key accounting (#519).
+    assert.equal(sql('SELECT count(*) FROM messages WHERE scope_append_recorded'), '0')
     await request(url, `/orgs/${organization}/me`, undefined, session.token)
     // An older/newer binary must fail before listening, even with the same row count.
     sql('UPDATE _sqlx_migrations SET version = version + 1 WHERE version = (SELECT max(version) FROM _sqlx_migrations)')
