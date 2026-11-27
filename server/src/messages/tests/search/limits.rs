@@ -1,5 +1,27 @@
 use super::*;
+use crate::messages::search::BURST;
 use futures_util::FutureExt;
+
+#[fukulow_test::test]
+async fn search_accepts_the_burst_then_returns_retry_after(pool: PgPool) {
+    let f = Fixture::with_engine(pool, SearchEngine::configured(Some("d3r")).unwrap()).await;
+    f.engine.freeze_test_clock();
+
+    for _ in 0..BURST {
+        let response = get(&f.app, f.org, &f.token, Some("needle"), None, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    let response = get(&f.app, f.org, &f.token, Some("needle"), None, None).await;
+    assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+    error(
+        response,
+        StatusCode::TOO_MANY_REQUESTS,
+        "search_rate_limited",
+    )
+    .await;
+}
 
 #[fukulow_test::test]
 async fn search_rejects_concurrent_member_before_checkout_and_releases_on_completion_and_drop(
@@ -21,13 +43,15 @@ async fn search_rejects_concurrent_member_before_checkout_and_releases_on_comple
     closed_pool.close().await;
     let mut pending = Box::pin(search());
     assert!(pending.as_mut().now_or_never().is_none());
+    let response = with_captured_auth(
+        AppState::with_test_pool(closed_pool),
+        f.engine.clone(),
+        auth.clone(),
+    )
+    .await;
+    assert_eq!(response.headers()[header::RETRY_AFTER], "1");
     error(
-        with_captured_auth(
-            AppState::with_test_pool(closed_pool),
-            f.engine.clone(),
-            auth.clone(),
-        )
-        .await,
+        response,
         StatusCode::TOO_MANY_REQUESTS,
         "search_rate_limited",
     )
@@ -38,6 +62,7 @@ async fn search_rejects_concurrent_member_before_checkout_and_releases_on_comple
     );
     let response = pending.await;
     assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
     assert_eq!(ids(&body(response).await), [message]);
 
     let mut cancelled = Box::pin(search());

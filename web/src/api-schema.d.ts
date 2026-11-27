@@ -6136,6 +6136,8 @@ export interface operations {
             /** @description search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap */
             429: {
                 headers: {
+                    /** @description Retry delay in whole seconds (at least 1). A hint when Search admission is full or the Member already has a Search in progress. */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
