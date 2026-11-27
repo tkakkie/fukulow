@@ -35,7 +35,7 @@ import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { Database,docker,image } from './database.ts';
 import { matrix,integers,estimate,equal,oracleDigest,summary,type Sample } from './model.ts';
-import { fixture } from './sql.ts';
+import { fixture,projectionSources,readQueries } from './sql.ts';
 import { measure, senderBaselineMethod } from './measure.ts';
 const argv=process.argv.slice(2);
 const flag=(s:string)=>argv.includes(s);
@@ -50,6 +50,8 @@ if(pilot&&(topics.some(n=>n>1000)||members.some(n=>n>100)||repeats>3||channels>1
 const points=matrix(topics,members),prediction=estimate(points,repeats,channels);
 console.log(JSON.stringify({pilot,topics,members,repeats,channels,points:points.length,estimate:prediction}));
 if(flag('--estimate'))process.exit(0);
+// Fail on SQL source drift for both arms before Postgres starts.
+readQueries(false);readQueries(true);
 const root=realpathSync(process.cwd());
 const out=resolve(flag('--out')?option('--out',''):process.env.UNREAD_INIT_OUT??mkdtempSync(resolve(tmpdir(),'fukulow-403-')));
 if(out===root||out.startsWith(root+sep))throw new Error('output must be outside repository');
@@ -85,7 +87,7 @@ try {
     competingContainers:docker('ps','--format','{{.Names}}\t{{.Image}}\t{{.Status}}'),
     postgres:db.sql('SELECT version();'),settings:JSON.parse(db.sql(`SELECT json_object_agg(name,setting) FROM pg_settings WHERE name IN ('shared_buffers','work_mem','jit','synchronous_commit','fsync','full_page_writes','max_connections','wal_level')`)),
     migrations:JSON.parse(db.sql('SELECT json_agg(t) FROM (SELECT version,encode(checksum,\'hex\') checksum FROM _sqlx_migrations ORDER BY version)t','base')),
-    sourceHashes:Object.fromEntries([...readdirSync('load/unread-init').filter(n=>/\.(ts|sql)$/.test(n)).map(n=>'load/unread-init/'+n),...readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).map(n=>'server/migrations/'+n),'server/src/messages/unread/counts.rs','server/src/messages/topics/projection.rs'].map(n=>[n,createHash('sha256').update(readFileSync(n)).digest('hex')]))};
+    sourceHashes:Object.fromEntries([...readdirSync('load/unread-init').filter(n=>/\.(ts|sql)$/.test(n)).map(n=>'load/unread-init/'+n),...readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).map(n=>'server/migrations/'+n),'server/src/messages/unread/counts.rs',...projectionSources.map(n=>'server/src/'+n)].map(n=>[n,createHash('sha256').update(readFileSync(n)).digest('hex')]))};
   save('metadata.json',metadata);
   for(let index=0;index<points.length;index++) {
     check();const p=points[index];console.log(`Point ${index+1}/${points.length}: ${JSON.stringify(p)}`);

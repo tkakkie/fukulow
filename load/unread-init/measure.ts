@@ -1,5 +1,5 @@
 import { Database, Session } from './database.ts';
-import { begin,barrier,sender,stats,mutation,revoke,org,member,channel,baselineRows,postGrant,sparse,readSetup,argsQuery,readArgs,countSql,projectionSql } from './sql.ts';
+import { begin,barrier,sender,stats,mutation,revoke,org,member,channel,baselineRows,postGrant,sparse,readSetup,argsQuery,readArgs,readQueries } from './sql.ts';
 import type { Point,Sample,ReadSample } from './model.ts';
 export function documents(text:string):unknown[] {
   const result:unknown[]=[];let start=-1,depth=0,string=false,escape=false;
@@ -87,7 +87,8 @@ export async function measure(db:Database,name:string,p:Point,variant:string,rep
     const expectedWrites=p.operation==='regrant'?(variant==='eager'?2*(p.topics+1):p.topics+2):affected*(variant==='eager'?p.topics+1:1);
     if(rows!==expectedWrites)throw new Error(`position statistics not flushed or unexpected writes: ${rows} != ${expectedWrites}`);
     await writer.query(`${begin}${postGrant(p.topics,initial)} COMMIT;`);
-    await writer.query(readSetup());
+    const queries = readQueries(variant === 'lazy');
+    await writer.query(readSetup(queries));
     const values=JSON.parse(await writer.query(`${begin}${argsQuery} COMMIT;`)) as Record<string,string|number>;
     const args=readArgs(values);
     const oracle:Record<string,unknown>={baselines};
@@ -95,7 +96,7 @@ export async function measure(db:Database,name:string,p:Point,variant:string,rep
       if(stage==='sparse')await writer.query(`${begin}${sparse} COMMIT; ANALYZE;`);
       const literal=[`'${values.org}'::uuid`,`'${values.member}'::uuid`,String(values.revision),`'${values.channel}'::uuid`,String(values.w),'NULL::bigint','2147483647','true','NULL::uuid'];
       for(const query of ['counts','projection'] as const) {
-        const bound=(query==='counts'?countSql():projectionSql()).replace(/\$(\d+)/g,(_,n:string)=>query==='counts'&&n==='4'?`'${values.channels}'::uuid[]`:literal[Number(n)-1]);
+        const bound=queries[query].replace(/\$(\d+)/g,(_,n:string)=>query==='counts'&&n==='4'?`'${values.channels}'::uuid[]`:literal[Number(n)-1]);
         oracle[`${stage}/${query}`]=JSON.parse(await writer.query(`${begin} SELECT coalesce(jsonb_agg(to_jsonb(q) ORDER BY to_jsonb(q)::text),'[]') FROM (${bound})q; COMMIT;`));
         for(const mode of ['custom','generic']) {
           // Discard one warm-up, retain a second plan in each forced mode.
