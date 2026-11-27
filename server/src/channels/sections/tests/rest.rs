@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::access::AccessStatus;
 use sha2::{Digest, Sha256};
 
 #[fukulow_test::test]
@@ -131,7 +132,7 @@ async fn layout_lifecycle(pool: PgPool) {
     .await;
     assert_eq!(f.get(SECTIONS).await, deleted);
     assert_eq!(non_layout_state(&f).await, before);
-    assert_eq!(subscription.status(), 0);
+    assert_eq!(subscription.status(), AccessStatus::Active);
 }
 
 async fn non_layout_state(f: &Fixture) -> Vec<Value> {

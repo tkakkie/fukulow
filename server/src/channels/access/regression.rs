@@ -80,7 +80,7 @@ impl Fixture {
             member: (self.members[member], revision),
             channel: self.channels[channel],
             grant: Mutex::new(None),
-            status: watch::channel(0).0,
+            status: watch::channel(AccessStatus::Active).0,
         })
     }
 
@@ -288,7 +288,7 @@ async fn bounded_fanout_rechecks_channel_dm_guest_deactivation_and_grant_lifetim
             .unwrap();
         assert_eq!(
             *captured.status.borrow(),
-            1,
+            AccessStatus::ChannelLost,
             "replacement grant cannot revive an old subscription"
         );
         // Guest public/private access depends on explicit grants; DM Guest

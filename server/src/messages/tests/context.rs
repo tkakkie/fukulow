@@ -1,5 +1,6 @@
 use super::*;
 use crate::auth::{SubscriptionRecheck, SubscriptionScope};
+use crate::channels::AccessWatch;
 use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 
 #[fukulow_test::test]
@@ -190,7 +191,10 @@ async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
         .check(&pools.app, SubscriptionScope::All)
         .await
         .unwrap();
-    assert_eq!((first.status(), second.status()), (0, 0));
+    assert_eq!(
+        (first.status(), second.status()),
+        (AccessWatch::ACTIVE, AccessWatch::ACTIVE)
+    );
     sqlx::query(
         "UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",
     )
@@ -203,7 +207,10 @@ async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
         .check(&pools.app, SubscriptionScope::All)
         .await
         .unwrap();
-    assert_eq!((first.status(), second.status()), (0, 3));
+    assert_eq!(
+        (first.status(), second.status()),
+        (AccessWatch::ACTIVE, AccessWatch::MEMBERSHIP_LOST)
+    );
     // Account identity is global, but only for the authenticated Account.
     use argon2::PasswordHasher;
     let hash = argon2::Argon2::default()

@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::access::AccessStatus::{Active, ChannelLost, RecheckFailed};
 use crate::test_support::{Blocked, Count, wait_blocked};
 
 pub(super) async fn mutation(
@@ -774,7 +775,7 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .unwrap();
     assert_eq!(
         watches.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![1, 1, 0, 0]
+        vec![ChannelLost, ChannelLost, Active, Active]
     );
     access
         .check(&pool, SubscriptionScope::Member(org, owner))
@@ -782,7 +783,7 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .unwrap();
     assert_eq!(
         watches.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![1, 1, 1, 0]
+        vec![ChannelLost, ChannelLost, ChannelLost, Active]
     );
     pool.close().await;
     state
@@ -791,7 +792,7 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .await;
     assert_eq!(
         failures.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![2, 0, 2, 0]
+        vec![RecheckFailed, Active, RecheckFailed, Active]
     );
     state
         .session_changes
@@ -799,6 +800,6 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .await;
     assert_eq!(
         failures.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![2, 2, 2, 0]
+        vec![RecheckFailed, RecheckFailed, RecheckFailed, Active]
     );
 }
