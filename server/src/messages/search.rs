@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::ApiErrorDetail;
 use axum::Extension;
 use channels::ChannelKind;
 use fukulow_api::MessageMoveEvent;
@@ -8,6 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 mod admission;
 mod cursor;
 pub(super) mod d3r;
+pub(super) use admission::BURST;
 pub use d3r::D3rEngine;
 
 const PAGE_SIZE: usize = 20;
@@ -23,7 +25,7 @@ impl SearchEngine {
     pub fn configured(value: Option<&str>) -> Result<Self, &'static str> {
         match value {
             None | Some("disabled") => Ok(Self::Disabled),
-            Some("d3r") => Self::d3r(admission::BURST),
+            Some("d3r") => Self::d3r(BURST),
             _ => Err("FUKULOW_SEARCH_ENGINE must be disabled or d3r"),
         }
     }
@@ -38,6 +40,14 @@ impl SearchEngine {
     #[cfg(test)]
     pub(super) fn with_test_burst(burst: u32) -> Result<Self, &'static str> {
         Self::d3r(burst)
+    }
+
+    #[cfg(test)]
+    pub(super) fn freeze_test_clock(&self) {
+        let Self::D3r(engine) = self else {
+            panic!("Search must be enabled to freeze its admission clock");
+        };
+        engine.admission.freeze_test_clock();
     }
 
     async fn candidates(
@@ -115,7 +125,8 @@ pub struct SearchHit {
         (status = 400, description = "search_query_too_short, search_query_too_long, invalid_cursor, or malformed input", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found for an inaccessible or unknown Channel", body = ErrorBody),
-        (status = 429, description = "search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap", body = ErrorBody),
+        (status = 429, description = "search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap", body = ErrorBody,
+            headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Retry delay in whole seconds (at least 1). A hint when Search admission is full or the Member already has a Search in progress."))),
         (status = 503, description = "search_unavailable when disabled or search_timeout when the database statement deadline expires", body = ErrorBody),
         (status = 500, description = "Database failure", body = ErrorBody)))]
 pub async fn search(
@@ -146,11 +157,13 @@ pub async fn search(
     let _permit = runtime
         .admission
         .acquire((organization, auth.identity.member.id))
-        .ok_or(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "search_rate_limited",
-            None,
-        ))?;
+        .map_err(|retry| {
+            ApiError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "search_rate_limited",
+                Some(ApiErrorDetail::RetryAfter(retry)),
+            )
+        })?;
     crate::database::organization_read_only(&state.pool, organization, async |tx| {
         search_page(tx, &engine, &auth, raw, &query).await
     })

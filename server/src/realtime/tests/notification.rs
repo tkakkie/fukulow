@@ -420,8 +420,6 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
     let through = LIVE_QUEUE_CAPACITY as i64 + 44;
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed backlog' FROM generate_series(3,$4::bigint) n")
         .bind(f.organization).bind(f.channel).bind(f.member).bind(through).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$2 ON CONFLICT DO NOTHING")
-        .bind(f.organization).bind(f.channel).execute(&pool).await.unwrap();
     sqlx::query(
         "UPDATE channel_message_sequences SET seq=$3 WHERE organization_id=$1 AND channel_id=$2",
     )

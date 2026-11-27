@@ -54,3 +54,14 @@ BEGIN
         GRANT INSERT (organization_id, name), UPDATE (organization_id, name) ON public.organizations TO fukulow_app;
     END IF;
 END $$;
+
+-- Apply the retention and immutable-column grants after the Create cutover,
+-- including after a no-ACL restore. Roles can also run against the old schema.
+DO $$
+BEGIN
+    IF to_regprocedure('public.fukulow_message_creation_fixed()') IS NOT NULL THEN
+        REVOKE ALL ON public.messages FROM fukulow_app;
+        GRANT SELECT, INSERT ON public.messages TO fukulow_app;
+        GRANT UPDATE (body, topic_id, version, deleted) ON public.messages TO fukulow_app;
+    END IF;
+END $$;

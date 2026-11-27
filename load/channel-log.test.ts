@@ -15,18 +15,23 @@ const files = (dir: string): string[] => readdirSync(dir).flatMap(name => {
   return statSync(path).isDirectory() ? files(path) : [path];
 });
 
-test('every replayable fixture that inserts Messages directly appends their Create log', () => {
+test('direct Message fixtures append Create rows only when supporting the legacy log schema', () => {
   const seeding = files(root).filter(path => /\.(ts|sql)$/.test(path) && !path.endsWith('.test.ts'))
     .map(path => relative(root, path)).filter(path => /INSERT INTO messages\s*\(/i.test(readFileSync(join(root, path), 'utf8')));
   const replayable = seeding.filter(path => !noReplay.some(prefix => path.startsWith(prefix)));
   assert.deepEqual(replayable.sort(), ['dms-formal-seed.ts', 'dms-history.ts', 'dms-seed.ts',
     'move/fixture.ts', 'slice5/fixture.ts']);
-  for (const path of replayable) assert.match(readFileSync(join(root, path), 'utf8'), /createLog\(org, /, path);
+  for (const path of replayable) {
+    const source = readFileSync(join(root, path), 'utf8');
+    if (path === 'dms-formal-seed.ts') assert.doesNotMatch(source, /createLog\(|INSERT INTO channel_log/i, path);
+    else assert.match(source, /createLog\(org, /, path);
+  }
 });
 
-test('createLog runs the shared scoped statement once per psql session', () => {
+test('createLog appends scoped positions only for the legacy log schema', () => {
   const sql = createLog('00000000-0000-0000-0000-000000000001', ['00000000-0000-0000-0000-000000000002']);
-  assert.match(sql, /^PREPARE fixture_create_log\(uuid,uuid\[\]\) AS -- /);
-  assert.match(sql, /INSERT INTO channel_log [\s\S]*\nFROM messages m\nWHERE m\.organization_id = \$1 AND m\.channel_id = ANY\(\$2\)\n/);
-  assert.match(sql, /\n {4}\);\nEXECUTE fixture_create_log\('00000000-0000-0000-0000-000000000001',ARRAY\['00000000-0000-0000-0000-000000000002'::uuid\]::uuid\[\]\);\nDEALLOCATE fixture_create_log;$/);
+  assert.match(sql, /attname = 'client_message_id' AND NOT attisdropped\) THEN/);
+  assert.match(sql, /EXECUTE \$legacy_create\$[\s\S]*INSERT INTO channel_log [\s\S]*\nFROM messages m\nWHERE m\.organization_id = \$1 AND m\.channel_id = ANY\(\$2\)\n/);
+  assert.match(sql, /USING '00000000-0000-0000-0000-000000000001'::uuid, ARRAY\['00000000-0000-0000-0000-000000000002'::uuid\]::uuid\[\];/);
+  assert.throws(() => createLog('bad', []), /not a UUID/);
 });

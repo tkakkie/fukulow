@@ -414,10 +414,6 @@ async fn move_limit_counts_tombstones_and_accepts_exactly_one_thousand(pool: PgP
                     FROM generate_series(2,$5) n")
             .bind(f.org).bind(f.channel).bind(f.sender).bind(id(&root)).bind(size)
             .execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO channel_log(organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id)
-                    SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id
-                    FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq>1")
-            .bind(f.org).bind(f.channel).execute(&mut *tx).await.unwrap();
         sqlx::query("UPDATE channel_message_sequences SET seq=$3 WHERE organization_id=$1 AND channel_id=$2")
             .bind(f.org).bind(f.channel).bind(size).execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
@@ -475,12 +471,6 @@ async fn move_retry_rechecks_ownership_past_the_oversized_chain_prefix(pool: PgP
     .bind(f.org).bind(f.channel).bind(f.sender)
     .bind(committed.destination_topic_id).bind(id(&root))
     .execute(&mut *tx).await.unwrap();
-    sqlx::query(
-        "INSERT INTO channel_log(organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id)
-         SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id
-         FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq>2",
-    )
-    .bind(f.org).bind(f.channel).execute(&mut *tx).await.unwrap();
     sqlx::query(
         "UPDATE channel_message_sequences SET seq=1002 WHERE organization_id=$1 AND channel_id=$2",
     )

@@ -3,8 +3,8 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
-- #725 A future external search engine writes an outbox row in the Message transaction and applies it after COMMIT through a worker.
-- #725 Search generates a dedicated cursor key at process start to avoid reusing credentials or provisioning another secret. Cursors expire on restart.
+- #725 External Search would use a Message transaction outbox processed after COMMIT by a worker.
+- #725/#736 (B) Per-process Search cursor keys avoid credential reuse and secret provisioning. Restart or deploy expires cursors. Admission is per instance. To scale out, configure a shared key (A) with dual-key rotation.
 - #301 author lookup caps input at 100 ids, dedupes and omits unreadable authors. A shared non-locking history snapshot covers access, authorship and retained identities to prevent directory expansion and authorization races.
 - #149 usable managers add/remove and every Role can leave its own grant. Serialize private removal and its checks per Channel to preserve the last usable grant and any last manager (409).
 - #231/#305 Role demotion or deactivation that loses a private Channel's last usable manager fails atomically with 409 `last_channel_manager` and no Channel details. Reuse #149's locks and check via the guard injected into auth to preserve module direction.
@@ -45,7 +45,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #142 Missing positions suppress only that Channel's Unread at committed seq (Topic W), log list inconsistency, persist nothing and keep mark-read 404. A zero position marks old history unread and a list-wide 500 hides unaffected Channels.
 - #142 Accept serialized set-based work O(active Members + their Topics) on public Channel insert and O(visible Channels + Topics) on Member activation, with shared #135 until COMMIT. Remeasure larger Organizations.
 - #142 Backfill blocks sends and Member/grant writes under SHARE ROW EXCLUSIVE. Work scales with visible Member×Channel pairs plus Topics. A 5 s startup lock wait cap does not bound the write outage after acquisition.
-- #160 Organization-scoped `channel_log` alone carries Create/Edit/Move/Delete positions, using one append-only sequence to simplify S1, cursors and gap fill without replay cost tracking mutation churn. Replay proves coverage and hydrates current Messages/tombstones instead of as-it-was bodies, avoiding a past-body archive and deleted-body resurrection.
+- [#620](https://github.com/tkakkie/fukulow/issues/620) Reuse the scoped Message creation index to save one row and index entry per send. The barrier protects the sole allocator through COMMIT. Each source is unique, so replay rejects cross-source duplicates. Tombstones retain Create identity without archiving past bodies.
 - #160 Event position and Message state version are separate. Version is the last affecting event position. Higher versions alone replace state, so replay/reorder/stale ACKs or pages converge. Delete is a terminal tombstone.
 - #160 Past-body retention/erasure across edits, deletes, receipts and backups remains open. Archive no past bodies and expose no deleted content via replay, snapshots, search or counts. Tombstones prevent resurrection.
 - #515 A creation-time SHA-256 digest of the original send intent, retained for the Message lifetime, keeps retry identity stable across edits without keeping plaintext in the receipt while retention remains open.

@@ -1,21 +1,7 @@
 use super::*;
 
-// Load fixtures insert Messages directly (load/channel-log.sql). Their replay
-// from after_seq 0 must complete once the shared Create-log step has run.
-const CREATE_LOG: &str = include_str!("../../../../load/channel-log.sql");
-
-async fn append_create_log(pool: &PgPool, f: &Fixture) -> u64 {
-    sqlx::query(CREATE_LOG)
-        .bind(f.organization)
-        .bind(vec![f.channel])
-        .execute(pool)
-        .await
-        .unwrap()
-        .rows_affected()
-}
-
 #[fukulow_test::test]
-async fn directly_seeded_history_replays_from_zero_after_fixture_create_log(pool: PgPool) {
+async fn directly_seeded_messages_replay_from_zero_and_handoff_to_live(pool: PgPool) {
     let f = fixture(&pool).await;
     for statement in [
         "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) \
@@ -31,13 +17,6 @@ async fn directly_seeded_history_replays_from_zero_after_fixture_create_log(pool
             .await
             .unwrap();
     }
-    // Control: without the Create log the replay fails closed.
-    let mut missing = f.server.connect(&f.token).await;
-    subscribe(&mut missing, f.channel, 0).await;
-    closed(&mut missing, 1011).await;
-
-    assert_eq!(append_create_log(&pool, &f).await, 120);
-    assert_eq!(append_create_log(&pool, &f).await, 0);
     let mut socket = f.server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
     for seq in 1..=120 {

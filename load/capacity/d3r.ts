@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { dfBytes, dockerDiskArgs, type DiskSample } from '../search-engines/d3r/headroom.ts';
 import { verifiedBackfill } from '../search-engines/d3r/backfill.ts';
+import { manifestFile } from '../search-engines/d3r/manifest.ts';
 import { validRls } from '../search-engines/d3r/rls.ts';
 import { receiptFile, snapshotFile } from '../search-engines/d3r/snapshot.ts';
 import { hash } from '../search-engines/manifest.ts';
@@ -149,7 +150,7 @@ function main() {
   const out = resolve(values.out);
   assert.ok(!lstatSync(out, {throwIfNoEntry: false}), 'The planned output must not exist yet');
   const rehearsal = resolve(values.rehearsal);
-  const manifest = readJson(fileURLToPath(new URL('../search-engines/manifest-v17.json', import.meta.url)));
+  const manifest = readJson(fileURLToPath(new URL('../../' + manifestFile, import.meta.url)));
   const {performance} = manifest.frozen;
   const status = readJson(join(rehearsal, 'run-status.json'));
   const finished = readJson(join(rehearsal, 'finished.json'));

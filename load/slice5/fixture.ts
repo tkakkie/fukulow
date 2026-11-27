@@ -8,26 +8,26 @@ const checked = (ids: string[]) => { if (!ids.every(id => uuid.test(id))) throw 
 const array = (ids: string[]) => `ARRAY[${checked(ids).map(id => `'${id}'`).join(',')}]::uuid[]`;
 
 // counts[i] Messages of 17 B go to channels[i]; ids, client ids and senders are deterministic.
-export function prefillSQL(organization: string, channels: string[], counts: number[]): string {
+export function prefillSQL(organization: string, channels: string[], counts: number[], shape: { members: number; perChannel: number } = fixture): string {
   if (channels.length !== counts.length || counts.some(n => !Number.isInteger(n) || n < 0)) throw new Error('bad prefill plan');
   checked([organization]);
   return `BEGIN;
 CREATE TEMP TABLE slice5_members ON COMMIT DROP AS
   SELECT substring(a.email FROM '^member-(\\d+)@')::int AS idx, u.id FROM users u JOIN accounts a ON a.id = u.account_id
   WHERE u.organization_id = '${organization}' AND a.email LIKE 'member-%';
-DO $$ BEGIN IF (SELECT count(*) FROM slice5_members) <> ${fixture.members} THEN RAISE EXCEPTION 'member fixture'; END IF; END $$;
+DO $$ BEGIN IF (SELECT count(*) FROM slice5_members) <> ${shape.members} THEN RAISE EXCEPTION 'member fixture'; END IF; END $$;
 CREATE TEMP TABLE slice5_plan ON COMMIT DROP AS
   SELECT ord::int - 1 AS c, id, n FROM unnest(${array(channels)}, ARRAY[${counts.join(',')}]::int[]) WITH ORDINALITY AS t(id, n, ord);
 INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body)
   SELECT '${organization}', md5('slice5/m/' || p.c || '/' || s)::uuid, p.id, s, m.id, md5('slice5/c/' || p.c || '/' || s)::uuid, '${fixture.shortBody}'
-  FROM slice5_plan p CROSS JOIN LATERAL generate_series(1, p.n) s JOIN slice5_members m ON m.idx = (p.c * ${fixture.perChannel} + s) % ${fixture.members};
+  FROM slice5_plan p CROSS JOIN LATERAL generate_series(1, p.n) s JOIN slice5_members m ON m.idx = (p.c * ${shape.perChannel} + s) % ${shape.members};
 INSERT INTO channel_message_sequences (organization_id, channel_id, seq)
   SELECT '${organization}', id, n FROM slice5_plan WHERE n > 0
   ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = EXCLUDED.seq;
 COMMIT;`;
 }
 
-// A (and only A) has channel_log; its Create rows come from the shared load fixture statement.
+// A (and only A) has channel_log. Only the legacy schema needs Create rows.
 export function channelLogSQL(arm: Arm, org: string, channels: string[]): string {
   const presence = `DO $$ BEGIN IF (to_regclass('public.channel_log') IS NOT NULL) <> ${arm === 'A'} THEN RAISE EXCEPTION 'channel_log presence does not match the arm'; END IF; END $$;`;
   checked([org, ...channels]);

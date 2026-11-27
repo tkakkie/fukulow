@@ -94,13 +94,21 @@ async fn mention_migration_has_no_backfill_and_enforces_scoped_keys_and_cascade(
         e.as_database_error().unwrap().code().as_deref(),
         Some("23505")
     );
-    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND id=$2")
+    sqlx::query("UPDATE messages SET deleted=true, body='' WHERE organization_id=$1 AND id=$2")
         .bind(org)
         .bind(id)
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(mention_rows(&pool, org).await, 0);
+    let counted: bool = sqlx::query_scalar(
+        "SELECT counted FROM message_mentions WHERE organization_id=$1 AND message_id=$2",
+    )
+    .bind(org)
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!counted);
 }
 
 fn token(id: Uuid) -> String {

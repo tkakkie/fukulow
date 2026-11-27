@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
-import { hash, postgresArguments, smokeLabel, snapshot as v13 } from '../manifest.ts';
+import { hash, postgresArguments, smokeLabel, snapshot as baseSnapshot } from '../manifest.ts';
 import { criteria } from '../summarize.ts';
 import { pageSize, readSource, sources } from './path.ts';
 import { shortIds } from './acceptance.ts';
@@ -10,7 +10,7 @@ import { forceSearchRls } from './rls.ts';
 const directory = 'load/search-engines/d3r';
 const root = new URL('../../../', import.meta.url);
 const prefix = 'server/migrations';
-export const manifestFile = 'load/search-engines/manifest-v17.json';
+export const manifestFile = 'load/search-engines/manifest-v18.json';
 export const removedSettings = {
   shared_preload_libraries: 'The v13 value preloads the PGroonga WAL and crash-safety libraries, which are absent in plain PostgreSQL.',
   'pgroonga.enable_wal_resource_manager': 'The PGroonga WAL resource manager is absent.',
@@ -20,7 +20,7 @@ export const argumentsForPostgres = ['postgres', ...postgresArguments.filter((_,
   .filter(arg => !(arg.split('=')[0] in removedSettings)).flatMap(arg => ['-c', arg])];
 
 export function snapshot() {
-  const base = v13();
+  const base = baseSnapshot();
   const migrations = readdirSync(new URL(prefix, root)).filter(name => name.endsWith('.sql'))
     .sort().map(name => prefix + '/' + name);
   const files = [...base.sourceHashes.map(source => source.path), ...migrations, ...Object.values(sources),
@@ -30,7 +30,7 @@ export function snapshot() {
   const {rangeDays, ...timing} = base.timing;
   const {b1Settings, ...sessionPolicy} = base.sessionPolicy;
   return {
-    version: 17, date: '2026-11-23', engine: 'd3r', generator: base.generator, node: base.node,
+    version: 18, date: '2026-11-27', engine: 'd3r', generator: base.generator, node: base.node,
     image: base.image.base, shmBytes: base.shmBytes,
     settings: Object.fromEntries(Object.entries(base.settings).filter(([name]) => !(name in removedSettings))),
     removedSettings, sessionPolicy,

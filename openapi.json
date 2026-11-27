@@ -7033,6 +7033,16 @@
           },
           "429": {
             "description": "search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Retry delay in whole seconds (at least 1). A hint when Search admission is full or the Member already has a Search in progress."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
