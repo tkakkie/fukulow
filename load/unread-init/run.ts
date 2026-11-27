@@ -35,7 +35,7 @@ import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { Database,docker,image } from './database.ts';
 import { matrix,integers,estimate,equal,oracleDigest,summary,type Sample } from './model.ts';
-import { fixture,projectionSources,projectionSql } from './sql.ts';
+import { fixture,projectionSources,readQueries } from './sql.ts';
 import { measure, senderBaselineMethod } from './measure.ts';
 const argv=process.argv.slice(2);
 const flag=(s:string)=>argv.includes(s);
@@ -50,7 +50,8 @@ if(pilot&&(topics.some(n=>n>1000)||members.some(n=>n>100)||repeats>3||channels>1
 const points=matrix(topics,members),prediction=estimate(points,repeats,channels);
 console.log(JSON.stringify({pilot,topics,members,repeats,channels,points:points.length,estimate:prediction}));
 if(flag('--estimate'))process.exit(0);
-projectionSql();
+// Fail on SQL source drift for both arms before Postgres starts.
+readQueries(false);readQueries(true);
 const root=realpathSync(process.cwd());
 const out=resolve(flag('--out')?option('--out',''):process.env.UNREAD_INIT_OUT??mkdtempSync(resolve(tmpdir(),'fukulow-403-')));
 if(out===root||out.startsWith(root+sep))throw new Error('output must be outside repository');

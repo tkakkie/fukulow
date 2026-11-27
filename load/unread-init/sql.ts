@@ -122,10 +122,31 @@ export function projectionSql(): string {
   ]);
   return wrapMentionPage(page, `p.last_seq ${order}`);
 }
-export function readSetup(){return `
-PREPARE counts(uuid,uuid,bigint,uuid[]) AS ${countSql()};
-PREPARE projection(uuid,uuid,bigint,uuid,bigint,bigint,bigint,bool,uuid) AS ${projectionSql()};`;
+function inheritTopicOrdinals(sql: string, topic: string, position: string, anchor: string) {
+  const ordinals = 'COALESCE(tr.read_ordinal, 0) AS read_ordinal,\n        COALESCE(tr.read_own_ordinal, 0) AS read_own_ordinal';
+  if (!sql.includes(ordinals) || !sql.includes(anchor)) throw new Error('Topic ordinal SQL source drift');
+  return sql.replace(ordinals,
+    'COALESCE(tr.read_ordinal, g.ordinal, 0) AS read_ordinal,\n        COALESCE(tr.read_own_ordinal, g.own_ordinal, 0) AS read_own_ordinal'
+  ).replace(anchor, `    LEFT JOIN LATERAL (
+        SELECT o.* FROM message_count_ordinals($1, ${position}.channel_id, ${topic}, $2, ${position}.initial_seq) o
+        WHERE tr.read_seq IS NULL AND ${position}.initial_seq IS NOT NULL
+        OFFSET 0
+    ) g ON true
+${anchor}`);
 }
+
+export function readQueries(lazy: boolean) {
+  const counts = countSql(), projection = projectionSql();
+  if (!lazy) return { counts, projection };
+  return {
+    counts: inheritTopicOrdinals(counts, 't.id', 'p', '    WHERE t.organization_id = $1 AND t.channel_id = ANY($4)'),
+    projection: inheritTopicOrdinals(projection, 'p.topic_id', 'cr', ')\nSELECT access.visible'),
+  };
+}
+
+export function readSetup({ counts, projection }: ReturnType<typeof readQueries>){return `
+PREPARE counts(uuid,uuid,bigint,uuid[]) AS ${counts};
+PREPARE projection(uuid,uuid,bigint,uuid,bigint,bigint,bigint,bool,uuid) AS ${projection};`;}
 export const argsQuery=`SELECT json_build_object('org',${org},'member',${member},'revision',(SELECT membership_revision FROM users WHERE organization_id=${org} AND id=${member}),'channel',${channel},'w',(SELECT seq FROM channel_message_sequences WHERE organization_id=${org} AND channel_id=${channel}),'channels',(SELECT array_agg(id ORDER BY id)::text FROM channels WHERE organization_id=${org}));`;
 export function readArgs(a:Record<string,string|number>){return {counts:`('${a.org}','${a.member}',${a.revision},'${a.channels}'::uuid[])`,projection:`('${a.org}','${a.member}',${a.revision},'${a.channel}',${a.w},NULL,51,true,NULL)`};}
 export function postGrant(topics:number,initial=topics) {return `

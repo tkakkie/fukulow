@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matrix,integers,estimate,equal,oracleDigest,percentile,summary,type Sample } from './model.ts';
 import { documents } from './measure.ts';
-import { fixture,projectionSql,countSql } from './sql.ts';
+import { fixture,projectionSql,countSql,readQueries } from './sql.ts';
 import { readinessArgs } from './database.ts';
 test('matrix varies Members for public visibility; other operations affect one',()=>{
   const points=matrix([10,1000,10000],[1,100,1000]);
@@ -48,6 +48,17 @@ test('production read extraction retains initial_seq fallback and Mention counts
   assert.match(projection,/FROM mention_page p LEFT JOIN mention_sets ms ON ms.message_id=p.id ORDER BY p\.last_seq DESC$/);
   const join=fixture({operation:'join',topics:10,members:1},10);
   assert.match(join,/FROM generate_series\(0,0\) g/);assert.doesNotMatch(join,/@topics@|@members@/);
+});
+test('lazy reads inherit grant-time Topic ordinals only when no Topic row exists; eager reads are production SQL',()=>{
+  assert.deepEqual(readQueries(false),{counts:countSql(),projection:projectionSql()});
+  const lazy=readQueries(true);
+  for(const [sql,position,topic] of [[lazy.counts,'p','t.id'],[lazy.projection,'cr','p.topic_id']] as const){
+    assert.ok(sql.includes(`message_count_ordinals($1, ${position}.channel_id, ${topic}, $2, ${position}.initial_seq)`));
+    assert.ok(sql.includes(`WHERE tr.read_seq IS NULL AND ${position}.initial_seq IS NOT NULL`));
+    assert.ok(sql.includes('COALESCE(tr.read_ordinal, g.ordinal, 0) AS read_ordinal'));
+    assert.ok(sql.includes('COALESCE(tr.read_own_ordinal, g.own_ordinal, 0) AS read_own_ordinal'));
+    assert.doesNotMatch(sql,/COALESCE\(tr\.read_ordinal, 0\)/);
+  }
 });
 test('readiness probes TCP so the image init temporary socket-only server is not taken as ready',()=>{
   const args=readinessArgs('c');
