@@ -1952,15 +1952,16 @@ Closed on the maintainer's decision (chat, 2026-11-27) after plan v4. **Not an o
 
 **v4 scored run.** Arms are measurement-only commits, never merged: B′ `fe626ee6`, A′ `75652db1`, which remove the #1033 ~250 ms step from both arms. One attempt, 9 rounds, 0 void, 360 valid arm-A runs, 0 invalid, no rerun.
 
-- **Step check HOLDS.** The highest unthrottled round p95 was 146.0 ms (A′) and 143.3 ms (B′), against the 300 ms limit. The ~250 ms step is gone in both arms.
+- **Step check HOLDS.** The highest unthrottled round p95 was 146.0 ms (A′) and 143.3 ms (B′), within the 200 ms HOLDS bound (above 300 ms would be FAILS). The ~250 ms step is gone in both arms.
 - **Target 1 MET.** At most 2 counted reads per valid run.
 - **Target 2: 11 MET, 5 INCONCLUSIVE, 0 MISSED.** All 8 throttled cells MET. INCONCLUSIVE: unthrottled cold `fcpMs` (`/` and Channel) and unthrottled `timelineVisibleMs` (`/` cold, Channel cold, Channel warm). CI upper ends were 4 ms (FCP, bound 2.8 ms) and 7.2–9.9 ms (Timeline, bounds 6.3–6.6 ms).
 
 **Limits.** These runs do not show that #983 has no first-display cost. Target 2 stays uncertain in the 5 cells above. `fcpMs` is reported in 4 ms steps, below which the unthrottled bounds (2.6–2.8 ms) sit. One non-zero round delta therefore leaves those cells INCONCLUSIVE, even with equal medians (56 ms in both cold cells). No v5 plan or further #983 measurement is planned.
 
-**Raw data:** the v4 bundle (`fp983v4/` with per-round results and `attempt-1/`, chain log, host records, queue and plan) is kept outside Git on the maintainer's Mac, retained at least until 2027-11-27. sha256 values:
+**Raw data:** the v4 bundle (`fp983v4/` with per-round results and `attempt-1/`, chain log, host records, queue, plan and the `ab983v4.ts` evaluator with its tests) is kept outside Git on the maintainer's Mac, retained at least until 2027-11-27. sha256 values:
 
-- Bundle `chain-983v4r3-mac-fp983v4.tar.gz`: `7f33c6562e511394946f29f7986d103cc8e2e78a2c44e2121cf3106078c363bc`
+- Bundle `chain-983v4r3-mac-fp983v4.tar.gz`: `7d971d11cca7e95b684e251277271fdfdc9b7f21f80c20690250791c02d32da5`
 - `fp-evaluation.json`: `fb5ab69bba97e464b0619211811717f892b81892058d7522aa229ed96919012a`
 - `ab.log`: `9668d388432684f7d6b9f2618669c9ebca4e68b3e21c28dff3b7b094c306f433`
 - `chain.log`: `3b3bdec96ef20bc1d6137a3baf81b6177d5fbf1fade43a75026a958a01a90b3b`
+- `ab983v4.ts`: `fb7e7571bc839fa3ca56b9e8d837399076541023ddb4dfe929e75435dc515d13`
