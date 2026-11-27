@@ -1,6 +1,6 @@
 //! Organization notices are invalidations, never Message delivery or authorization grants.
 use super::*;
-use crate::observability::revocation_trace;
+use crate::observability::{notice_permits::NoticeCaller, revocation_trace};
 use crate::{get_mut_ignoring_poison, lock_ignoring_poison};
 use auth::activity::ChangeScope;
 use std::{
@@ -18,10 +18,12 @@ use tokio::{
 mod dms;
 mod fallback_trace;
 mod holds;
+mod notice_budget;
 mod revocations;
 pub(crate) use dms::DmPublication;
 use holds::Holds;
 pub(crate) use holds::revocation_hold_counts;
+use notice_budget::{NoticeBudget, NoticePermit, notice_query_slot};
 use revocations::{Capture, Check, Revocations};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -307,7 +309,7 @@ struct Entry {
     organization: Uuid,
     member: (Uuid, i64),
     hash: Vec<u8>,
-    notice_queries: Arc<OnceLock<Semaphore>>,
+    notice_queries: Arc<OnceLock<NoticeBudget>>,
     buffer: Mutex<Buffer>,
     wake: Notify,
 }
@@ -321,7 +323,7 @@ pub struct Activity {
     directory_member: Option<Uuid>,
     directory_channels: Vec<Uuid>,
     capacity: Arc<Semaphore>,
-    notice_queries: Arc<OnceLock<Semaphore>>,
+    notice_queries: Arc<OnceLock<NoticeBudget>>,
     batches: Arc<Mutex<HashMap<(Uuid, Uuid), ActivityBatch>>>,
     #[cfg(test)]
     tasks: Arc<Mutex<HashMap<(Uuid, Uuid), tokio::task::AbortHandle>>>,
@@ -644,7 +646,9 @@ impl Activity {
         #[cfg(test)]
         self.queries
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let proofs = self.authorize(pool, &selected).await?;
+        let proofs = self
+            .authorize(pool, &selected, NoticeCaller::Publish)
+            .await?;
         let shared_guests =
             if matches!(notice, Notice::MembersChanged) && !self.directory_channels.is_empty() {
                 let entries: Vec<_> = selected.into_iter().map(|(entry, _)| entry).collect();
@@ -967,7 +971,7 @@ pub(crate) struct NoticeFrame {
 
 enum RecheckFailure {
     Database,
-    Deadline,
+    Deadline { caller: NoticeCaller, granted: bool },
 }
 
 impl NoticeFrame {
@@ -1098,7 +1102,14 @@ impl NoticeFrame {
                         .await
                     {
                         Ok(()) => {}
-                        Err(RecheckFailure::Deadline) => break None,
+                        Err(RecheckFailure::Deadline { caller, granted }) => {
+                            if let Some(gauges) =
+                                NoticeBudget::measurement(&self.entry.notice_queries)
+                            {
+                                gauges.deadline_exit(caller, granted);
+                            }
+                            break None;
+                        }
                         Err(RecheckFailure::Database) => {
                             if self.retry {
                                 let b = lock_ignoring_poison(&self.entry.buffer);
@@ -1151,6 +1162,12 @@ impl NoticeFrame {
             (self.entry.clone(), None),
             (self.entry.clone(), Some(check.channel)),
         ];
+        let caller = if self.retry {
+            NoticeCaller::Retry
+        } else {
+            NoticeCaller::Handoff
+        };
+        let granted = AtomicBool::new(false);
         let proofs = tokio::time::timeout_at(deadline, async {
             #[cfg(test)]
             test_pause(
@@ -1160,14 +1177,20 @@ impl NoticeFrame {
                 Some(self.entry.member.0),
             )
             .await;
-            let _slot = notice_query_slot(&self.entry.notice_queries, pool).await?;
+            let slot = notice_query_slot(&self.entry.notice_queries, pool, caller).await?;
+            if slot.recording() {
+                granted.store(true, Ordering::Relaxed);
+            }
             if let Some(capacity) = retry_measurement {
                 capacity.count_retry_attempt();
             }
-            authorize_batch(pool, &selected).await
+            authorize_batch(pool, &selected, Some(&slot)).await
         })
         .await
-        .map_err(|_| RecheckFailure::Deadline)?
+        .map_err(|_| RecheckFailure::Deadline {
+            caller,
+            granted: granted.load(Ordering::Relaxed),
+        })?
         .map_err(|_| RecheckFailure::Database)?;
         let mut b = lock_ignoring_poison(&self.entry.buffer);
         if self.retry {
@@ -1177,24 +1200,6 @@ impl NoticeFrame {
         }
         Ok(())
     }
-}
-async fn notice_query_slot<'a>(
-    budget: &'a OnceLock<Semaphore>,
-    pool: &sqlx::PgPool,
-) -> Result<tokio::sync::SemaphorePermit<'a>, sqlx::Error> {
-    // One Activity registry per app pool. Allow up to half the connections for
-    // notice authorization, counting the single periodic pass separately so
-    // socket retries cannot queue ahead of it. At the minimum pool size (3),
-    // allow one query from each lane and leave one connection for other work.
-    // Take the permit before checkout and release it before backoff or handoff.
-    budget
-        .get_or_init(|| {
-            let half = pool.options().get_max_connections() as usize / 2;
-            Semaphore::new(half.saturating_sub(1).max(1))
-        })
-        .acquire()
-        .await
-        .map_err(|_| sqlx::Error::PoolClosed)
 }
 async fn directory_guests(
     pool: &sqlx::PgPool,
@@ -1231,6 +1236,7 @@ async fn directory_guests(
 async fn authorize_batch(
     pool: &sqlx::PgPool,
     selected: &[(Arc<Entry>, Option<Uuid>)],
+    permit: Option<&NoticePermit<'_>>,
 ) -> Result<Vec<Option<Proof>>, sqlx::Error> {
     let entries: Vec<_> = selected.iter().map(|(entry, _)| entry.clone()).collect();
     let Some(first) = entries.first() else {
@@ -1250,6 +1256,18 @@ async fn authorize_batch(
         pool,
         &sql,
         async |tx: &mut sqlx::PgConnection, sql: &str| {
+            let _checkout = permit.and_then(NoticePermit::checkout);
+            #[cfg(test)]
+            test_pause(
+                first.organization,
+                selected[0]
+                    .1
+                    .or_else(|| selected.get(1).and_then(|row| row.1))
+                    .unwrap_or(Uuid::nil()),
+                "notice_statement",
+                Some(first.member.0),
+            )
+            .await;
             sqlx::query_as(sql)
                 .bind(first.organization)
                 .bind(entries.iter().map(|e| e.member.0).collect::<Vec<_>>())
@@ -1588,12 +1606,13 @@ impl Activity {
         &self,
         pool: &sqlx::PgPool,
         selected: &[(Arc<Entry>, Option<Uuid>)],
+        caller: NoticeCaller,
     ) -> Result<Vec<Option<Proof>>, sqlx::Error> {
         if selected.is_empty() {
             return Ok(Vec::new());
         }
-        let _slot = notice_query_slot(&self.notice_queries, pool).await?;
-        authorize_batch(pool, selected).await
+        let slot = notice_query_slot(&self.notice_queries, pool, caller).await?;
+        authorize_batch(pool, selected, Some(&slot)).await
     }
 
     async fn revoked(
@@ -1634,7 +1653,9 @@ impl Activity {
             .iter()
             .flat_map(|(entry, _, _)| [(entry.clone(), None), (entry.clone(), Some(channel))])
             .collect();
-        let proofs = self.authorize(pool, &selected).await?;
+        let proofs = self
+            .authorize(pool, &selected, NoticeCaller::Revoked)
+            .await?;
         #[cfg(test)]
         test_pause(organization, channel, "revocation_authorized", Some(target)).await;
         let (proofs, _) = proofs.as_chunks::<2>();
@@ -1825,9 +1846,10 @@ impl Activity {
                 }
                 let proofs = if matches!(scope, auth::SubscriptionScope::All) {
                     // The Session worker runs this pass serially.
-                    authorize_batch(pool, &selected).await
+                    let _all_pass = NoticeBudget::all_pass(&self.notice_queries);
+                    authorize_batch(pool, &selected, None).await
                 } else {
-                    self.authorize(pool, &selected).await
+                    self.authorize(pool, &selected, NoticeCaller::Scoped).await
                 };
                 let Ok(proofs) = proofs else {
                     if let Some(trace) = &mut trace {
@@ -2195,7 +2217,7 @@ mod tests {
             .execute(&app)
             .await
             .unwrap();
-        let proofs = authorize_batch(&app, &selected).await.unwrap();
+        let proofs = authorize_batch(&app, &selected, None).await.unwrap();
         assert!(proofs[..5].iter().all(Option::is_none));
         assert!(proofs[5..].iter().all(Option::is_some));
         let sql: String = sqlx::query_scalar("SELECT statement FROM pg_prepared_statements WHERE statement LIKE 'WITH fukulow_context%' AND statement LIKE '%WITH ORDINALITY r(member_id,revision,hash,channel,n)%' ORDER BY prepare_time DESC LIMIT 1")

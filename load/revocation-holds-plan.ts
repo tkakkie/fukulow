@@ -123,7 +123,7 @@ export function replacementQueue(initial: PlannedRun[]) {
 }
 
 // A rehearsal reports counts only. A formal run is the registered 3 repeats with controls.
-export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; rehearsal: boolean; stall: Stall; overheadSummary?: string };
+export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; rehearsal: boolean; e6ObserveMs: number; stall: Stall; overheadSummary?: string };
 export function parseOptions(args: readonly string[]): Options {
   const option = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
   const out = option('--out');
@@ -139,6 +139,12 @@ export function parseOptions(args: readonly string[]): Options {
   if (controls !== 'on' && controls !== 'off') throw new Error('--controls accepts on,off');
   const rehearsal = args.includes('--rehearsal');
   if (!rehearsal && args.some(arg => arg.startsWith('--stall-'))) throw new Error('--stall-* options require --rehearsal');
+  const observe = option('--e6-observe-ms');
+  const e6ObserveMs = Number(observe ?? 0);
+  if (args.includes('--e6-observe-ms') && (!observe?.trim() || !Number.isSafeInteger(e6ObserveMs) || e6ObserveMs < 0)) {
+    throw new Error('--e6-observe-ms requires a non-negative integer');
+  }
+  if (e6ObserveMs > 0 && !rehearsal) throw new Error('--e6-observe-ms > 0 requires --rehearsal');
   const overheadSummary = option('--overhead-summary');
   if (args.includes('--overhead-summary') && (rehearsal || !overheadSummary || overheadSummary.startsWith('--'))) {
     throw new Error('--overhead-summary requires a saved overhead summary file and a formal run');
@@ -150,6 +156,6 @@ export function parseOptions(args: readonly string[]): Options {
     chars: number('--stall-chars', STALL_DEFAULT.chars),
   });
   if (!rehearsal && (repeats !== REPEATS || controls !== 'on')) throw new Error(`a formal run needs --repeats ${REPEATS} and --controls on; use --rehearsal for anything else`);
-  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', rehearsal, stall,
+  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', rehearsal, e6ObserveMs, stall,
     ...(overheadSummary ? { overheadSummary } : {}) };
 }

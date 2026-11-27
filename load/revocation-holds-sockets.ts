@@ -1,5 +1,6 @@
 // Establish the #668 WebSocket fixture before the baseline.
 import type { ClientMessage, ServerEvent } from '../web/src/api-schema.d.ts';
+import type { SocketClose } from './revocation-holds-e6.ts';
 import type { Notice, TargetSocket } from './revocation-holds-judgment.ts';
 import { socketAccount, targetSockets, type PlannedRun } from './revocation-holds-plan.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
@@ -8,6 +9,7 @@ import { SetupAbort } from './revocation-holds-setup.ts';
 const TARGET_BATCH_SIZE = 4;
 const TARGET_BATCH_TIMEOUT_MS = 10_000;
 
+type Phase = 'scored' | 'extension' | 'stopping';
 type Member = { id: string; token: string };
 type Fixture = { org: string; stallChannel: string; targets: Member[]; bystanders: Member[] };
 type Stage = 'queued' | 'opening' | 'activity_ready' | 'subscribe_sent' | 'subscribed' | 'failed';
@@ -31,11 +33,11 @@ export async function openSockets(
   recordSubscriptions: (subscriptions: TargetSubscription[]) => void,
 ) {
   const targets: TargetSocket[] = [], notices: Notice[] = [], sockets: WebSocket[] = [];
-  const state = { bystandersReady: 0, bystanderNotices: 0, bystanderCloses: [] as number[], stopping: false };
-  const open = (port: number, token: string, onMessage: (socket: WebSocket, message: ServerEvent) => void, onClose: (code: number) => void) => {
+  const state = { bystandersReady: 0, bystanderNotices: 0, bystanderCloses: [] as number[], lateBystanderCloses: [] as SocketClose[], phase: 'scored' as Phase, receiptsFrozen: false };
+  const open = (port: number, token: string, onMessage: (socket: WebSocket, message: ServerEvent) => void, onClose: (code: number, phase: 'scored' | 'extension') => void) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/orgs/${fixture.org}/ws`, { headers: { Authorization: `Bearer ${token}` } } as unknown as string[]);
     socket.onmessage = event => onMessage(socket, JSON.parse(String(event.data)) as ServerEvent);
-    socket.onclose = event => { if (!state.stopping) onClose(event.code); };
+    socket.onclose = event => { if (state.phase !== 'stopping') onClose(event.code, state.phase); };
     sockets.push(socket);
     return socket;
   };
@@ -98,6 +100,13 @@ export async function openSockets(
           stage(subscription, 'opening');
           try {
             const socket = open(proxyPorts[i], fixture.targets[target.account].token, (socket, message) => {
+              if (message.type === 'message' && message.kind === 'create' && message.message.channel_id === fixture.stallChannel) {
+                const receipt = { id: message.message.id, clientMessageId: message.message.client_message_id, at: performance.now() };
+                if (!state.receiptsFrozen) target.stallMessages.push(receipt);
+                else if (state.phase === 'extension') (target.lateStallMessages ??= []).push(receipt);
+                return;
+              }
+              if (state.receiptsFrozen) return;
               if (message.type === 'activity_ready' && !target.ready && pending.has(subscription)) {
                 target.ready = true;
                 stage(subscription, 'activity_ready');
@@ -116,17 +125,21 @@ export async function openSockets(
                 }
               } else if (message.type === 'error' && message.channel_id === fixture.stallChannel) {
                 failSocket(`subscribe rejected (${message.code})`);
-              } else if (message.type === 'message' && message.kind === 'create' && message.message.channel_id === fixture.stallChannel) {
-                target.stallMessages.push({ id: message.message.id, at: performance.now() });
               } else if (message.type === 'channel_access_revoked') {
                 notices.push({ socket: i, channelId: message.channel_id ?? null, at: performance.now() });
               }
-            }, code => {
-              target.close = { at: performance.now(), code };
+            }, (code, phase) => {
+              const close = { at: performance.now(), code };
+              if (phase === 'extension') {
+                target.lateClose = close;
+                return;
+              }
+              target.close = close;
               if (target.subscribed) failSubscribed(subscription, `closed after subscribed (code ${code})`);
               else failSocket(`closed before subscribed (code ${code})`);
             });
             socket.onerror = () => {
+              if (state.phase !== 'scored') return;
               if (target.subscribed) failSubscribed(subscription, 'WebSocket error after subscribed');
               else failSocket('WebSocket error before subscribed');
             };
@@ -143,10 +156,18 @@ export async function openSockets(
   }
   for (const member of fixture.bystanders) {
     open(appPort, member.token, (_, message) => {
+      if (state.receiptsFrozen) return;
       if (message.type === 'activity_ready') state.bystandersReady++;
       else if (message.type === 'channel_access_revoked') state.bystanderNotices++;
-    }, () => { state.bystanderCloses.push(performance.now()); });
+    }, (code, phase) => {
+      const at = performance.now();
+      if (phase === 'extension') state.lateBystanderCloses.push({ at, code });
+      else state.bystanderCloses.push(at);
+    });
     if (sockets.length % 100 === 0) await new Promise(resolve => setTimeout(resolve, 100)); // match #592 upgrade pacing
   }
-  return { targets, notices, state, requireTargetsOpen, endSetup };
+  const endScoredCloses = (observeMs: number) => { state.phase = observeMs > 0 ? 'extension' : 'stopping'; };
+  const freezeScoredReceipts = () => { state.receiptsFrozen = state.phase === 'extension'; };
+  const stop = () => { state.phase = 'stopping'; };
+  return { targets, notices, state, requireTargetsOpen, endSetup, endScoredCloses, freezeScoredReceipts, stop };
 }

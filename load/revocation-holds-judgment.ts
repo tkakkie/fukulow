@@ -9,12 +9,14 @@ import { baselineWindow, CELL_NAMES, edges, REPEATS, type Cell, type Duration, t
 import type { StallRecord } from './revocation-holds-stall.ts';
 import type { Readback } from './revocation-holds-native-stall.ts';
 import type { ServerPoolSample, Stamped } from './revocation-holds-log.ts';
+import type { E6Observation, SocketClose, StallReceipt, StallSend, reconcileStall } from './revocation-holds-e6.ts';
+import type { NoticePermitSample } from './revocation-holds-permits.ts';
 import type { HoldsTrace } from './revocation-holds-trace.ts';
 
 export type HoldsSample = { serverMs: number; activeHolds: number; highWaterMark: number; retryAttempts: number };
 // Request start and successful completion, on the harness clock; status 0 means no response.
 export type AccountMutations = { memberId?: string; revokeStartedAt?: number; revokedAt?: number; revokeStatus?: number; restoreStartedAt?: number; restoredAt?: number; restoreStatus?: number };
-export type TargetSocket = { account: number; ready: boolean; subscribed: boolean; stall: StallRecord; stallMessages: { id: string; at: number }[]; close?: { at: number; code: number } };
+export type TargetSocket = { account: number; ready: boolean; subscribed: boolean; stall: StallRecord; stallMessages: StallReceipt[]; lateStallMessages?: StallReceipt[]; close?: SocketClose; lateClose?: SocketClose };
 export type Notice = { socket: number; channelId: string | null; at: number }; // socket indexes the target sockets
 export type HoldsRun = {
   kind: 'fault' | 'control'; cell: Cell; duration?: Duration; repeat: number;
@@ -35,6 +37,11 @@ export type HoldsRun = {
   wallOffsetBoundsMs?: [number, number]; // server tracing timestamp to harness clock
   sendTiming?: SendTiming;
   samples: HoldsSample[];
+  permits?: NoticePermitSample[];
+  stallSends?: StallSend[];
+  e6Observation?: E6Observation;
+  e6PerId?: ReturnType<typeof reconcileStall>;
+  lateBystanderCloses?: SocketClose[];
   statements: Statement[]; refused: number[];
   dbProbe: Probe[]; httpProbe: Probe[]; pool: ServerPoolSample[];
   rss: { at: number; kb: number }[];

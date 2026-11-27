@@ -709,6 +709,113 @@ mod tests {
         assert_eq!(counts.high_water_mark, 1);
     }
 
+    fn measure_notice_budget(
+        reg: &Registration,
+    ) -> Arc<crate::observability::notice_permits::NoticePermitGauges> {
+        let gauges = Arc::default();
+        assert!(
+            reg.entry
+                .notice_queries
+                .set(NoticeBudget::measured(1, Arc::clone(&gauges)))
+                .is_ok()
+        );
+        gauges
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_deadline_in_permit_wait_counts_pre_attempt_exit() {
+        let capacity = measured_capacity(1);
+        let reg = registration(capacity.clone());
+        let gauges = measure_notice_budget(&reg);
+        let (pool, _capture) = failed_handoff(&reg).await;
+        let held = notice_query_slot(&reg.entry.notice_queries, &pool, NoticeCaller::Publish)
+            .await
+            .unwrap();
+        tokio::time::advance(BACKOFF).await;
+        let retry = reg.next().now_or_never().flatten().unwrap();
+        let mut work = std::pin::pin!(retry.handoff(&pool, |_| async {
+            panic!("a timed-out retry polled the held write")
+        }));
+        assert!(work.as_mut().now_or_never().is_none());
+        let counters = gauges.caller(NoticeCaller::Retry);
+        assert_eq!(counters.waiting.load(Ordering::Relaxed), 1);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(work.await, None::<()>);
+        assert_eq!(counters.waiting.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.holding.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.wait_abandoned.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters.wait_abandoned_us_total.load(Ordering::Relaxed),
+            5_000_000
+        );
+        assert_eq!(
+            counters
+                .deadline_exits_before_attempt
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            counters
+                .deadline_exits_after_attempt
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(capacity.sample().retry_attempts, 0);
+        drop(held);
+    }
+
+    #[fukulow_test::test]
+    async fn retry_deadline_after_grant_counts_post_attempt_exit(pool: sqlx::PgPool) {
+        let capacity = measured_capacity(1);
+        let reg = registration(capacity.clone());
+        let gauges = measure_notice_budget(&reg);
+        let (_, capture) = failed_handoff(&reg).await;
+        let channel = capture.check().unwrap().channel;
+        tokio::time::pause();
+        tokio::time::advance(BACKOFF).await;
+        let retry = reg.next().now_or_never().flatten().unwrap();
+        tokio::time::resume();
+
+        let gate = pause_member(
+            reg.entry.organization,
+            channel,
+            "notice_statement",
+            Some(reg.entry.member.0),
+        );
+        let mut work = std::pin::pin!(retry.handoff(&pool, |_| async {
+            panic!("a timed-out retry polled the held write")
+        }));
+        tokio::select! {
+            _ = gate.entered() => {}
+            _ = &mut work => panic!("retry finished without entering the statement"),
+        }
+        let counters = gauges.caller(NoticeCaller::Retry);
+        assert_eq!(counters.holding.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.holding_checked_out.load(Ordering::Relaxed), 1);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(work.await, None::<()>);
+        tokio::time::resume();
+        assert_eq!(counters.waiting.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.holding.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.holding_checked_out.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.wait_abandoned.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            counters
+                .deadline_exits_before_attempt
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            counters
+                .deadline_exits_after_attempt
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert!(counters.statement_us_total.load(Ordering::Relaxed) > 0);
+        assert_eq!(capacity.sample().retry_attempts, 1);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn retries_retired_before_recheck_do_not_count() {
         let capacity = measured_capacity(3);

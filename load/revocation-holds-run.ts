@@ -7,6 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { encloseClockBrackets, intersectClockBrackets, runUncertaintyMs, THRESHOLDS, type ClockSample, type Probe } from './revocation-burst-judgment.ts';
 import { installGate, removeDatabase, seedMembers, Session, startDatabase, waitReady, type Database } from './revocation-burst-db.ts';
@@ -16,13 +17,15 @@ import { emptyLog, readLogLine } from './revocation-holds-log.ts';
 import { BYSTANDERS, CELLS, DURATIONS, restoreAccount, runId, stallBody, targetSockets, TIMELINE, type PlannedRun, type Stall } from './revocation-holds-plan.ts';
 import { NativeStall } from './revocation-holds-native-stall.ts';
 import { requirePreflight, requireReadbacks, requireSendBuffers, startStall, targetSendBuffers, type Setup } from './revocation-holds-setup.ts';
+import { reconcileStall, type StallSend, type StallSnapshot } from './revocation-holds-e6.ts';
+import { snapshotStallRows } from './revocation-holds-stall-rows.ts';
 import { openSockets } from './revocation-holds-sockets.ts';
 import { postgresContainer, postgresPid, recordPlacement, serverPrefix } from './revocation-holds-placement.ts';
 import { messagesForSender } from './revocation-holds-preflight.ts';
 import { readTrace, watchTrace } from './revocation-holds-trace.ts';
 import { spawnMeasuredServer, stopMeasuredServer } from './revocation-measured-server.ts';
 import type { AccountMutations, HoldsRun } from './revocation-holds-judgment.ts';
-import type { Channel, ChangeRoleRequest, CreateChannelRequest, NativeSessionResponse, SendMessageRequest, SetupRequest } from '../web/src/api-schema.d.ts';
+import type { Channel, ChangeRoleRequest, CreateChannelRequest, ErrorBody, Message, NativeSessionResponse, SendMessageRequest, SetupRequest } from '../web/src/api-schema.d.ts';
 
 const exec = promisify(execFile);
 const FALLBACK_INTERVAL_MS = 30_000; // RECHECK_INTERVAL in server/src/auth/session.rs
@@ -32,7 +35,7 @@ const now = () => performance.now();
 const sleep = (ms: number) => new Promise(r => setTimeout(r, Math.max(0, ms)));
 const at = async <T>(time: number, work: () => Promise<T> | T) => { await sleep(time - now()); return work(); };
 
-export type Active = { server?: ChildProcess; relay?: Relay; db?: Database; sessions?: Session[]; sockets?: WebSocket[]; helper?: NativeStall; stopProbes?: () => void; stopSampling?: () => void; stopWatchingTrace?: () => void };
+export type Active = { server?: ChildProcess; relay?: Relay; db?: Database; sessions?: Session[]; sockets?: WebSocket[]; helper?: NativeStall; stopProbes?: () => void; stopSampling?: () => void; stopWatchingTrace?: () => void; beforeRemoveDatabase?: (db: Database) => void; interruptExtension?: () => void };
 const cleanups = new WeakMap<Active, Promise<boolean>>();
 export function cleanup(active: Active): Promise<boolean> {
   const running = cleanups.get(active);
@@ -51,7 +54,14 @@ async function stopRun(active: Active) {
   const graceful = active.server ? await stopMeasuredServer(active.server) : false;
   active.stopWatchingTrace?.();
   await active.relay?.close();
-  if (active.db) removeDatabase(active.db.name);
+  if (active.db) {
+    try {
+      const server = active.server;
+      if (server && (server.exitCode !== null || server.signalCode !== null)) active.beforeRemoveDatabase?.(active.db);
+    } finally {
+      removeDatabase(active.db.name);
+    }
+  }
   for (const key of Object.keys(active) as (keyof Active)[]) delete active[key];
   return graceful;
 }
@@ -81,7 +91,7 @@ async function calibrateClock(base: string, samples: number[], walls: (number | 
 
 type Context = {
   binary: string; helperBinary: string; output: string; stall: Stall; active: Active; interrupted: () => boolean;
-  setup: Setup; linuxPlacement: boolean; overhead?: 'on' | 'off'; preflightVolume?: number;
+  setup: Setup; linuxPlacement: boolean; overhead?: 'on' | 'off'; preflightVolume?: number; e6ObserveMs?: number;
 };
 
 type CheckPlacement = ReturnType<typeof recordPlacement>;
@@ -176,13 +186,32 @@ async function changeRole(fixture: Fixture, member: { id: string }, role: Change
   return { startedAt, status: r.status, doneAt: r.status === 200 ? now() : undefined };
 }
 
-async function postStall(fixture: Fixture, stall: Stall, volume = stall.senders * stall.messages) {
+async function postStall(fixture: Fixture, stall: Stall, sends: StallSend[], volume = stall.senders * stall.messages) {
   const body = stallBody(stall.chars);
   let failures = 0;
   await Promise.all(fixture.senders.flatMap((sender, index) => Array.from({ length: messagesForSender(volume, stall.senders, index) }, async () => {
     const message: SendMessageRequest = { body, client_message_id: randomUUID() };
-    const r = await fixture.request('POST', `/api/v1/orgs/${fixture.org}/channels/${fixture.stallChannel}/messages`, sender.token, message).catch(() => ({ status: 0 }));
-    if (r.status !== 201) failures++;
+    const startedAt = now();
+    const identity = { clientMessageId: message.client_message_id, sender: sender.id, startedAt };
+    try {
+      const response = await fixture.request('POST', `/api/v1/orgs/${fixture.org}/channels/${fixture.stallChannel}/messages`, sender.token, message);
+      const record: StallSend = { ...identity, endedAt: now(), status: response.status };
+      if (response.status !== 201) failures++;
+      try {
+        if (response.status === 201) {
+          const id = (response.json() as Message)?.id;
+          if (typeof id === 'string') record.messageId = id;
+        } else {
+          const error = (response.json() as ErrorBody)?.error;
+          if (typeof error === 'string') record.error = error;
+        }
+      } catch { /* Preserve the response status when its body cannot be decoded. */ }
+      sends.push(record);
+    } catch (error) {
+      failures++;
+      const name = (error as Error)?.name;
+      sends.push({ ...identity, endedAt: now(), status: 0, error: name === 'TimeoutError' ? 'timeout' : 'network' });
+    }
   })));
   return failures;
 }
@@ -253,6 +282,8 @@ export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(r
   const accounts: AccountMutations[] = fixture.targets.map(({ id }) => ({ memberId: id }));
   const gateErrors: string[] = [];
   const stallErrors: string[] = [];
+  const stallSends: StallSend[] = [];
+  const observeMs = ctx.e6ObserveMs ?? 0;
   const stallStep = <T>(step: string, work: Promise<T>) => work.catch(error => {
     stallErrors.push(`${step}: ${(error as Error).message}`);
     return undefined;
@@ -269,7 +300,7 @@ export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(r
       const time = now();
       const targetsReady = sockets.targets.filter(t => t.subscribed).length, bystandersReady = sockets.state.bystandersReady;
       const pause = await stallStep('pause', helper.command('pause'));
-      const failures = pause ? await postStall(fixture, ctx.stall, ctx.preflightVolume) : 0;
+      const failures = pause ? await postStall(fixture, ctx.stall, stallSends, ctx.preflightVolume) : 0;
       return { time, pause, targetsReady, bystandersReady, failures };
     }),
     at(pass + TIMELINE.revoke, async () => { const time = now(); await pool([...fixture.targets.keys()], MUTATION_CONCURRENCY, async a => {
@@ -288,15 +319,51 @@ export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(r
   await sleep(1_500);
   const end = now();
   await probes.stop();
-  sockets.state.stopping = true;
+  sockets.endScoredCloses(observeMs);
+  const extension = observeMs > 0 ? new AbortController() : undefined;
+  if (extension) ctx.active.interruptExtension = () => extension.abort();
   sampler.stop(); await sampler.done;
   const clockEnd = await calibrate();
   const helperEnd = await stallStep('end clock calibration', helper.calibrate());
+  const scoredStreams = (freeze: boolean) => {
+    const values = <T>(rows: T[]) => freeze ? rows.slice() : rows;
+    return {
+      closes: values(log.closes), sends: values(log.sends), holds: values(log.holds), permits: values(log.permits),
+      statements: values(relay.statements), refused: values(relay.refused), dbProbe: values(probes.dbProbe),
+      httpProbe: values(probes.httpProbe), pool: values(log.pool), rss: values(rss),
+      metrics: log.metrics.find(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)?.fields,
+    };
+  };
+  let snapshot: StallSnapshot = { error: 'server did not stop before the persistence snapshot' };
+  ctx.active.beforeRemoveDatabase = db => { snapshot = snapshotStallRows(db, fixture.org, fixture.stallChannel); };
+  const scoredCutoffAt = now();
+  sockets.freezeScoredReceipts();
+  const frozen = observeMs > 0 ? scoredStreams(true) : undefined;
+  let completed = false;
+  if (extension && !ctx.interrupted()) {
+    try {
+      const maxTimerMs = 2_147_483_647;
+      for (let remaining = observeMs; remaining > 0; remaining -= maxTimerMs) {
+        await delay(Math.min(remaining, maxTimerMs), undefined, { signal: extension.signal });
+      }
+      completed = !ctx.interrupted();
+    } catch (error) {
+      if (!extension.signal.aborted) throw error;
+    }
+  }
+  sockets.stop();
   const graceful = await cleanup(ctx.active);
   const stall = helper.evidence(stalled.pause, resume, helperStart, helperEnd);
   sockets.targets.forEach((target, i) => { target.stall = stall.records[i]; });
   writeFileSync(resolve(dir, 'stall-clock.json'), JSON.stringify(stall.helperClock));
   if (started.server.exitCode !== null || started.server.signalCode !== null) await started.logsClosed;
+  const streams = frozen ?? scoredStreams(false);
+  writeFileSync(resolve(dir, 'stall-rows.json'), JSON.stringify(snapshot));
+  const e6Observation = { requestedMs: observeMs, scoredCutoffAt, completed };
+  const e6PerId = reconcileStall({
+    stall: ctx.stall, preflightVolume: ctx.preflightVolume, cell: run.cell, sends: stallSends,
+    snapshot, targets: sockets.targets, observation: e6Observation,
+  });
   const offsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart.server, clockEnd.server) : undefined;
   const wallOffsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart.wall, clockEnd.wall) : undefined;
   const nominalRecovery = run.kind === 'fault' ? { [run.duration]: gateOff[1] } : { short: pass + DURATIONS.short, long: gateOff[1] };
@@ -306,13 +373,14 @@ export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(r
       resumeBoundsMs: stall.resumeBounds, resumeUnobserved: !resume, restore, end, nominalRecovery },
     setup: { bystanders: BYSTANDERS, bystandersReadyAtStall: stalled.bystandersReady, targetsReadyAtStall: stalled.targetsReady,
       calibrationErrors, stallPostFailures: stalled.failures, gateErrors, stallErrors },
-    serverCloses: log.closes, wallOffsetBoundsMs,
+    serverCloses: streams.closes, wallOffsetBoundsMs,
     revokedChannels: fixture.revoked, accounts, targets: sockets.targets, stallReadbacks, effectiveSendBuffer, notices: sockets.notices,
     bystanderNotices: sockets.state.bystanderNotices, bystanderCloses: sockets.state.bystanderCloses,
-    sendTiming: offsetBoundsMs && { offsetBoundsMs, uncertaintyMs: runUncertaintyMs(offsetBoundsMs, log.sends), records: log.sends },
-    samples: log.holds, statements: relay.statements, refused: relay.refused,
-    dbProbe: probes.dbProbe, httpProbe: probes.httpProbe, pool: log.pool, rss,
-    metrics: log.metrics.find(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)?.fields,
+    sendTiming: offsetBoundsMs && { offsetBoundsMs, uncertaintyMs: runUncertaintyMs(offsetBoundsMs, streams.sends), records: streams.sends },
+    samples: streams.holds, statements: streams.statements, refused: streams.refused,
+    dbProbe: streams.dbProbe, httpProbe: streams.httpProbe, pool: streams.pool, rss: streams.rss,
+    metrics: streams.metrics, permits: streams.permits, stallSends, e6Observation, e6PerId,
+    ...(observeMs > 0 ? { lateBystanderCloses: sockets.state.lateBystanderCloses } : {}),
     trace: readTrace(started.server.tracePath, graceful, started.arrivals),
   };
   writeFileSync(resolve(dir, 'run.json'), JSON.stringify(result));

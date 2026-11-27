@@ -181,3 +181,64 @@ test('a target close after setup is recorded without aborting', { timeout: 1_000
   assert.ok(Number.isFinite(targets[0].close?.at));
   assert.doesNotThrow(endSetup);
 });
+
+const stallFrame = (id: string) => ({ type: 'message', kind: 'create', message: { channel_id: 'stall', id, client_message_id: `client-${id}` } });
+
+test('zero E6 observation stops close handling at the old point and keeps receipts through cleanup', async t => {
+  const { opened, openAll, proxyPorts } = fakeSockets(t, slot);
+  const sockets = await openAll();
+  sockets.endSetup();
+  opened[0].receive(stallFrame('first'));
+  opened[1].close(1011);
+  opened[proxyPorts.length].close(1011);
+  sockets.endScoredCloses(0);
+  assert.equal(sockets.state.phase, 'stopping');
+  opened[2].close(4008);
+  opened[proxyPorts.length + 1].close(4008);
+  sockets.freezeScoredReceipts();
+  sockets.stop();
+  opened[0].receive(stallFrame('before-cleanup'));
+  opened[0].receive({ type: 'channel_access_revoked', channel_id: 'revoked' });
+  assert.deepEqual(sockets.targets[0].stallMessages.map(({ id, clientMessageId }) => [id, clientMessageId]), [
+    ['first', 'client-first'], ['before-cleanup', 'client-before-cleanup'],
+  ]);
+  assert.equal(sockets.targets[1].close?.code, 1011);
+  assert.equal(sockets.targets[2].close, undefined);
+  assert.equal(sockets.targets[2].lateClose, undefined);
+  assert.equal(sockets.state.bystanderCloses.length, 1);
+  assert.equal(sockets.notices.length, 1);
+  assert.deepEqual(sockets.state.lateBystanderCloses, []);
+});
+
+test('positive E6 observation freezes closes first, then receipts and notices, and ignores cleanup closes', async t => {
+  const { opened, openAll, proxyPorts } = fakeSockets(t, slot);
+  const sockets = await openAll();
+  // Keep setup's error hooks armed to catch an extension error reaching them.
+  sockets.endScoredCloses(60_000);
+  assert.equal(sockets.state.phase, 'extension');
+  opened[3].error();
+  opened[1].onclose?.({ code: 1011 });
+  assert.doesNotThrow(sockets.endSetup);
+  opened[0].receive(stallFrame('during-calibration'));
+  opened[proxyPorts.length].close(4008);
+  sockets.freezeScoredReceipts();
+  opened[0].receive(stallFrame('late'));
+  opened[0].receive({ type: 'channel_access_revoked', channel_id: 'late-notice' });
+  opened[proxyPorts.length + 1].receive({ type: 'channel_access_revoked', channel_id: 'late-notice' });
+  opened[0].close(4008);
+  assert.deepEqual(sockets.targets[0].stallMessages.map(r => r.id), ['during-calibration']);
+  assert.deepEqual(sockets.targets[0].lateStallMessages?.map(r => r.clientMessageId), ['client-late']);
+  assert.equal(sockets.targets[0].lateClose?.code, 4008);
+  assert.equal(sockets.targets[1].lateClose?.code, 1011);
+  assert.ok(sockets.targets.every(target => !target.close));
+  assert.deepEqual(sockets.state.lateBystanderCloses.map(close => close.code), [4008]);
+  assert.equal(sockets.state.bystanderCloses.length, 0);
+  assert.equal(sockets.state.bystanderNotices, 0);
+  assert.equal(sockets.notices.length, 0);
+  sockets.stop();
+  assert.equal(sockets.state.phase, 'stopping');
+  opened[2].close(1000);
+  opened[proxyPorts.length + 1].close(1000);
+  assert.equal(sockets.targets[2].lateClose, undefined);
+  assert.equal(sockets.state.lateBystanderCloses.length, 1);
+});
