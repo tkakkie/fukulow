@@ -82,12 +82,12 @@ const textLimits: Record<string, Limit> = {
   'message body': {
     server: { file: 'server/src/messages/send.rs', pattern: /self\.body\.chars\(\)\.count\(\) > (\d+)/g },
     openapi: ['SendMessageRequest/properties/body'],
-    web: { file: 'web/src/sync.ts', name: 'MESSAGE_BODY_MAX' },
+    web: { file: 'web/src/message-rules.ts', name: 'MESSAGE_BODY_MAX' },
   },
   'Topic name': {
     server: { file: 'server/src/messages/topics.rs', pattern: /name\.chars\(\)\.count\(\) <= (\d+)/g },
     openapi: ['SendMessageRequest/properties/topic_name', 'MoveChainRequest/allOf/0/properties/topic_name'],
-    web: { file: 'web/src/sync.ts', name: 'TOPIC_NAME_MAX' },
+    web: { file: 'web/src/message-rules.ts', name: 'TOPIC_NAME_MAX' },
   },
   'Channel name': {
     server: { file: 'server/src/channels.rs', pattern: /name\.chars\(\)\.count\(\) > (\d+)/g },
