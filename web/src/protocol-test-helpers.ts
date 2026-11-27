@@ -2,7 +2,7 @@
 import type { Message, ServerEvent } from './api'
 import { loadClientScenarios, type ClientScenario } from '../scripts/realtime-fixtures'
 import { makeProtocolClient, msgFromFixture, observe } from '../scripts/measure-fixture-client'
-import { initialState, step, type Input } from './protocol-driver'
+import { initialState, step, type Input } from './protocol-driver-test-helpers'
 
 // The fixture loader and protocol client live once in web/scripts (#866); these names wrap them.
 export const scenarios: ClientScenario[] = loadClientScenarios()

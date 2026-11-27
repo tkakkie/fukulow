@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
 import { executeCurl, readPrivateFile } from './backup-r2.ts'
 import { notificationText } from './backup-notification-text.ts'
+import { defaultRetryDelayMs, discordAttempts, discordOutcome, retryAfterDelayMs } from './backup-discord-retry.ts'
 export { notificationText } from './backup-notification-text.ts'
 
 export async function discordNotifier(configFile: string, execute = executeCurl,
@@ -21,8 +22,8 @@ export async function discordNotifier(configFile: string, execute = executeCurl,
     let directory: string | undefined
     try {
       directory = await mkdtemp(join(tmpdir(), 'backup-notify-'))
-      for (let attempt = 0; attempt < 3; attempt++) {
-        let status = 0, retryAfter = 1000
+      for (let attempt = 0; attempt < discordAttempts; attempt++) {
+        let status = 0, retryAfter = defaultRetryDelayMs
         try {
           const headers = join(directory, 'headers')
           await execute(['--disable', '--silent', '--retry', '0', '--max-time', '30', '--request', 'POST',
@@ -30,16 +31,12 @@ export async function discordNotifier(configFile: string, execute = executeCurl,
             '--dump-header', headers, '--output', '/dev/null', '--config', '-'], `url = "${url}"\n`)
           const block = (await readFile(headers, 'utf8')).trim().split(/\r?\n\r?\n/).at(-1)!
           status = Number(block.split(' ')[1])
-          const value = /^retry-after:\s*(.+)$/im.exec(block)?.[1]?.trim()
-          if (value) {
-            const delay = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now()
-            if (Number.isFinite(delay)) retryAfter = Math.max(0, Math.min(30_000, delay))
-          }
+          retryAfter = retryAfterDelayMs(/^retry-after:\s*(.+)$/im.exec(block)?.[1]?.trim(), Date.now)
         } catch { /* Network errors have the same fixed retry policy. */ }
-        if (status >= 200 && status < 300) return
-        if (status >= 400 && status < 500 && status !== 429) throw new Error('Notification failed category=rejected')
-        if (status !== 0 && status !== 429 && status < 500) throw new Error('Notification failed category=response')
-        if (attempt < 2) await pause(retryAfter)
+        const outcome = discordOutcome(status)
+        if (outcome === 'delivered') return
+        if (outcome !== 'retry') throw new Error(`Notification failed category=${outcome}`)
+        if (attempt < discordAttempts - 1) await pause(retryAfter)
       }
       throw new Error('Notification failed category=unavailable')
     } catch (error) {

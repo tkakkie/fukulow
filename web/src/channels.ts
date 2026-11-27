@@ -1,7 +1,7 @@
 import { completeCountFields } from './unread-counts'
 import { sessionEndedMessage } from './auth'
 import { createActivityTarget, type Activity, type ReadReason } from './activity'
-import { isOrganizationUnavailable, type Channel, type ChannelList, type ChannelVisibility, type CreateChannelRequest, type Result, type UpdateChannelRequest } from './api'
+import { isChannelDenial, isOrganizationUnavailable, isSessionEnded, type Channel, type ChannelList, type ChannelVisibility, type CreateChannelRequest, type Result, type UpdateChannelRequest } from './api'
 
 export type { Channel, ChannelVisibility }
 
@@ -74,7 +74,7 @@ type ChannelDetails = {
   hasInitialChannels?(): boolean
 }
 
-const terminal = (r: Result<unknown>) => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r))
+const terminal = (r: Result<unknown>) => !r.ok && r.kind === 'http' && (isSessionEnded(r) || isOrganizationUnavailable(r))
 const validList = <T>(r: Result<T>): Result<T> => r.ok && !completeCountFields(r.data) ? { ok: false, kind: 'network' } : r
 
 /** Channel list, selection and creation. `subscribe` fires after every state change. `close` ends the session's list: later async results are dropped. */
@@ -141,7 +141,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       },
       error(r) {
         if (r.kind !== 'http') return
-        if (r.status === 404 && !isOrganizationUnavailable(r)) details.unavailable(id)
+        if (isChannelDenial(r, { statuses: [404] }) && !isOrganizationUnavailable(r)) details.unavailable(id)
         if (r.status === 400 && r.error === 'dm_topics_not_allowed') {
           selectedKind = 'dm'
           followOpen()

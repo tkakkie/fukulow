@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import type { ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +8,7 @@ import { test } from 'node:test';
 import { STALL_DEFAULT } from './revocation-holds-plan.ts';
 import { checkPlacement } from './revocation-holds-placement.ts';
 import { preflightIdentity } from './revocation-holds-preflight-fixture.ts';
-import { measure } from './revocation-holds-run.ts';
+import { cleanup, measure, type Active } from './revocation-holds-run.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
 
 const slot = { kind: 'fault', cell: 'H512', duration: 'short', repeat: 1 } as const;
@@ -54,4 +56,31 @@ test('measure rejects a misplaced Linux client at setup before provisioning', as
   await assert.rejects(measure({ ...context(output), linuxPlacement: true }, slot),
     error => error instanceof SetupAbort && error.message.startsWith('CPU placement:'));
   assert.equal(existsSync(join(output, 'H512-short-r1', 'run.json')), false);
+});
+
+
+test('the persistence snapshot hook sees the stopped server before database teardown', async () => {
+  const events = new EventEmitter();
+  const server = Object.assign(events, {
+    pid: 123, exitCode: null as number | null, signalCode: null,
+    kill() {
+      queueMicrotask(() => {
+        this.exitCode = 0;
+        events.emit('exit', 0, null);
+      });
+      return true;
+    },
+  });
+  const db = { name: 'unit-test-no-container', port: 1, ownerPassword: '', appPassword: '' };
+  const active: Active = { server: server as unknown as ChildProcess, db };
+  let snapshots = 0;
+  active.beforeRemoveDatabase = snapshotDb => {
+    assert.equal(server.exitCode, 0);
+    assert.equal(snapshotDb, db);
+    assert.equal(active.db, db);
+    snapshots++;
+  };
+  assert.equal(await cleanup(active), true);
+  assert.equal(snapshots, 1);
+  assert.equal(active.db, undefined);
 });

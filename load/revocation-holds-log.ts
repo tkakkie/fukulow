@@ -1,5 +1,6 @@
 // #668 server log reader: measurement-target events and the 60 s metrics and pool events.
 import type { PoolSample, SendRecord } from './revocation-burst-judgment.ts';
+import { parsePermitSample, type NoticePermitSample } from './revocation-holds-permits.ts';
 import type { HoldsSample } from './revocation-holds-judgment.ts';
 
 // `at` is harness arrival; `wallMs` is the server's own tracing `timestamp`, taken when the event
@@ -7,8 +8,8 @@ import type { HoldsSample } from './revocation-holds-judgment.ts';
 export type Stamped = { at: number; wallMs: number | undefined };
 export type ServerPoolSample = PoolSample & { wallMs: number | undefined };
 export type SendBufferReadback = { peerPort: number; effective: number };
-export type ServerLog = { clock: number[]; clockWall: (number | undefined)[]; sends: SendRecord[]; holds: HoldsSample[]; pool: ServerPoolSample[]; metrics: PoolSample[]; closes: Stamped[]; sendBuffers: SendBufferReadback[] };
-export const emptyLog = (): ServerLog => ({ clock: [], clockWall: [], sends: [], holds: [], pool: [], metrics: [], closes: [], sendBuffers: [] });
+export type ServerLog = { clock: number[]; clockWall: (number | undefined)[]; sends: SendRecord[]; holds: HoldsSample[]; permits: NoticePermitSample[]; pool: ServerPoolSample[]; metrics: PoolSample[]; closes: Stamped[]; sendBuffers: SendBufferReadback[] };
+export const emptyLog = (): ServerLog => ({ clock: [], clockWall: [], sends: [], holds: [], permits: [], pool: [], metrics: [], closes: [], sendBuffers: [] });
 
 /** tracing-subscriber's `YYYY-MM-DDTHH:MM:SS.ffffffZ` in epoch ms, keeping the microseconds. */
 export function wallMs(timestamp: unknown): number | undefined {
@@ -25,6 +26,7 @@ const finite = (...values: unknown[]): boolean => values.every(v => typeof v ===
 export function readLogLine(log: ServerLog, line: string, at: number) {
   let event: { timestamp?: unknown; target?: string; fields?: Record<string, unknown> };
   try { event = JSON.parse(line); } catch { return; }
+  if (!event || typeof event !== 'object') return;
   const f = event.fields ?? {};
   if (event.target === 'fukulow_revocation_measurement') {
     if (f.event === 'revocation_clock_sample' && finite(f.server_ms)) { log.clock.push(f.server_ms as number); log.clockWall.push(wallMs(event.timestamp)); }
@@ -33,6 +35,10 @@ export function readLogLine(log: ServerLog, line: string, at: number) {
     }
     if (f.event === 'revocation_holds_sample' && finite(f.server_ms, f.active_holds, f.high_water_mark, f.retry_attempts)) {
       log.holds.push({ serverMs: f.server_ms as number, activeHolds: f.active_holds as number, highWaterMark: f.high_water_mark as number, retryAttempts: f.retry_attempts as number });
+    }
+    if (f.event === 'notice_permit_sample') {
+      const sample = parsePermitSample(f);
+      if (sample) log.permits.push(sample);
     }
     return;
   }

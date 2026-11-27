@@ -132,7 +132,7 @@ const summarizeSamples = (samples: number[]) => ({
   p99: Number(nearestRank(samples, 99).toFixed(3)),
 })
 
-function buildMixedTraces(driver: Pick<typeof import('../src/protocol-driver.ts'), 'initialState' | 'step'>): { id: string; inputs: Input[] }[] {
+function buildMixedTraces(driver: Pick<typeof import('../src/protocol-driver-test-helpers.ts'), 'initialState' | 'step'>): { id: string; inputs: Input[] }[] {
   const { initialState, step } = driver
   const scenarios = loadClientScenarios()
   const rec = (seq: number, channel = 'A'): Message => ({ history_generation: '00000000-0000-4000-8000-000000000515',
@@ -567,7 +567,7 @@ async function main() {
     }
   }
 
-  const driver = await import('../src/protocol-driver.ts')
+  const driver = await import('../src/protocol-driver-test-helpers.ts')
   const mixedTraces = buildMixedTraces(driver)
   const totalTraceSteps = mixedTraces.reduce((acc, t) => acc + t.inputs.length, 0)
   if (totalTraceSteps <= 6000) throw new Error(`Expected >6000 trace steps, got ${totalTraceSteps}`)

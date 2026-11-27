@@ -1,4 +1,4 @@
-import * as driver from '../src/protocol-driver.ts'
+import * as driver from '../src/protocol-driver-test-helpers.ts'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'

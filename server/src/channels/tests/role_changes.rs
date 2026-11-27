@@ -1,5 +1,6 @@
 use super::management::{grant, mutation, snapshot};
 use super::*;
+use crate::channels::access::AccessStatus;
 use crate::test_support::{Blocked, Count, wait_blocked};
 use std::time::Duration;
 
@@ -130,7 +131,7 @@ async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgP
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(body(response).await, json!({"error":"last_owner"}));
         assert_eq!(all_state(&pool).await, before);
-        assert_eq!(watch.status(), 0);
+        assert_eq!(watch.status(), AccessStatus::Active);
         assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
     }
     let replacement = Uuid::new_v4();
@@ -143,13 +144,13 @@ async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgP
         json!({"error":"last_channel_manager"})
     );
     assert_eq!(all_state(&pool).await, before);
-    assert_eq!(watch.status(), 0);
+    assert_eq!(watch.status(), AccessStatus::Active);
     assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
     grant(&pool, org, channel, replacement).await;
     let response = change(&app, &ot, target, "member").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body(response).await["role"], "member");
-    assert_eq!(watch.status(), 0);
+    assert_eq!(watch.status(), AccessStatus::Active);
     assert_eq!(observed.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -209,7 +210,7 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
                 json!({"error":"last_channel_manager"})
             );
             assert_eq!(all_state(&pool).await, before);
-            assert_eq!(watch.status(), 0);
+            assert_eq!(watch.status(), AccessStatus::Active);
             assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
         }
         // Once every Channel has another usable manager, the entire update succeeds.
@@ -220,7 +221,7 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
             change(&app, &ot, target, "guest").await.status(),
             StatusCode::OK
         );
-        assert_eq!(watch.status(), 1);
+        assert_eq!(watch.status(), AccessStatus::ChannelLost);
         assert_eq!(observed.calls.load(Ordering::SeqCst), 1);
     }
 }

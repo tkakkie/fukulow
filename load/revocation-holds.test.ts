@@ -25,7 +25,7 @@ test('the default plan has 30 fault runs and 15 controls, interleaved', () => {
 
 test('options validate cells, durations, repeats, controls and the stall', () => {
   const defaults = parseOptions(['--out', '/x']);
-  assert.deepEqual(defaults, { out: '/x', cells: CELL_NAMES, durations: ['short', 'long'], repeats: 3, controls: true, rehearsal: false, stall: STALL_DEFAULT });
+  assert.deepEqual(defaults, { out: '/x', cells: CELL_NAMES, durations: ['short', 'long'], repeats: 3, controls: true, rehearsal: false, e6ObserveMs: 0, stall: STALL_DEFAULT });
   const rehearsal = parseOptions(['--out', '/x', '--cells', 'H512,Hcap', '--durations', 'long', '--repeats', '1', '--controls', 'off', '--rehearsal']);
   assert.deepEqual([rehearsal.cells, rehearsal.repeats, rehearsal.controls, rehearsal.rehearsal], [['H512', 'Hcap'], 1, false, true]);
   // A formal run is the registered 3 repeats with controls; a subset of cells is a formal rerun.
@@ -84,6 +84,7 @@ test('the log reader keeps holds samples, send records, clock samples and 60 s e
   readLogLine(log, 'not json', 9);
   assert.deepEqual(log, {
     clock: [4], clockWall: [Date.parse('2026-11-22T00:00:01Z') + 123.456], sends: [{ channelId: 'c', beforeMs: 5, afterMs: 6, afterHold: true }],
+    permits: [],
     holds: [{ serverMs: 12.5, activeHolds: 3, highWaterMark: 9, retryAttempts: 40 }],
     pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }], sendBuffers: [],
   });
@@ -118,4 +119,15 @@ test('samples convert to the harness clock and bracket windows conservatively', 
   assert.equal(retryPeakPerSecond(samples, 0, 2_000), 900);
   assert.equal(retryPeakPerSecond(samples, 1_200, 2_000), 850);
   assert.deepEqual(timedSamples({ samples: [], sendTiming: undefined }), []);
+});
+
+test('E6 observation is zero by default and only positive in rehearsal', () => {
+  const out = ['--out', '/x'];
+  assert.equal(parseOptions(out).e6ObserveMs, 0);
+  assert.equal(parseOptions([...out, '--e6-observe-ms', '0']).e6ObserveMs, 0);
+  assert.equal(parseOptions([...out, '--rehearsal', '--e6-observe-ms', '60000']).e6ObserveMs, 60_000);
+  assert.throws(() => parseOptions([...out, '--e6-observe-ms', '60000']), /requires --rehearsal/);
+  for (const value of [[], [''], ['NaN'], ['-1'], ['1.5'], ['--bogus']]) {
+    assert.throws(() => parseOptions([...out, '--rehearsal', '--e6-observe-ms', ...value]), /requires a non-negative integer/);
+  }
 });

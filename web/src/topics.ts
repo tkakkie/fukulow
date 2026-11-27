@@ -288,8 +288,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
         'as_of_seq' in response.data && typeof response.data.as_of_seq === 'number' && response.data.as_of_seq < floor
       const result: Result<T> = belowFloor ? { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' } : response.ok && !completeCountFields(response.data) ? { ok: false, kind: 'network' } : response
       // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
-      if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() && !result.ok && result.kind === 'http' &&
-        [403, 404].includes(result.status) && result.error !== 'topic_not_found') {
+      if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() &&
+        api.isChannelDenial(result, { statuses: [403, 404], localNotFound: 'topic_not_found' })) {
         // C9: refuse sends and resubscription until explicit user selection.
         w.unavailable = true
         freezeWindow(w)
@@ -387,7 +387,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
         } else w.summaryRetries.set(topic, { attempt: 0, terminal: r.kind === 'network' || r.status === 429 || r.status >= 500 ? 'retryable' : 'non_retryable' })
         notify(channel)
       },
-      terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+      terminal: r => !r.ok && r.kind === 'http' && (api.isSessionEnded(r) || r.status === 403 || r.status === 404),
       timeoutMs: options.requestTimeoutMs,
     })
     activityTargets.set(key, { close: target.close, release: options.activity.hold(key, target), target, summaryTarget: target })
@@ -428,7 +428,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
         if (!api.isOrganizationUnavailable(r) && r.kind === 'http' &&
           (r.status === 403 || (r.status === 404 && r.error !== 'topic_not_found'))) void sync.channelUnavailable(channel)
       },
-      terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+      terminal: r => !r.ok && r.kind === 'http' && (api.isSessionEnded(r) || r.status === 403 || r.status === 404),
       timeoutMs: options.requestTimeoutMs,
     })
     activityTargets.set(key, { close: target.close, release: options.activity.hold(key, target), target })

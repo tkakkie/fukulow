@@ -425,6 +425,7 @@ fn coalesce(mut ranges: Vec<Range>) -> Vec<Range> {
 mod tests {
     use super::*;
     use crate::responses::HistoryPage;
+    use crate::test_support::message as message_fixture;
     use serde_json::json;
 
     fn r(start: i64, end: i64) -> Range {
@@ -515,13 +516,16 @@ mod tests {
         assert_eq!(c.retired_move_through, 10);
         assert!(!c.moved_roots.contains_key(&root));
 
-        let stale: Message = serde_json::from_value(json!({
-            "history_generation":Uuid::nil(),"channel_id":channel,"id":Uuid::from_u128(6),
-            "created_seq":9,"version":9,"deleted":false,"client_message_id":Uuid::from_u128(7),
-            "sender":Uuid::from_u128(8),"body":"reply","created_at":"2026-01-01T00:00:00Z",
-            "topic_id":null,"reply_to":root,"reply_root_id":root,"mentions":[]
-        }))
-        .unwrap();
+        let mut reply = message_fixture(9, 9);
+        reply["channel_id"] = json!(channel);
+        reply["id"] = json!(Uuid::from_u128(6));
+        reply["client_message_id"] = json!(Uuid::from_u128(7));
+        reply["sender"] = json!(Uuid::from_u128(8));
+        reply["body"] = json!("reply");
+        reply["reply_to"] = json!(root);
+        reply["reply_root_id"] = json!(root);
+        reply["mentions"] = json!([]);
+        let stale: Message = serde_json::from_value(reply).unwrap();
         step.merge(channel, vec![stale.clone()], Source::Ack);
         assert!(step.channel(channel).messages.is_empty());
         assert!(step.out.records.is_empty());

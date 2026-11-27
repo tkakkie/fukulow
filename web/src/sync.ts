@@ -1,17 +1,24 @@
 import { newerMentionResponse, rememberIdentityResponse } from './identity-order'
 import type { ActivityNotice } from './activity'
+import {
+  createComposerDrafts,
+  type ChannelComposerState,
+  type ComposerTarget,
+  type TopicComposerState,
+} from './composer-drafts'
 import type { DraftStore } from './drafts'
 import * as api from './api'
 import { createRequestDeadlines } from './request-deadlines'
 import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
-import { createCore } from '#sync-core'
+import { createCore, inputMessages } from '#sync-core'
 import { messageBodyError, topicNameError } from './message-rules'
 import type { SyncCore } from './protocol-types'
 import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
 
 export { foldTopicName, MESSAGE_BODY_MAX, messageBodyError, TOPIC_NAME_MAX, topicNameError } from './message-rules'
+export type { ChannelComposerState, TopicComposerState }
 
 export type TimelineApi = {
   listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
@@ -54,13 +61,6 @@ export type PendingMessageState = {
   retryable: boolean
   failureCode?: string
 }
-export type TopicComposerState = {
-  draft: string
-  composerError: string | null
-}
-export type ChannelComposerState = TopicComposerState & {
-  topicDraft: string
-}
 export type TimelineState = {
   status: 'loading' | 'ready' | 'unavailable' | 'error'
   messages: Message[]
@@ -69,9 +69,6 @@ export type TimelineState = {
   loadingOlder: boolean
   olderError: boolean
 }
-
-const emptyComposer: ChannelComposerState = { draft: '', topicDraft: '', composerError: null }
-const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 
 type SyncListener = (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>, moves?: readonly MoveVersion[]) => void
 
@@ -86,7 +83,7 @@ export function createSync(options: SyncOptions) {
   const cancel = options.cancel ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
   const reportOrganizationUnavailable = options.reportOrganizationUnavailable ?? (apply => { void apply() })
   const reportAccess: NonNullable<SyncOptions['reportSyncAccess']> = options.reportSyncAccess ?? ((result, source) => {
-    if (!result.ok && result.kind === 'http' && result.status === 401) {
+    if (api.isSessionEnded(result)) {
       void (source?.close() ?? dispatch({ type: 'stop' }))
       options.onSessionEnded?.()
     } else if (api.isOrganizationUnavailable(result)) {
@@ -102,132 +99,20 @@ export function createSync(options: SyncOptions) {
   const inputListeners = new Set<(input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void>()
   const listeners = new Set<SyncListener>()
   const channelListeners = new Map<string, Set<() => void>>()
-  const composerListeners = new Map<string, Set<() => void>>()
-  const topicComposerListeners = new Map<string, Set<() => void>>()
-  const replyComposerListeners = new Map<string, Set<() => void>>()
   const timelines = new Map<string, ReturnType<typeof timeline>>()
   const olderErrors = new Set<string>()
-  const composers = new Map<string, ChannelComposerState>()
-  const topicExtras = new Map<string, TopicComposerState>()
-  const replyExtras = new Map<string, TopicComposerState>()
   const pendingTopics = new Map<string, string>()
-  const submitted = new Map<string, { channel: string; detached: boolean; restore: () => void }>()
-  let unsubscribeDrafts: (() => void) | undefined
-
-  const draftTarget = (channel: string, topicId: string | null = null, replyRootId: string | null = null) => ({
-    organizationId: options.organizationId ?? '',
-    channelId: channel,
-    topicId,
-    replyRootId,
+  const composerDrafts = createComposerDrafts({
+    organizationId: options.organizationId,
+    drafts: options.drafts,
   })
-  const topicKey = (channel: string, topicId: string) => JSON.stringify([channel, topicId])
   const replyKey = (channel: string, replyRootId: string, topicId: string | null) =>
     JSON.stringify([channel, topicId, replyRootId])
-  const getComposer = (channel: string): ChannelComposerState => {
-    const existing = composers.get(channel)
-    if (existing) return existing
-    const draft = options.drafts?.get(draftTarget(channel)) ?? ''
-    const topicDraft = options.drafts?.getTopicDraft(draftTarget(channel)) ?? ''
-    if (!draft && !topicDraft) return emptyComposer
-    const extra = { ...emptyComposer, draft, topicDraft }
-    composers.set(channel, extra)
-    return extra
-  }
-  function putComposer(channel: string, patch: Partial<ChannelComposerState>): boolean {
-    const prev = getComposer(channel)
-    if (
-      (patch.draft === undefined || patch.draft === prev.draft) &&
-      (patch.topicDraft === undefined || patch.topicDraft === prev.topicDraft) &&
-      (patch.composerError === undefined || patch.composerError === prev.composerError)
-    ) {
-      return false
-    }
-    const draft = patch.draft ?? prev.draft
-    const topicDraft = patch.topicDraft ?? prev.topicDraft
-    const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
-    if (draft === '' && topicDraft === '' && composerError === null) composers.delete(channel)
-    else composers.set(channel, { draft, topicDraft, composerError })
-    if (patch.draft !== undefined || patch.topicDraft !== undefined) options.drafts?.set(draftTarget(channel), draft, topicDraft)
-    return true
-  }
-  function setComposer(channel: string, patch: Partial<ChannelComposerState>) {
-    if (putComposer(channel, patch)) composerListeners.get(channel)?.forEach(l => l())
-  }
   function putOlderError(channel: string, value: boolean): boolean {
     if (olderErrors.has(channel) === value) return false
     if (value) olderErrors.add(channel)
     else olderErrors.delete(channel)
     return true
-  }
-  const getTopicExtra = (channel: string, topicId: string): TopicComposerState => {
-    const key = topicKey(channel, topicId)
-    const existing = topicExtras.get(key)
-    if (existing) return existing
-    const draft = options.drafts?.get(draftTarget(channel, topicId)) ?? ''
-    if (!draft) return emptyTopicExtra
-    const extra = { ...emptyTopicExtra, draft }
-    topicExtras.set(key, extra)
-    return extra
-  }
-  function putTopicExtra(channel: string, topicId: string, patch: Partial<TopicComposerState>): boolean {
-    const key = topicKey(channel, topicId)
-    const prev = getTopicExtra(channel, topicId)
-    if (
-      (patch.draft === undefined || patch.draft === prev.draft) &&
-      (patch.composerError === undefined || patch.composerError === prev.composerError)
-    ) {
-      return false
-    }
-    const draft = patch.draft ?? prev.draft
-    const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
-    if (draft === '' && composerError === null) topicExtras.delete(key)
-    else topicExtras.set(key, { draft, composerError })
-    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel, topicId), draft)
-    return true
-  }
-  function setTopicExtra(channel: string, topicId: string, patch: Partial<TopicComposerState>) {
-    if (putTopicExtra(channel, topicId, patch)) topicComposerListeners.get(topicKey(channel, topicId))?.forEach(l => l())
-  }
-  const getReplyExtra = (channel: string, replyRootId: string, topicId: string | null): TopicComposerState => {
-    const key = replyKey(channel, replyRootId, topicId)
-    const existing = replyExtras.get(key)
-    if (existing) return existing
-    const draft = options.drafts?.get(draftTarget(channel, topicId, replyRootId)) ?? ''
-    if (!draft) return emptyTopicExtra
-    const extra = { ...emptyTopicExtra, draft }
-    replyExtras.set(key, extra)
-    return extra
-  }
-  function putReplyExtra(
-    channel: string,
-    replyRootId: string,
-    topicId: string | null,
-    patch: Partial<TopicComposerState>,
-  ): boolean {
-    const key = replyKey(channel, replyRootId, topicId)
-    const prev = getReplyExtra(channel, replyRootId, topicId)
-    if (
-      (patch.draft === undefined || patch.draft === prev.draft) &&
-      (patch.composerError === undefined || patch.composerError === prev.composerError)
-    ) {
-      return false
-    }
-    const draft = patch.draft ?? prev.draft
-    const composerError = patch.composerError !== undefined ? patch.composerError : prev.composerError
-    if (draft === '' && composerError === null) replyExtras.delete(key)
-    else replyExtras.set(key, { draft, composerError })
-    if (patch.draft !== undefined) options.drafts?.set(draftTarget(channel, topicId, replyRootId), draft)
-    return true
-  }
-  function setReplyExtra(
-    channel: string,
-    replyRootId: string,
-    topicId: string | null,
-    patch: Partial<TopicComposerState>,
-  ) {
-    if (putReplyExtra(channel, replyRootId, topicId, patch)) {
-      replyComposerListeners.get(replyKey(channel, replyRootId, topicId))?.forEach(l => l())
-    }
   }
   function clearOlderError(channel: string, prev: ChannelState | undefined, next: ChannelState | undefined): boolean {
     return ((prev?.older === undefined && next?.older !== undefined) ||
@@ -240,70 +125,27 @@ export function createSync(options: SyncOptions) {
     else if (input.type === 'ack') rememberIdentityResponse(input.message)
     else if (input.type === 'history_result' || input.type === 'events_result') rememberIdentityResponse(input.page)
     else if (input.type === 'settle_history') rememberIdentityResponse(input.messages)
-    const incoming = input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
-      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : []) : []
-    if (incoming.some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
+    if (inputMessages(input).some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
       input = { ...input, refreshMentionNames: true }
     const previous = state
     if (input.type === 'stop') {
-      for (const [id, draft] of submitted) {
-        // A repeated stop sees no pending state; it must not undo an earlier detachment (C10).
-        if (draft.detached) continue
-        draft.detached = previous.channels[draft.channel]?.pending.some(p => {
+      composerDrafts.detachSubmitted((channel, id) =>
+        previous.channels[channel]?.pending.some(p => {
           const request = core.request(p.request)
           return p.clientMessageId === id && p.state !== 'unknown' && request !== undefined && !request.stale
-        }) ?? false
-      }
+        }) ?? false,
+      )
     }
     const previousRequest = input.type === 'history_failed' ? core.request(input.request) : undefined
     const result = core.step(input)
     state = core.get()
     const extraChanged = new Set<string>()
-    const changedComposers = new Set<string>()
-    const changedTopicComposers = new Set<string>()
-    const changedReplyComposers = new Set<string>()
+    let notifyChangedComposers: (() => void) | undefined
     if (input.type === 'session_start' || input.type === 'session_replaced' || input.type === 'stop') {
       for (const channel of olderErrors) extraChanged.add(channel)
-      for (const channel of composers.keys()) changedComposers.add(channel)
-      for (const key of topicExtras.keys()) changedTopicComposers.add(key)
-      for (const key of replyExtras.keys()) changedReplyComposers.add(key)
       olderErrors.clear()
-      composers.clear()
-      topicExtras.clear()
-      replyExtras.clear()
       pendingTopics.clear()
-      for (const [id, draft] of submitted) {
-        if (!draft.detached) submitted.delete(id)
-      }
-      if (input.type === 'stop') {
-        unsubscribeDrafts?.()
-        unsubscribeDrafts = undefined
-      } else {
-        unsubscribeDrafts ??= options.drafts?.subscribe(target => {
-          if (target.organizationId !== (options.organizationId ?? '')) return
-          const draft = options.drafts?.get(target) ?? ''
-          // Detached restores write the Account Session store, outside this controller's lifetime.
-          if (target.replyRootId != null) {
-            const key = replyKey(target.channelId, target.replyRootId, target.topicId ?? null)
-            const extra = replyExtras.get(key) ?? emptyTopicExtra
-            if (extra.draft === draft) return
-            replyExtras.set(key, { ...extra, draft })
-            replyComposerListeners.get(key)?.forEach(listener => listener())
-          } else if (target.topicId != null) {
-            const key = topicKey(target.channelId, target.topicId)
-            const extra = topicExtras.get(key) ?? emptyTopicExtra
-            if (extra.draft === draft) return
-            topicExtras.set(key, { ...extra, draft })
-            topicComposerListeners.get(key)?.forEach(listener => listener())
-          } else {
-            const extra = composers.get(target.channelId) ?? emptyComposer
-            const topicDraft = options.drafts?.getTopicDraft(target) ?? ''
-            if (extra.draft === draft && extra.topicDraft === topicDraft) return
-            composers.set(target.channelId, { ...extra, draft, topicDraft })
-            composerListeners.get(target.channelId)?.forEach(listener => listener())
-          }
-        })
-      }
+      notifyChangedComposers = composerDrafts.resetSession(input.type === 'stop' ? 'stop' : 'start')
     } else {
       if (input.type === 'history_failed') {
         const req = previousRequest
@@ -319,7 +161,7 @@ export function createSync(options: SyncOptions) {
         for (const p of previous.channels[channel]?.pending ?? []) {
           if (!activeIds.has(p.clientMessageId)) {
             pendingTopics.delete(p.clientMessageId)
-            submitted.delete(p.clientMessageId)
+            composerDrafts.dropSubmitted(p.clientMessageId)
           }
         }
         if (clearOlderError(channel, previous.channels[channel], state.channels[channel])) {
@@ -334,15 +176,7 @@ export function createSync(options: SyncOptions) {
     for (const channel of extraChanged) {
       if (!result.changedChannels.has(channel)) channelListeners.get(channel)?.forEach(l => l())
     }
-    for (const channel of changedComposers) {
-      composerListeners.get(channel)?.forEach(l => l())
-    }
-    for (const key of changedTopicComposers) {
-      topicComposerListeners.get(key)?.forEach(l => l())
-    }
-    for (const key of changedReplyComposers) {
-      replyComposerListeners.get(key)?.forEach(l => l())
-    }
+    notifyChangedComposers?.()
     inputListeners.forEach(listener => listener(input, result, previous))
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
@@ -419,7 +253,7 @@ export function createSync(options: SyncOptions) {
                 if (state.connection !== effect.id || !state.running) return
                 if (api.isOrganizationUnavailable(result)) {
                   reportOrganizationUnavailable(() => dispatch({ type: 'organization_unavailable' }))
-                } else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
+                } else if (api.isSessionEnded(result)) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
                 else void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
               }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
             },
@@ -466,17 +300,11 @@ export function createSync(options: SyncOptions) {
           { history_generation: effect.history_generation, client_message_id: effect.client_message_id, body: effect.body,
             ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
             ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
-          const draft = submitted.get(effect.client_message_id)
-          // Network includes admission 503; keep the restore while a same-key retry is possible.
-          if (draft?.detached || result.ok || (result.kind === 'http' && result.status !== 429)) {
-            submitted.delete(effect.client_message_id)
-          }
-          // A closed Organization has no failed Message UI; retain a definite refusal's unedited text.
-          if (draft?.detached && !result.ok && result.kind === 'http' && [400, 403, 404, 409, 413, 415].includes(result.status)) draft.restore()
+          composerDrafts.observeSendResult(effect.client_message_id, result)
           return result
         }))
         // Close cancels the wait while detached sends still observe definite refusals.
-        if (result.timedOut) submitted.delete(effect.client_message_id)
+        if (result.timedOut) composerDrafts.dropSubmitted(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
           : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network',
             retryAfterMs: result.retryAfterMs, error: result.kind === 'http' ? result.error : undefined })
@@ -507,17 +335,24 @@ export function createSync(options: SyncOptions) {
   }
 
   function timeline(channel: string) {
-    // An empty draft can still have been edited since submit.
-    let draftRevision = 0
     let snapshot: TimelineState
     let last: ChannelState | undefined | null = null
     let lastOlderError: boolean | null = null
     const topicComposers = new Map<string, ReturnType<typeof createTopicComposer>>()
     const replyComposers = new Map<string, ReturnType<typeof createReplyComposer>>()
     const listeners = new Set<() => void>()
-    const compListeners = new Set<() => void>()
     channelListeners.set(channel, listeners)
-    composerListeners.set(channel, compListeners)
+    const channelTarget: ComposerTarget = { channelId: channel }
+    const canSend = () =>
+      state.running && state.organization !== 'unavailable' && state.channels[channel]?.state !== 'unavailable'
+    function restorePending(target: ComposerTarget, clientMessageId: string): boolean {
+      if (!state.running) return false
+      const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
+      if (p?.state !== 'failed') return false
+      composerDrafts.restoreFailed(target, p.body, p.topic_name)
+      void dispatch({ type: 'user_discard', channel, clientMessageId })
+      return true
+    }
     async function send(
       body: string,
       target: Pick<SendMessageRequest, 'reply_to' | 'topic_name'> & { replyRootId?: string } = {},
@@ -531,171 +366,57 @@ export function createSync(options: SyncOptions) {
         return false
       }
       const clientMessageId = newId()
-      if (restore) submitted.set(clientMessageId, { channel, detached: false, restore })
+      if (restore) composerDrafts.trackSubmitted(clientMessageId, channel, restore)
       if (originTopicId) pendingTopics.set(clientMessageId, originTopicId)
       const before = state.channels[channel]?.pending
       const completion = dispatch({ type: 'user_send', channel, clientMessageId, body, ...target })
       const accepted = state.channels[channel]?.pending !== before
       if (!accepted) {
-        submitted.delete(clientMessageId)
+        composerDrafts.dropSubmitted(clientMessageId)
         pendingTopics.delete(clientMessageId)
       }
       await completion
       return accepted
     }
     function createTopicComposer(topicId: string) {
-      let topicDraftRevision = 0
-      const target = draftTarget(channel, topicId)
-      const key = topicKey(channel, topicId)
+      const target: ComposerTarget = { channelId: channel, topicId }
       return {
-        get: (): TopicComposerState => getTopicExtra(channel, topicId),
-        subscribe(listener: () => void) {
-          let tcListeners = topicComposerListeners.get(key)
-          if (!tcListeners) {
-            tcListeners = new Set()
-            topicComposerListeners.set(key, tcListeners)
-          }
-          tcListeners.add(listener)
-          return () => {
-            tcListeners.delete(listener)
-            if (tcListeners.size === 0 && topicComposerListeners.get(key) === tcListeners) topicComposerListeners.delete(key)
-          }
-        },
-        setDraft(draft: string) {
-          if (draft === getTopicExtra(channel, topicId).draft) return
-          topicDraftRevision++
-          setTopicExtra(channel, topicId, { draft, composerError: null })
-        },
-        async submit(topicName: string) {
-          const text = getTopicExtra(channel, topicId).draft
-          if (!text.trim()) return false
-          const nameError = topicNameError(topicName)
-          if (nameError !== null) {
-            setTopicExtra(channel, topicId, { composerError: nameError })
-            return false
-          }
-          const bodyError = messageBodyError(text)
-          if (bodyError !== null) {
-            setTopicExtra(channel, topicId, { composerError: bodyError })
-            return false
-          }
-          if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
-            return false
-          }
-          const revision = topicDraftRevision
-          setTopicExtra(channel, topicId, { draft: '', composerError: null })
-          const storeRevision = options.drafts?.revision(target)
-          const restore = () => {
-            if (
-              topicDraftRevision === revision &&
-              options.drafts?.revision(target) === storeRevision &&
-              getTopicExtra(channel, topicId).draft === ''
-            ) {
-              setTopicExtra(channel, topicId, { draft: text })
-            }
-          }
-          const accepted = await send(text, { topic_name: topicName }, restore, topicId)
-          if (!accepted) restore()
-          return accepted
-        },
-        restore(clientMessageId: string): boolean {
-          if (!state.running) return false
-          const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
-          if (p?.state !== 'failed') return false
-          const current = getTopicExtra(channel, topicId).draft
-          topicDraftRevision++
-          setTopicExtra(channel, topicId, { draft: current ? `${current}\n${p.body}` : p.body, composerError: null })
-          void dispatch({ type: 'user_discard', channel, clientMessageId })
-          return true
-        },
+        get: (): TopicComposerState => composerDrafts.getScoped(target),
+        subscribe: (listener: () => void) => composerDrafts.subscribe(target, listener),
+        setDraft: (draft: string) => composerDrafts.setDraft(target, draft),
+        submit: (topicName: string) =>
+          composerDrafts.submit({
+            target,
+            topicName: { value: topicName, required: true },
+            canSend,
+            send: (body, restore) => send(body, { topic_name: topicName }, restore, topicId),
+          }),
+        restore: (clientMessageId: string): boolean => restorePending(target, clientMessageId),
       }
     }
     function createReplyComposer(replyRootId: string, topicId: string | null) {
-      let replyDraftRevision = 0
-      const target = draftTarget(channel, topicId, replyRootId)
-      const key = replyKey(channel, replyRootId, topicId)
+      const target: ComposerTarget = { channelId: channel, topicId, replyRootId }
       return {
-        get: (): TopicComposerState => getReplyExtra(channel, replyRootId, topicId),
-        subscribe(listener: () => void) {
-          let rcListeners = replyComposerListeners.get(key)
-          if (!rcListeners) {
-            rcListeners = new Set()
-            replyComposerListeners.set(key, rcListeners)
-          }
-          rcListeners.add(listener)
-          return () => {
-            rcListeners.delete(listener)
-            if (rcListeners.size === 0 && replyComposerListeners.get(key) === rcListeners) replyComposerListeners.delete(key)
-          }
-        },
-        setDraft(draft: string) {
-          if (draft === getReplyExtra(channel, replyRootId, topicId).draft) return
-          replyDraftRevision++
-          setReplyExtra(channel, replyRootId, topicId, { draft, composerError: null })
-        },
-        async submit(replyTo: string = replyRootId) {
-          const text = getReplyExtra(channel, replyRootId, topicId).draft
-          if (!text.trim()) return false
-          const bodyError = messageBodyError(text)
-          if (bodyError !== null) {
-            setReplyExtra(channel, replyRootId, topicId, { composerError: bodyError })
-            return false
-          }
-          if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
-            return false
-          }
-          const revision = replyDraftRevision
-          setReplyExtra(channel, replyRootId, topicId, { draft: '', composerError: null })
-          const storeRevision = options.drafts?.revision(target)
-          const restore = () => {
-            if (
-              replyDraftRevision === revision &&
-              options.drafts?.revision(target) === storeRevision &&
-              getReplyExtra(channel, replyRootId, topicId).draft === ''
-            ) {
-              setReplyExtra(channel, replyRootId, topicId, { draft: text })
-            }
-          }
-          const accepted = await send(text, { reply_to: replyTo, replyRootId }, restore, topicId ?? undefined)
-          if (!accepted) restore()
-          return accepted
-        },
+        get: (): TopicComposerState => composerDrafts.getScoped(target),
+        subscribe: (listener: () => void) => composerDrafts.subscribe(target, listener),
+        setDraft: (draft: string) => composerDrafts.setDraft(target, draft),
+        submit: (replyTo: string = replyRootId) =>
+          composerDrafts.submit({
+            target,
+            canSend,
+            send: (body, restore) => send(body, { reply_to: replyTo, replyRootId }, restore, topicId ?? undefined),
+          }),
         retry(clientMessageId: string): Promise<void> {
           const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
           if (!p?.reply_to) return Promise.resolve()
           return dispatch({ type: 'user_retry', channel, clientMessageId })
         },
-        restore(clientMessageId: string): boolean {
-          if (!state.running) return false
-          const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
-          if (p?.state !== 'failed') return false
-          const current = getReplyExtra(channel, replyRootId, topicId).draft
-          replyDraftRevision++
-          setReplyExtra(channel, replyRootId, topicId, {
-            draft: current ? `${current}\n${p.body}` : p.body,
-            composerError: null,
-          })
-          void dispatch({ type: 'user_discard', channel, clientMessageId })
-          return true
-        },
+        restore: (clientMessageId: string): boolean => restorePending(target, clientMessageId),
         migrateDraftFrom(fromReplyRootId: string, fromTopicId: string | null = null): void {
-          if (fromReplyRootId === replyRootId && fromTopicId === topicId) return
-          const tempDraft = getReplyExtra(channel, fromReplyRootId, fromTopicId).draft
-          if (!tempDraft) return
-          const existing = getReplyExtra(channel, replyRootId, topicId).draft
-          const fromComposer = replyComposers.get(replyKey(channel, fromReplyRootId, fromTopicId))
-          if (fromComposer) fromComposer.setDraft('')
-          else setReplyExtra(channel, fromReplyRootId, fromTopicId, { draft: '', composerError: null })
-          replyDraftRevision++
-          setReplyExtra(channel, replyRootId, topicId, {
-            draft: existing ? `${existing}\n${tempDraft}` : tempDraft,
-            composerError: null,
-          })
+          composerDrafts.migrateReplyDraft(channel, fromReplyRootId, fromTopicId, replyRootId, topicId)
         },
         reconcileDrafts(): void {
-          for (const fromTopicId of options.drafts?.replyDraftTopics(target) ?? []) {
-            this.migrateDraftFrom(replyRootId, fromTopicId)
-          }
+          composerDrafts.reconcileReplyDrafts(channel, replyRootId, topicId)
         },
       }
     }
@@ -727,74 +448,25 @@ export function createSync(options: SyncOptions) {
       },
       subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
       composer: {
-        get: (): ChannelComposerState => getComposer(channel),
-        subscribe(listener: () => void) { compListeners.add(listener); return () => { compListeners.delete(listener) } },
+        get: (): ChannelComposerState => composerDrafts.getChannel(channel),
+        subscribe: (listener: () => void) => composerDrafts.subscribe(channelTarget, listener),
       },
       loadLatest: () => dispatch({ type: 'refresh', channel }),
       loadOlder: () => dispatch({ type: 'load_older', channel }),
-      setDraft(draft: string) {
-        if (draft === getComposer(channel).draft) return
-        draftRevision++
-        setComposer(channel, { draft, composerError: null })
-      },
-      setTopicDraft(topicDraft: string) {
-        if (topicDraft === getComposer(channel).topicDraft) return
-        draftRevision++
-        setComposer(channel, { topicDraft, composerError: null })
-      },
-      async submit() {
-        const current = getComposer(channel)
-        const text = current.draft
-        const topicName = current.topicDraft
-        if (!text.trim()) return false
-        if (topicName.length > 0) {
-          const nameError = topicNameError(topicName)
-          if (nameError !== null) {
-            setComposer(channel, { composerError: nameError })
-            return false
-          }
-        }
-        const error = messageBodyError(text)
-        if (error !== null) {
-          setComposer(channel, { composerError: error })
-          return false
-        }
-        if (!state.running || state.organization === 'unavailable' || state.channels[channel]?.state === 'unavailable') {
-          return false
-        }
-        const revision = draftRevision
-        setComposer(channel, { draft: '', topicDraft: '', composerError: null })
-        const storeRevision = options.drafts?.revision(draftTarget(channel))
-        const restore = () => {
-          if (
-            draftRevision === revision &&
-            options.drafts?.revision(draftTarget(channel)) === storeRevision &&
-            getComposer(channel).draft === '' &&
-            getComposer(channel).topicDraft === ''
-          ) {
-            setComposer(channel, { draft: text, topicDraft: topicName })
-          }
-        }
-        const accepted = await send(text, topicName ? { topic_name: topicName } : {}, restore)
-        if (!accepted) restore()
-        return accepted
+      setDraft: (draft: string) => composerDrafts.setDraft(channelTarget, draft),
+      setTopicDraft: (topicDraft: string) => composerDrafts.setTopicDraft(channel, topicDraft),
+      submit() {
+        const topicName = composerDrafts.getChannel(channel).topicDraft
+        return composerDrafts.submit({
+          target: channelTarget,
+          topicName: { value: topicName, required: false },
+          canSend,
+          send: (body, restore) => send(body, topicName ? { topic_name: topicName } : {}, restore),
+        })
       },
       send,
       retry: (clientMessageId: string) => dispatch({ type: 'user_retry', channel, clientMessageId }),
-      restore(clientMessageId: string): boolean {
-        if (!state.running) return false
-        const p = state.channels[channel]?.pending.find(entry => entry.clientMessageId === clientMessageId)
-        if (p?.state !== 'failed') return false
-        const current = getComposer(channel)
-        draftRevision++
-        setComposer(channel, {
-          draft: current.draft ? `${current.draft}\n${p.body}` : p.body,
-          topicDraft: p.topic_name ?? '',
-          composerError: null,
-        })
-        void dispatch({ type: 'user_discard', channel, clientMessageId })
-        return true
-      },
+      restore: (clientMessageId: string): boolean => restorePending(channelTarget, clientMessageId),
       discard: (clientMessageId: string) => { void dispatch({ type: 'user_discard', channel, clientMessageId }) },
       topic(topicId: string) {
         let tc = topicComposers.get(topicId)
@@ -832,18 +504,7 @@ export function createSync(options: SyncOptions) {
     },
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     hasUnsavedChanges(): boolean {
-      if (options.drafts?.hasDrafts()) return true
-      for (const extra of composers.values()) {
-        if (extra.draft.length > 0 || extra.topicDraft.length > 0) return true
-      }
-      for (const extra of topicExtras.values()) {
-        if (extra.draft.length > 0) return true
-      }
-      for (const extra of replyExtras.values()) {
-        if (extra.draft.length > 0) return true
-      }
-      if (core.hasPending()) return true
-      return false
+      return composerDrafts.hasDrafts() || core.hasPending()
     },
     getTimeline(channel: string) {
       let t = timelines.get(channel)

@@ -4,7 +4,8 @@ import { holdsEndSamples, retriesWithin, timedSamples } from './revocation-holds
 import { edges } from './revocation-holds-plan.ts';
 import { median } from './revocation-holds-memory.ts';
 import { evidence, stallMessagesAfterResume } from './revocation-holds-evidence.ts';
-import type { HoldsRun } from './revocation-holds-judgment.ts';
+import { permitFaultEvidence } from './revocation-holds-m2-report.ts';
+import { informational, type HoldsRun } from './revocation-holds-judgment.ts';
 
 const spread = (values: number[]) => values.length ? { min: Math.min(...values), median: median(values), max: Math.max(...values) } : null;
 const span = (from: number | undefined, to: number | undefined) => from === undefined || to === undefined ? null : to - from;
@@ -19,6 +20,9 @@ export function rehearsalCounts(run: HoldsRun) {
   const end = holdsEndSamples(samples, e.recoveryEarliest, e.recoveryLatest);
   const counters = Object.fromEntries(Object.entries(run.metrics ?? {}).filter(([key]) => key.startsWith('revocation_')));
   const proof = evidence(run);
+  const retryWindow = retriesWithin(samples, e.certainFrom, e.certainTo);
+  const retryDelta = retryWindow.start && retryWindow.end && retryWindow.start.serverMs < retryWindow.end.serverMs
+    ? retryWindow.retries : undefined;
   return {
     kind: run.kind, cell: run.cell, duration: run.duration, repeat: run.repeat,
     readyAtStall: { targets: run.setup.targetsReadyAtStall, bystanders: run.setup.bystandersReadyAtStall },
@@ -31,7 +35,10 @@ export function rehearsalCounts(run: HoldsRun) {
       server: run.serverCloses.length,
     },
     highWaterMarkAtHoldsEnd: { lowest: end[0]?.highWaterMark ?? null, highest: end.at(-1)?.highWaterMark ?? null },
-    retriesInFault: retriesWithin(samples, e.certainFrom, e.certainTo).retries,
+    retriesInFault: retryWindow.retries,
+    relayRecheckPeaks: informational(run).recheckPeaks,
+    permitFault: permitFaultEvidence(run, retryDelta),
+    e6PerId: run.e6PerId && { status: run.e6PerId.status, issues: run.e6PerId.issues },
     counters,
     gate: { on: run.times.gateOn, off: run.times.gateOff, onMs: run.times.gateOn[1] - run.times.gateOn[0], offMs: run.times.gateOff[1] - run.times.gateOff[0] },
     timings: { pass: run.times.pass, stall: run.times.stall, revoke: run.times.revoke, resume: run.times.resume, restore: run.times.restore ?? null, end: run.times.end },

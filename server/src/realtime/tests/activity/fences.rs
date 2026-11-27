@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::AccessWatch;
 
 #[fukulow_test::test]
 async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool: PgPool) {
@@ -427,7 +428,7 @@ async fn subscription_refresh_loss_retires_a_first_notice_after_activity_check_s
     .await
     .unwrap();
     watch.refresh(&f.state.pool).await.unwrap();
-    assert_eq!(watch.status(), 1);
+    assert_eq!(watch.status(), AccessWatch::CHANNEL_LOST);
     grant(&pool, &f, private, target).await;
     gate.release();
     assert!(notices(&f, &mut denied).await.is_empty());
