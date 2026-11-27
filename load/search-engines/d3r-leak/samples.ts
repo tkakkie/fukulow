@@ -8,16 +8,16 @@ export class SampleCountError extends Error {}
 
 export function parseBlock(logs: string[], clients: number, measuredPerClient: number): Block {
   const samples: Sample[] = [];
-  const next = Array<number>(clients).fill(0);
+  const counts = Array<number>(clients).fill(0);
   for (const file of logs) for (const line of file.trim().split('\n')) {
     const [client, transaction, us, script, seconds, micros, ...extra] = line.trim().split(/\s+/);
     assert.ok(!extra.length && [client, transaction, us, script, seconds, micros].every(part => /^\d+$/.test(part)) && script === '0', 'pgbench transaction failed or log has unexpected fields');
     const c = Number(client), t = Number(transaction), latency = Number(us);
-    assert.ok(c < clients && t === next[c] && Number.isSafeInteger(latency), 'Unexpected pgbench client or transaction sequence');
-    next[c]++;
-    samples.push({client: c, transaction: t, us: latency, warmup: t === 0});
+    assert.ok(c < clients && t === counts[c] + 1 && Number.isSafeInteger(latency), 'Unexpected pgbench client or transaction sequence');
+    counts[c] = t;
+    samples.push({client: c, transaction: t, us: latency, warmup: t === 1});
   }
-  if (!next.every(count => count === measuredPerClient + 1)) {
+  if (!counts.every(count => count === measuredPerClient + 1)) {
     throw new SampleCountError('Wrong sample count after warm-up');
   }
   return samples;

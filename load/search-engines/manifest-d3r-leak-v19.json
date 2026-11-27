@@ -1,5 +1,5 @@
 {
-  "sha256": "51563721f22e4945222d897c556c3e604c066264620528d407f283342c87ca11",
+  "sha256": "881509e85503ad4a52623f280dcc2adcc6cb22272ae10f714c3f87f1bf94be39",
   "frozen": {
     "version": 19,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -265,7 +265,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/samples.ts",
-        "sha256": "84ebdc92e3b6ff44626aa1ad53f13bc49d41da35fa2c3785eb216c28ecc3564c"
+        "sha256": "2e2e1f97fa1aedf078a7b0a0e3d6818c64b28a3e05f6b044b49c2e8def8a0b5b"
       },
       {
         "path": "load/search-engines/d3r-leak/visibility.ts",
