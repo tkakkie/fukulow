@@ -1925,4 +1925,17 @@ Maintainer go 2026-11-26 (#1066). Decision rule fixed before any results: p99.9 
 
 - W was slower than B in `step()` p50 in every round (+17.5% to +26.2%, about +5.2 µs on 25.2 µs).
 - Deviation: rounds 4–6 ran on battery power. AC-only rounds alone are all above +10%, so the verdict does not depend on them.
-- Likely cause: the Map was built even for single-Message splices. The fix keeps `find` below 8 inserted Messages per Channel (`3482ee02`), and is re-measured under the same rules on a new go.
+- Likely cause: the Map was built even for single-Message splices. The fix keeps `find` below 8 inserted Messages per Channel (`3482ee02`).
+
+**Re-measurement of the fix** ([updated pre-registration](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7205700871) · [Result](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7207832835)). Same harness, B, R and rules; only W changed, to `3482ee02`. No W metric was INCONCLUSIVE after 5 rounds, so there was no extension. 15 runs exited 0, G3 passed, and every run was on AC power.
+
+| Metric | W vs B (median paired delta, 5 rounds) | Status |
+|---|---|---|
+| `step()` p50 / p95 / p99 | +1.0% / +0.9% / +0.5% | MET |
+| Sustained 100 msg/s p95 | -1.0%, queue 0 | MET |
+| Max sustainable rate | 8000 msg/s (B and W) | MET |
+| Bulk receipt | -5.6% to -17.2% (p50) | MET |
+| Steady / peak memory | +0.0% / +0.3% | MET |
+| Growth slope | 257.1 B/msg, +0 pages (B 256.9) | HOLD |
+
+- The slope HOLD is the absolute rule, which B does not meet either. W equals B within 0.3 B/msg. The `ff681721` MISSED above stands.
