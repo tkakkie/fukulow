@@ -36,8 +36,16 @@ test('JSON framing handles nested plans and escaped payloads, rejects unexpected
 });
 test('production read extraction retains initial_seq fallback and Mention counts',()=>{
   assert.match(countSql(),/COALESCE\(tr.read_seq, p.initial_seq\)/);assert.match(countSql(),/message_mentions/);
-  assert.match(projectionSql(),/COALESCE\(tr.read_seq, cr.initial_seq, \$5\)/);
-  assert.match(projectionSql(),/mention_unread_count/);assert.doesNotMatch(projectionSql(),/\{\}/);
+  const projection = projectionSql();
+  assert.match(projection,/COALESCE\(tr.read_seq, cr.initial_seq, \$5\)/);
+  assert.match(projection,/mention_unread_count/);
+  assert.doesNotMatch(projection,/\{/);
+  assert.ok(projection.includes('t.last_seq <= LEAST($5::bigint, $6::bigint - 1)'));
+  assert.ok(projection.includes('m.seq <= LEAST($5, $6 - 1)'));
+  assert.ok(projection.includes('WHERE last_seq <= LEAST($5, $6 - 1)'));
+  assert.match(projection,/^WITH mention_page AS MATERIALIZED \(\s*WITH access AS MATERIALIZED/);
+  assert.match(projection,/\), mention_sets AS \(/);
+  assert.match(projection,/FROM mention_page p LEFT JOIN mention_sets ms ON ms.message_id=p.id ORDER BY p\.last_seq DESC$/);
   const join=fixture({operation:'join',topics:10,members:1},10);
   assert.match(join,/FROM generate_series\(0,0\) g/);assert.doesNotMatch(join,/@topics@|@members@/);
 });
