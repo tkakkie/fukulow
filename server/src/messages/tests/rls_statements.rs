@@ -91,12 +91,13 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
                     .flat_map(|_| (0..3).map(move |round| format!("{index}/{round}")))
                     .collect();
                 // The shared COMMIT-barrier path sets its context in the lock statement.
+                let through = i64::try_from(10 * index + 3 * (modes + 1)).unwrap();
                 assert_eq!(
                     watermarks
                         .latest_seq(&single, organization_id, channel_id)
                         .await
                         .unwrap(),
-                    i64::try_from(10 * index + 3 * (modes + 1)).unwrap(),
+                    through,
                     "{mode}: latest_seq"
                 );
                 assert_eq!(
@@ -132,7 +133,7 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
                             organization_id,
                             channel_id,
                             10 * index as i64,
-                            20
+                            through
                         )
                         .await
                         .unwrap()
@@ -148,7 +149,7 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
                             member,
                             channel_id,
                             10 * index as i64,
-                            20
+                            through
                         )
                         .await
                         .unwrap_or_else(|_| panic!("{mode}: authorized_replay_page"))

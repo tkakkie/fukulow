@@ -312,17 +312,16 @@ test('batch summary separates PostgreSQL time from docker exec/psql cost and exc
     batch(0, 0, 20_000, clock(1_000, 19_900, 10), 9), batch(0, 1, 900, clock(30_000, 850, 11), 0.25),
     batch(0, 2, 1_000, clock(40_000, 930, 12), 0.75), batch(0, 3, 12_000), organizationRow(0),
   ];
-  // Five statements per batch inside its clock window: start clock, Message INSERT, PREPARE, EXECUTE, DEALLOCATE.
-  const dbLog = [durationLine(1_000, 10, '0.050'), durationLine(15_000, 10, '1.000'), durationLine(15_001, 10, '1.000'), durationLine(20_000, 10, '19000.000'),
-    durationLine(20_001, 10, '0.000'),
-    durationLine(29_999, 11, '5.000'), durationLine(30_000, 11, '0.100'), durationLine(30_100, 11, '700.000'), durationLine(30_101, 11, '0.100'),
-    durationLine(30_849, 11, '100.300'), durationLine(30_850, 11, '0.000'), durationLine(30_200, 99, '900.000'),
+  // Each batch has a start clock and Message INSERT, with an end clock at the window edge for batch 1.
+  const dbLog = [durationLine(1_000, 10, '0.050'), durationLine(20_000, 10, '19002.000'),
+    durationLine(29_999, 11, '5.000'), durationLine(30_000, 11, '0.100'), durationLine(30_849, 11, '800.400'),
+    durationLine(30_850, 11, '0.000'), durationLine(30_200, 99, '900.000'),
     durationLine(40_900, 12, '800.000')].join('\n');
   const { perBatch, ...summary } = seedBatchSummary(jsonl(rows), dbLog, { shape: { organizations: 1, batchesPerOrganization: 4 }, arm: 'instrumented' });
   assert.deepEqual(summary, { arm: 'instrumented', batches: 4, medianBatches: 3, malformedLines: 0, expectedRows: 5, missingRows: 0, unexpectedRows: 0,
     dbClockMissing: 1, serverMissing: 2, medianMs: 1_000, medianDbClockSpanMs: 890, medianOutsideDbClockSpanMs: 60, medianServerMs: 800.5,
     medianOutsideServerMs: 99.5, recorderMs: { median: 0.625, max: 9, total: 10.5 } });
-  assert.deepEqual(perBatch.map(row => [row.batchIndex, row.serverMs, row.serverStatements]), [[0, 19002.05, 5], [1, 800.5, 5], [2, null, 1], [3, null, 0]],
+  assert.deepEqual(perBatch.map(row => [row.batchIndex, row.serverMs, row.serverStatements]), [[0, 19002.05, 2], [1, 800.5, 3], [2, null, 1], [3, null, 0]],
     'joined by backend PID inside the clock window: the line before the window and the other PID are left out; one line is not a batch');
   assert.deepEqual(batchSummaryFailures(summary), ['seed-timing.jsonl: dbClock missing on 1 of 4 batches', 'db.log: server duration missing or incomplete on 2 of 4 batches']);
 });

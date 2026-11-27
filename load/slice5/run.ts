@@ -9,16 +9,16 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { arch, cpus, hostname, platform, release, tmpdir, totalmem } from 'node:os';
 import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
-import { dbSettings, fixture, isNight, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
+import { dbSettings, fixture, isNight, longBody, nights, partA, partB, partC, partD, rounds, scope as originalScope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
 import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, relationSizesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
 import { judgePartA, judgePartB, judgePartC, classifyPartDFailure, closedLoopNonSuccess, confirmedPartDInfrastructure, parseTimeline, scanPartDPostgresLog, timelineTopics, vacuumCost, type Counts, type PostgresState, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 import { readResults, scorePartDFiles } from './report.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
 
-const usage = 'node load/slice5/run.ts --work /abs/work (--build [--night 1|2|3] | --night 1|2|3 --out /abs/new/dir) [--smoke] [--parts A,B,C,D]';
+const usage = 'node load/slice5/run.ts --work /abs/work (--build [--night 1|2|3] | --night 1|2|3 --out /abs/new/dir) [--smoke] [--parts A,B,C,D] [--storage-candidate <full SHA> with --night 1]';
 const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
-if (args.includes('--help')) { console.log(`${scope}\n${usage}`); process.exit(0); }
+if (args.includes('--help')) { console.log(`${originalScope}\n${usage}`); process.exit(0); }
 if (process.version !== 'v26.13.1') throw new Error('Use Node 26.13.1');
 const work = outsideCheckout(flag('--work') ?? (() => { throw new Error(usage); })());
 const smoke = args.includes('--smoke'), build = args.includes('--build');
@@ -26,7 +26,13 @@ const nightFlag = flag('--night');
 if (nightFlag !== undefined && !isNight(nightFlag)) throw new Error(usage);
 const night = nightFlag as `${keyof typeof nights}` | undefined;
 if (!build && night === undefined) throw new Error(usage);
-const armCommits = nights[night ?? '1'].commits;
+const storageCandidate = flag('--storage-candidate');
+if (args.includes('--storage-candidate') && (night !== '1' || !/^[0-9a-f]{40}$/.test(storageCandidate ?? ''))) {
+  throw new Error('--storage-candidate requires --night 1 and a full commit SHA');
+}
+const scope = storageCandidate ? '#620 storage remeasurement using #515 slice 5 Part A conditions' : originalScope;
+const originalCommits = nights[night ?? '1'].commits;
+const armCommits = storageCandidate ? { B: originalCommits.B, A: storageCandidate } : originalCommits;
 const full = Object.fromEntries((['B', 'A'] as Arm[]).map(arm => [arm, command('git', ['rev-parse', `${armCommits[arm]}^{commit}`])])) as Record<Arm, string>;
 const tag = (arm: Arm) => `fukulow-slice5:${arm.toLowerCase()}-${full[arm].slice(0, 12)}`;
 // Per-commit trees: a reused --work never builds or tests one commit from another commit's extracted source.
@@ -417,8 +423,8 @@ try {
     images[arm] = docker('image', 'inspect', '--format', '{{.Id}}', tag(arm));
   }
   docker('pull', k6);
-  const harness = ['config.ts', 'judge.ts', 'fixture.ts', 'stack.ts', 'send-k6.ts', 'replay-k6.ts', 'replay-ws-k6.ts', 'run.ts', 'report.ts'].map(f => `load/slice5/${f}`);
-  save(`${output}/metadata.json`, { scope, night, smoke, parts, commits: full, images, k6, k6Id: docker('image', 'inspect', '--format', '{{.Id}}', k6), plan, settingsHash,
+  const harness = ['config.ts', 'judge.ts', 'fixture.ts', 'stack.ts', 'send-k6.ts', 'replay-k6.ts', 'replay-ws-k6.ts', 'run.ts', 'report.ts'].map(f => `load/slice5/${f}`).concat(['load/channel-log.ts', 'load/channel-log.sql']);
+  save(`${output}/metadata.json`, { scope, night, smoke, parts, storageCandidate, commits: full, images, k6, k6Id: docker('image', 'inspect', '--format', '{{.Id}}', k6), plan, settingsHash,
     thresholds, dbCommand: dbCommand(), node: process.version, machine: { platform: platform(), arch: arch(), release: release(), hostname: hostname(), cpus: cpus().length, memory: totalmem() },
     docker: JSON.parse(docker('info', '--format', '{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
     harnessCommit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain', '--untracked-files=no']) + command('git', ['status', '--porcelain', '--', 'load']),

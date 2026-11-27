@@ -76,11 +76,9 @@ export function serverDurations(dbLog: string) {
   return byPid;
 }
 
-// Duration lines one diagnostic batch session logs inside its clock window: the start clock query, the Message INSERT
-// and the three Channel log statements (PREPARE, EXECUTE, DEALLOCATE) always; the SET before the start clock and the
-// end clock query only when their whole-millisecond log time falls on a window edge. The seed test checks the count
-// against the batch SQL.
-export const batchServerStatements = { min: 5, max: 7 } as const;
+// A diagnostic batch logs the start clock query and Message INSERT inside its clock window. The SET and end clock
+// query count only when their whole-millisecond log time falls on a window edge. The seed test checks the count.
+export const batchServerStatements = { min: 2, max: 4 } as const;
 
 // The server-reported time of one batch: the summed durations of its session's statements logged between the two
 // clock rows. Client time between statements is not in it. With fewer or more duration lines than the batch's

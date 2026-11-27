@@ -622,7 +622,7 @@ test('a rehearsal is refused outside a seed diagnostic arm', async t => {
 });
 
 // The rows and DB log a seed diagnostic writes: per Organization 200 batches and its Organization row; each instrumented
-// batch logs its five statement durations inside its clock window. A stopped seed ends at Organization 6 batch 124.
+// batch logs the opening clock query and Message INSERT durations. A stopped seed ends at Organization 6 batch 124.
 function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean,shape={organizations:10,batchesPerOrganization:200}) {
   const base=Date.parse('2026-11-22T00:00:00Z'), rows:string[]=[], log:string[]=[];
   const at=(ms:number)=>new Date(ms).toISOString().replace('T',' ').replace('Z',' UTC');
@@ -631,7 +631,7 @@ function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean,sha
       const index=o*201+b, startMs=base+index*1000, stop=stopped && o===6 && b===124, durationMs=stop?12166:b===0?2000:1000;
       rows.push(JSON.stringify(arm==='baseline'?{kind:'batch',organization:o,batchIndex:b,durationMs}
         :{kind:'batch',organization:o,batchIndex:b,durationMs,startedAtMs:startMs,endedAtMs:startMs+durationMs,dbClockStartMs:startMs,dbClockEndMs:startMs+900,dbClockSpanMs:900,dbBackendPid:1000+index,recorderMs:0.1}));
-      for(const [offset,ms] of [[0,'0.050'],[100,'800.000'],[101,'0.100'],[899,'50.000'],[900,'0.020']] as const)
+      for(const [offset,ms] of [[0,'0.050'],[899,'850.120']] as const)
         log.push(`2026-11-22T00:00:00.000000000Z ${at(startMs+offset)} [${1000+index}] LOG:  duration: ${ms} ms`);
       if(stop)return {timing:rows.join('\n')+'\n',dbLog:log};
     }
@@ -806,10 +806,10 @@ async function seedDiagnosticArm(t:TestContext,outcome:string,rehearsal=false) {
   assert.equal(server.length,batches);
   const late=outcome==='interrupted-late';
   // A late interrupt leaves no time: the redaction keeps only the first line, so no batch has a server duration.
-  assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:late?null:850.17,serverStatements:late?0:5});
+  assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:late?null:850.17,serverStatements:late?0:2});
   const dbLogFile=config.output+'/formal/db.log'+(late?'.partial':'');
   if(late)assert.equal(readFileSync(dbLogFile,'utf8').trim().split('\n').length,1);
-  else assert.match(readFileSync(dbLogFile,'utf8'),/duration: 800\.000 ms/);
+  else assert.match(readFileSync(dbLogFile,'utf8'),/duration: 850\.120 ms/);
   assert.doesNotMatch(readFileSync(dbLogFile,'utf8'),/fukulow-log-end/,'the end marker is not kept');
   assert.equal(summary.dbLogStream.status,outcome==='interrupted-late'?'partial':'complete');
   assert.equal(summary.dbLogStream.marker,'seen');

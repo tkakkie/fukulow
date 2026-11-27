@@ -36,7 +36,7 @@ import { gzipSync } from 'node:zlib';
 import { Database,docker,image } from './database.ts';
 import { matrix,integers,estimate,equal,oracleDigest,summary,type Sample } from './model.ts';
 import { fixture } from './sql.ts';
-import { measure } from './measure.ts';
+import { measure, senderBaselineMethod } from './measure.ts';
 const argv=process.argv.slice(2);
 const flag=(s:string)=>argv.includes(s);
 const option=(key:string,fallback:string)=>{const i=argv.indexOf(key);if(i<0)return fallback;if(!argv[i+1]||argv[i+1].startsWith('--'))throw new Error(`missing ${key}`);return argv[i+1];};
@@ -77,7 +77,7 @@ const started=Date.now();
 try {
   console.log(`Artifacts: ${out}; owned container: ${db.name}`);
   db.start();await db.ready();db.migrate();
-  const metadata={startedAt:new Date().toISOString(),commit:command('git','rev-parse','HEAD'),dirty:command('git','status','--short'),
+  const metadata={startedAt:new Date().toISOString(),commit:command('git','rev-parse','HEAD'),dirty:command('git','status','--short'),senderBaselineMethod,
     host:{platform:platform(),release:release(),arch:arch(),cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem()},
     node:process.version,pinnedNode:readFileSync('.node-version','utf8').trim(),sqlx:command('sqlx','--version'),image,
     imageID:docker('inspect','--format','{{.Image}}',db.name),docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
@@ -105,6 +105,6 @@ try {
   }
   check();result.complete=true;save('results.json',result);
   const conditions=`Conditions: ${new Date().toISOString()}, source ${metadata.commit} (dirty state/hashes in metadata.json); ${metadata.host.cpu}, ${metadata.host.cpus} CPUs, ${(metadata.host.memory/2**30).toFixed(1)} GiB, ${metadata.host.platform}/${metadata.host.arch}; Docker ${metadata.docker.version}, ${metadata.docker.cpus} CPUs / ${(metadata.docker.memory/2**30).toFixed(2)} GiB; ${image}; shared_buffers 128MB/work_mem 4MB/default JIT, synchronous commit on. Node ${metadata.node} (repo ${metadata.pinnedNode}); sqlx ${metadata.sqlx}. Topics ${topics}; public affected Members ${members}; ${channels} public Channels for join/reactivate; ${repeats} repeats. Elapsed ${((Date.now()-started)/60000).toFixed(1)} min. Host idle status requires operator assessment of uptime/process/container snapshots recorded in metadata. Equality checks: ${result.equalityChecks}, all passed.`;
-  const md=summary(samples,pilot,conditions);writeFileSync(resolve(out,'summary.md'),md);console.log(md);
+  const md=summary(samples,pilot,`${conditions}\n\n${senderBaselineMethod}`);writeFileSync(resolve(out,'summary.md'),md);console.log(md);
 } catch(error) {save('failure.json',{error:String(error),elapsedSeconds:(Date.now()-started)/1000});save('results.json',result);throw error;}
 finally {db.cleanup();}

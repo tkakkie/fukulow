@@ -104,7 +104,6 @@ async fn reply_counts_exact_chain_totals_deduplicate_and_leave_positions_and_pub
     .execute(&pool)
     .await
     .unwrap();
-    seed_channel_log(&pool).await;
     delivery.flush().await;
     let mut queue = delivery.queue(org, (sender, 0), 256);
     queue.subscribe(channel);
