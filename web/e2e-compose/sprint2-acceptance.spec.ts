@@ -719,6 +719,7 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
       `li[data-channel-id="${targetChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
     )
     await expect(targetChannelRow).toBeVisible()
+    await expect(targetChannelRow).toContainText(targetChannel.name)
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveCount(0)
 
     // After access is granted, Owner posts:
