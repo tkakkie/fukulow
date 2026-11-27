@@ -254,7 +254,7 @@ export function finishBlock<R extends { crossed: boolean; errors: string[] }, H 
 // Send blocks in run order: each pair keeps its fixed arm order, and every block gets its own
 // database cloned from the arm's template, so no block inherits rows or vacuum debt from another.
 export type SendBlock = { order: number; pair: number; arm: string; db: string };
-export function sendBlocks(pairs: string[][]): SendBlock[] {
+export function sendBlocks<A extends string>(pairs: A[][]): (SendBlock & { arm: A })[] {
   return pairs.flatMap((pair, i) => {
     if (pair.length !== 2 || new Set(pair).size !== 2) throw new Error('each pair needs both arms once');
     return pair.map(arm => ({ pair: i + 1, arm }));
