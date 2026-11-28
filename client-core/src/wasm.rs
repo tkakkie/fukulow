@@ -3,6 +3,8 @@ use crate::{boundary_delta::Boundary, *};
 use serde::{Deserialize, de::value::StrDeserializer};
 use wasm_bindgen::prelude::*;
 
+mod activity_reads;
+
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct WasmActivityRouting(activity_routing::ActivityRouting);
