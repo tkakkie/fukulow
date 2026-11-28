@@ -22,7 +22,7 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
   channel_manager_private_only: ['web'],
   'channel name already exists': ['web'],
   'channel not found': ['web'],
-  channel_not_found: ['core', 'web'],
+  channel_not_found: ['core'],
   chain_too_large: ['web'],
   current_password_incorrect: ['web'],
   dm_channel_fixed: ['web'],
@@ -58,7 +58,7 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
   section_limit: ['web'],
   section_not_found: ['web'],
   snapshot_expired: ['core', 'web'],
-  subscription_limit: ['core', 'web'],
+  subscription_limit: ['core'],
   topic_not_found: ['web'],
   version_conflict: ['web'],
 }
