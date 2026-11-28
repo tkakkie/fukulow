@@ -47,7 +47,7 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
   member_already_active: ['web'],
   member_not_found: ['web'],
   operation_conflict: ['web'],
-  organization_unavailable: ['web'],
+  organization_unavailable: ['core', 'web'],
   reply_chain_not_found: ['web'],
   search_query_too_short: ['web'],
   search_timeout: ['web'],

@@ -1,4 +1,5 @@
 //! Deterministic Message sync policy. The owner supplies all I/O results and timer ticks.
+mod access;
 #[cfg(any(feature = "wasm", test))]
 mod boundary_delta;
 mod engine;
@@ -15,6 +16,7 @@ mod transitions;
 mod types;
 #[cfg(feature = "wasm")]
 mod wasm;
+pub use access::{AccessEndpoint, AccessLifetime, AccessOutcome, access_outcome};
 pub use sync_delay::sync_delay;
 pub use types::*;
 
@@ -30,6 +32,7 @@ pub struct Core {
     pub(crate) requests: BTreeMap<Token, Request>,
     pub(crate) timers: BTreeMap<Token, Timer>,
     socket_replies: socket_replies::SocketReplies,
+    membership_probe_pending: bool,
 }
 impl Core {
     pub fn new(self_id: Uuid) -> Self {
@@ -53,6 +56,7 @@ impl Core {
             requests: BTreeMap::new(),
             timers: BTreeMap::new(),
             socket_replies: socket_replies::SocketReplies::default(),
+            membership_probe_pending: false,
         }
     }
     pub fn session(&self) -> &SessionView {

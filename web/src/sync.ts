@@ -12,7 +12,7 @@ import { createRequestDeadlines } from './request-deadlines'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { createCore, inputMessages } from '#sync-core'
-import { syncDelay } from './core-wasm'
+import { accessOutcome, syncDelay } from './core-wasm'
 import { messageBodyError, topicNameError } from './message-rules'
 import type { SyncCore } from './protocol-types'
 import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
@@ -83,10 +83,12 @@ export function createSync(options: SyncOptions) {
   const cancel = options.cancel ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
   const reportOrganizationUnavailable = options.reportOrganizationUnavailable ?? (apply => { void apply() })
   const reportAccess: NonNullable<SyncOptions['reportSyncAccess']> = options.reportSyncAccess ?? ((result, source) => {
-    if (api.isSessionEnded(result)) {
+    if (result.ok) return
+    const outcome = accessOutcome('organization', state.running ? 'current' : 'retired_organization', api.normalizedFailure(result))
+    if (outcome === 'account_ended') {
       void (source?.close() ?? dispatch({ type: 'stop' }))
       options.onSessionEnded?.()
-    } else if (api.isOrganizationUnavailable(result)) {
+    } else if (outcome === 'organization_unavailable') {
       void (source?.unavailable() ?? dispatch({ type: 'organization_unavailable' }))
     }
   })
@@ -220,26 +222,27 @@ export function createSync(options: SyncOptions) {
             onReady: () => { opened = true; void dispatch({ type: 'connection_ready', connection: effect.id }) },
             onEvent: event => { void dispatch({ type: 'socket_frame', connection: effect.id, event }) },
             onClose: code => {
-              if (opened || !options.checkMembership) {
-                if (code === 4003) {
-                  if (state.connection === effect.id) reportOrganizationUnavailable(
-                    () => dispatch({ type: 'socket_closed', connection: effect.id, code }))
-                  return
-                }
-                void dispatch({ type: 'socket_closed', connection: effect.id, code }); return
-              }
-              // Browsers hide rejected upgrade responses. Only REST can establish Membership loss.
-              void request(options.checkMembership).then(result => {
-                if (state.connection !== effect.id || !state.running) return
-                if (api.isOrganizationUnavailable(result)) {
-                  reportOrganizationUnavailable(() => dispatch({ type: 'organization_unavailable' }))
-                } else if (api.isSessionEnded(result)) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
-                else void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
-              }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
+              // A browser cannot see a rejected upgrade response.
+              void dispatch({ type: 'socket_disconnected', connection: effect.id, code, opened,
+                opaque: options.checkMembership !== undefined })
             },
           })
           socket = { id: effect.id, transport }
         } catch { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) }
+        break
+      }
+      case 'check_membership': {
+        // The opaque flag mirrors checkMembership, so the core requests a probe only when the option is set.
+        if (!options.checkMembership) break
+        const result = await request(options.checkMembership)
+        await dispatch({ type: 'membership_checked', connection: effect.connection,
+          ...(result.ok ? {} : api.normalizedFailure(result)) })
+        break
+      }
+      case 'report_organization_unavailable': {
+        reportOrganizationUnavailable(() => dispatch(effect.socket
+          ? { type: 'socket_closed', ...effect.socket }
+          : { type: 'organization_unavailable' }))
         break
       }
       case 'close':
@@ -266,14 +269,14 @@ export function createSync(options: SyncOptions) {
         if (effect.page === 'after') {
           const result = await request(() => transport.listChannelEvents(effect.channel, { after_seq: effect.seq!, history_generation: effect.history_generation }))
           await dispatch(result.ok ? { type: 'events_result', request: effect.id, page: result.data }
-            : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
+            : { type: 'history_failed', request: effect.id, ...api.normalizedFailure(result) })
           break
         }
         const query = { before_seq: effect.seq, as_of_seq: effect.as_of_seq, history_generation: effect.history_generation }
         const result = await request(() => effect.page === 'latest'
           ? transport.listMessages(effect.channel, { history_generation: effect.history_generation }) : transport.listMessages(effect.channel, query))
         await dispatch(result.ok ? { type: 'history_result', request: effect.id, page: result.data }
-          : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
+          : { type: 'history_failed', request: effect.id, ...api.normalizedFailure(result) })
         break
       }
       case 'send': {
@@ -287,8 +290,7 @@ export function createSync(options: SyncOptions) {
         // Close cancels the wait while detached sends still observe definite refusals.
         if (result.timedOut) composerDrafts.dropSubmitted(effect.client_message_id)
         await dispatch(result.ok ? { type: 'ack', request: effect.id, message: result.data }
-          : { type: 'send_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network',
-            retryAfterMs: result.retryAfterMs, error: result.kind === 'http' ? result.error : undefined })
+          : { type: 'send_failed', request: effect.id, retryAfterMs: result.retryAfterMs, ...api.normalizedFailure(result) })
         break
       }
       case 'wait': {

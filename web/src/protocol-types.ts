@@ -11,6 +11,9 @@ export const INACTIVE_CHANNEL_LIMIT = 5
 export const TOTAL_MESSAGE_LIMIT = 1500
 export const SYNC_MESSAGE_LIMIT = TOTAL_MESSAGE_LIMIT - MAIN_MESSAGE_LIMIT - TOPIC_MESSAGE_LIMIT - REPLY_MESSAGE_LIMIT
 export type Failure = number | 'network' | 'timeout'
+export type AccessEndpoint = 'organization' | 'capabilities' | 'history' | 'send'
+export type AccessLifetime = 'current' | 'stale_request' | 'retired_organization' | 'replaced_session'
+export type AccessOutcome = 'ignored' | 'account_ended' | 'organization_unavailable' | 'channel_unavailable' | 'local_refusal' | 'local_outcome'
 export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff' | 'send_retry'
 export type Pending = SendTarget & { replyRootId?: string; clientMessageId: string; body: string; state: 'sending' | 'throttled' | 'unknown' | 'failed'; request: number; retryWait?: number; failureCode?: string }
 export type ChannelState = {
@@ -67,6 +70,8 @@ export type State = {
 }
 export type Effect =
   | { type: 'connect'; id: number }
+  | { type: 'check_membership'; connection: number }
+  | { type: 'report_organization_unavailable'; socket?: { connection: number; code: number } }
   | { type: 'close' }
   | { type: 'close_connection'; connection: number }
   | { type: 'subscribe'; history_generation?: string; id: number; channel: string; after_seq: number }
@@ -83,6 +88,8 @@ export type Input = (
   | { type: 'stop' | 'organization_unavailable' }
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
+  | { type: 'socket_disconnected'; connection: number; code: number; opened: boolean; opaque: boolean }
+  | { type: 'membership_checked'; connection: number; status?: Failure; error?: string }
   | { type: 'event'; connection: number; event: ServerEvent; subscription?: number }
   | { type: 'socket_frame'; connection: number; event: ServerEvent }
   | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }

@@ -79,6 +79,7 @@ impl<'a> Step<'a> {
     pub fn connect(&mut self) {
         let id = self.token();
         self.core.socket_replies.clear();
+        self.core.membership_probe_pending = false;
         self.core.session.connection = Some(id);
         self.out.effects.push(Effect::Connect { id });
     }
@@ -106,6 +107,7 @@ impl<'a> Step<'a> {
         self.core.session.connected = false;
         self.core.session.connection = None;
         self.core.socket_replies.clear();
+        self.core.membership_probe_pending = false;
         self.core.requests.clear();
         self.metadata_changed = true;
         self.out.effects.push(Effect::Close);
