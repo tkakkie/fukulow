@@ -1,5 +1,5 @@
 {
-  "sha256": "0f4bd4a4f454019e2a1b81dd2353b2656b89b5224e6f836eb96525d12b3ad0a8",
+  "sha256": "fe9b469f6df98665b971e8e316c8b995956812f46475f2de7b9351ade74367fd",
   "frozen": {
     "version": 24,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -241,7 +241,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/manifest.ts",
-        "sha256": "35ce3d798796d6c710ab90d0577513d2adb12aed75557535f29bba64101dca14"
+        "sha256": "52a089821ef46bad0975498a9c5e7aa52676fddb98bccc99a68462c683530835"
       },
       {
         "path": "load/search-engines/d3r-leak/options.ts",
@@ -573,7 +573,7 @@
       },
       {
         "path": "server/src/auth.rs",
-        "sha256": "f7db751325f30ee97d053fa194658154229c8bcf47b71ddd1246c908a5fdd9bc"
+        "sha256": "628fd34dcd7a11f4beb9482908e20c507f22f59c8a29739dbb73482f7e1f21ec"
       },
       {
         "path": "server/src/auth/authorization.rs",
@@ -581,7 +581,7 @@
       },
       {
         "path": "server/src/channels.rs",
-        "sha256": "4026f44d90e4c1da4cfa9d8b0fad3850f3d275e0ffd31590f1c9e6adebd30fdd"
+        "sha256": "3257a58a88f1dc407059aa699f1ac69f4790dcb8ca61263e403c8e50da5548c0"
       },
       {
         "path": "server/src/database/context.rs",

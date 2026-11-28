@@ -277,7 +277,7 @@ pub(crate) async fn send_locks(
         return Ok(None);
     };
     if ![a, b].contains(&sender.0) {
-        return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
+        return Err(ApiError::channel_not_found());
     }
     let mut ids = targets.to_vec();
     ids.extend([a, b]);
@@ -294,7 +294,7 @@ pub(crate) async fn send_locks(
         .iter()
         .any(|g| g.0 == actor.id && g.1 == actor.membership_revision)
     {
-        return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
+        return Err(ApiError::channel_not_found());
     }
     let accepted = members
         .into_iter()
@@ -324,20 +324,15 @@ pub(crate) async fn eligible_peer(
         .filter(|id| *id != sender)
         .collect::<Vec<_>>();
     let peers = auth::members::participants(connection, org, &ids, false).await?;
-    let peer = peers.first().filter(|p| p.active).ok_or(ApiError(
-        StatusCode::CONFLICT,
-        "dm_peer_deactivated",
-        None,
-    ))?;
+    let peer = peers
+        .first()
+        .filter(|p| p.active)
+        .ok_or_else(ApiError::dm_peer_deactivated)?;
     if !grants
         .iter()
         .any(|g| g.0 == peer.id && g.1 == peer.membership_revision)
     {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "dm_peer_access_lapsed",
-            None,
-        ));
+        return Err(ApiError::dm_peer_access_lapsed());
     }
     Ok(())
 }

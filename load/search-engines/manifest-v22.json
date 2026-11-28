@@ -1,5 +1,5 @@
 {
-  "sha256": "84b377523d589fc44d7ec2c1d1b257df1a558056ab6dc65bcf878583bb928e7f",
+  "sha256": "552de1dfc300dfde84f500d2613ca9b42a40aa0105dbdc1c5b2211ccb22609e6",
   "frozen": {
     "version": 22,
     "date": "2026-11-28",
@@ -400,7 +400,7 @@
       },
       {
         "path": "server/src/auth.rs",
-        "sha256": "f7db751325f30ee97d053fa194658154229c8bcf47b71ddd1246c908a5fdd9bc"
+        "sha256": "628fd34dcd7a11f4beb9482908e20c507f22f59c8a29739dbb73482f7e1f21ec"
       },
       {
         "path": "server/src/auth/authorization.rs",
@@ -408,7 +408,7 @@
       },
       {
         "path": "server/src/channels.rs",
-        "sha256": "4026f44d90e4c1da4cfa9d8b0fad3850f3d275e0ffd31590f1c9e6adebd30fdd"
+        "sha256": "3257a58a88f1dc407059aa699f1ac69f4790dcb8ca61263e403c8e50da5548c0"
       },
       {
         "path": "server/src/database/context.rs",

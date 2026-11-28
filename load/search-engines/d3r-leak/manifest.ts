@@ -54,7 +54,7 @@ export function verifyPinnedSchema() {
   const files = git('ls-tree', '-r', '--name-only', schemaCommit, 'server/migrations').split('\n').filter(file => file.endsWith('.sql'));
   assert.deepEqual(files, base.migrations, 'Pinned migration list differs from d3r v18');
   const expected = new Map(base.sourceHashes.map(file => [file.path, file.sha256]));
-  const historicalSources: readonly string[] = [sources.auth, sources.context];
+  const historicalSources: readonly string[] = [sources.auth, sources.channels, sources.context];
   for (const file of [...files, ...Object.values(sources).filter(file => !historicalSources.includes(file))]) {
     assert.equal(hash(readSource(file)), expected.get(file), `Pinned source hash mismatch: ${file}`);
   }

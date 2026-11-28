@@ -197,10 +197,6 @@ fn section_not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "section_not_found", None)
 }
 
-fn channel_not_found() -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, "channel not found", None)
-}
-
 fn layout_changed() -> ApiError {
     ApiError(StatusCode::CONFLICT, "section_layout_changed", None)
 }

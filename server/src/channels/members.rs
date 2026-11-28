@@ -175,7 +175,7 @@ async fn require_visible(
     };
     match visible {
         Some(true) => Ok(()),
-        Some(false) => Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None)),
+        Some(false) => Err(ApiError::channel_not_found()),
         None => Err(ApiError::organization_unavailable()),
     }
 }
@@ -277,7 +277,7 @@ async fn mutate_body(
     // waits back on a mutation's earlier locks.
     auth::members::lock_organization(&mut *tx, org).await?;
     let public: bool=sqlx::query_scalar("SELECT COALESCE(visibility='public',false) FROM channels WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
-            .bind(org).bind(channel).fetch_optional(&mut *tx).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"channel not found",None))?;
+            .bind(org).bind(channel).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::channel_not_found)?;
     let actor = auth::members::current_actor(&mut *tx, auth, Action::ReadOrganization).await?;
     if dms::is_dm(tx, org, channel).await? {
         require_visible(tx, auth, channel, true).await?;
@@ -311,7 +311,7 @@ async fn mutate_body(
         public,
     };
     if !authorize(actor, Action::ReadChannel, resource).allowed {
-        return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
+        return Err(ApiError::channel_not_found());
     }
     if matches!(mutation, Mutation::Manager(_)) && public {
         // Require the ordinary management policy first, even for invalid targets/no-ops.

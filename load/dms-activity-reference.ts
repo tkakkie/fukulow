@@ -1,6 +1,6 @@
 // Slice E activity router. The k6 runtime has no WebAssembly, so the DM workload
 // retains this scheduling model. Vitest compares its effects with the Rust router.
-import type { ActivityNotice, ActivityTarget, Invalidation } from '../web/src/activity-target.ts'
+import type { ActivityNotice, ActivityTarget, Invalidation } from './dms-activity-target-reference.ts'
 
 export function createActivityReference(options: {
   watched(channel: string): boolean
