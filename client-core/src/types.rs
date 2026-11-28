@@ -1,3 +1,4 @@
+use crate::{AccessLifetime, HistoryObservation, HistoryObservationResult};
 use fukulow_api::{Message, MessagePage, ServerEvent};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -279,6 +280,12 @@ pub enum Input {
     HistoryGeneration {
         generation: Option<Uuid>,
     },
+    ObserveHistoryGeneration {
+        channel: Option<Uuid>,
+        issue: Option<Token>,
+        lifetime: AccessLifetime,
+        result: HistoryObservation,
+    },
     Stop,
     OrganizationUnavailable,
     ConnectionReady {
@@ -474,6 +481,8 @@ pub struct StepResult {
     pub state_changed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub socket_delivery: Option<SocketDelivery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_observation: Option<HistoryObservationResult>,
 }
 #[derive(Debug, Serialize)]
 pub struct MoveVersion {

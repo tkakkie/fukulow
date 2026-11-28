@@ -1,4 +1,4 @@
-use crate::*;
+use crate::{history_generation::ChannelHistory, *};
 use std::rc::Rc;
 
 pub(crate) struct Step<'a> {
@@ -47,6 +47,7 @@ impl<'a> Step<'a> {
         }
         self.core.channels.clear();
         self.core.channel_order.clear();
+        self.core.channel_history.clear();
     }
     pub fn cancel(&mut self, id: Option<Token>) {
         if let Some(id) = id
@@ -157,32 +158,44 @@ impl<'a> Step<'a> {
         self.core.session.history_generation = generation;
         self.core.session.history_epoch += 1;
         for id in self.ids() {
-            let old = self.channel(id).clone();
-            if old.subscription.is_some() && self.core.session.connected {
-                self.out.effects.push(Effect::Unsubscribe { channel: id });
-            }
-            self.invalidate(id, true);
-            let pending = self.interrupt_pending_sends(&old.pending);
-            *self.channel(id) = ChannelView {
-                watched: old.watched,
-                pending,
-                state: if old.state == Availability::Unavailable {
-                    Availability::Unavailable
-                } else {
-                    Availability::Loading
-                },
-                ..ChannelView::default()
-            };
+            self.clear_channel_history(id);
         }
         // A fresh socket fences frames from retired subscriptions without discarding HTTP
         // completions: their same-session late 401 still has authority.
         self.core.session.connected = false;
         self.connect();
+        self.core.organization_history_issue = self.core.session.connection;
         for id in self.ids() {
             let c = self.channel(id);
             if c.watched && c.state != Availability::Unavailable {
                 self.history(id, Page::Latest, None);
             }
+        }
+    }
+    fn clear_channel_history(&mut self, id: Uuid) {
+        self.core.channel_history.remove(&id);
+        let old = self.channel(id).clone();
+        if old.subscription.is_some() && self.core.session.connected {
+            self.out.effects.push(Effect::Unsubscribe { channel: id });
+        }
+        self.invalidate(id, true);
+        let pending = self.interrupt_pending_sends(&old.pending);
+        *self.channel(id) = ChannelView {
+            watched: old.watched,
+            pending,
+            state: if old.state == Availability::Unavailable {
+                Availability::Unavailable
+            } else {
+                Availability::Loading
+            },
+            ..ChannelView::default()
+        };
+    }
+    pub(super) fn restart_channel_history(&mut self, id: Uuid, generation: Option<Uuid>) {
+        self.clear_channel_history(id);
+        self.history(id, Page::Latest, None);
+        if let Some(history) = self.core.channel_history.get_mut(&id) {
+            history.generation = generation;
         }
     }
     pub fn subscribe(&mut self, id: Uuid) {
@@ -224,6 +237,15 @@ impl<'a> Step<'a> {
             return;
         }
         let n = self.token();
+        if self.channel(id).watched {
+            self.core
+                .channel_history
+                .entry(id)
+                .or_insert(ChannelHistory {
+                    issue: n,
+                    generation: None,
+                });
+        }
         let c = self.channel(id);
         match page {
             Page::Latest => c.latest = Some(n),
@@ -311,6 +333,7 @@ impl<'a> Step<'a> {
         c.subscription = None;
         c.state = Availability::Unavailable;
         c.pending = pending;
+        self.core.channel_history.remove(&id);
         for r in self.core.requests.values_mut() {
             if r.channel() == id && matches!(r, Request::Send { .. }) {
                 r.invalidate();

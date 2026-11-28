@@ -14,6 +14,10 @@ export type Failure = number | 'network' | 'timeout'
 export type AccessEndpoint = 'organization' | 'capabilities' | 'history' | 'send'
 export type AccessLifetime = 'current' | 'stale_request' | 'retired_organization' | 'replaced_session'
 export type AccessOutcome = 'ignored' | 'account_ended' | 'organization_unavailable' | 'channel_unavailable' | 'local_refusal' | 'local_outcome'
+export type HistoryObservation =
+  | { kind: 'success' | 'prefetched'; generation?: string }
+  | { kind: 'failure'; status: Failure; error?: string }
+export type HistoryObservationResult = 'accepted' | 'stale' | 'reset' | 'ignored'
 export type Purpose = 'reorder_grace' | 'fill_backoff' | 'reconnect_backoff' | 'send_retry'
 export type Pending = SendTarget & { replyRootId?: string; clientMessageId: string; body: string; state: 'sending' | 'throttled' | 'unknown' | 'failed'; request: number; retryWait?: number; failureCode?: string }
 export type ChannelState = {
@@ -85,6 +89,7 @@ export type Effect =
 export type Input = (
   | { type: 'session_start' | 'session_replaced'; selfId: string }
   | { type: 'history_generation'; generation?: string }
+  | { type: 'observe_history_generation'; channel?: string; issue?: number; lifetime: AccessLifetime; result: HistoryObservation }
   | { type: 'stop' | 'organization_unavailable' }
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
@@ -111,12 +116,14 @@ type SocketDelivery = { type: 'sync'; subscription?: number } | { type: 'activit
 export type CoreResult = {
   effects: Effect[]; changedChannels: ReadonlySet<string>; records: ReadonlyMap<string, Message[]>
   moves?: readonly MoveVersion[]; stateChanged: boolean; socketDelivery?: SocketDelivery
+  historyObservation?: HistoryObservationResult
 }
 export interface SyncCore {
   get(): SyncView
   request(id: number): Request | undefined
   timer(id: number): Timer | undefined
   hasPending(): boolean
+  historyIssue(channel?: string): number | undefined
   subscribeIssued(connection: number, channel: string, id: number): void
   step(input: Input): CoreResult
 }

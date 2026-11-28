@@ -293,6 +293,8 @@ struct StepDelta<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     socket_delivery: &'a Option<SocketDelivery>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    history_observation: &'a Option<HistoryObservationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     session: Option<&'a SessionView>,
     channels: BTreeMap<Uuid, Option<ChannelPatch<'a>>>,
     bodies: Vec<&'a str>,
@@ -340,6 +342,7 @@ impl Boundary {
             moves,
             state_changed,
             socket_delivery,
+            history_observation,
         } = result;
         let mut bodies = Bodies::default();
         let effects = effects
@@ -375,6 +378,7 @@ impl Boundary {
             moves,
             state_changed: *state_changed,
             socket_delivery,
+            history_observation,
             session: session_changed.then(|| self.core.session()),
             channels,
             bodies: bodies.text,

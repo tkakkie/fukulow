@@ -27,6 +27,19 @@ impl WasmCore {
     pub fn timer(&self, id: f64) -> Result<String, JsValue> {
         serde_json::to_string(&self.0.core.timer(id as i64)).map_err(error)
     }
+    #[wasm_bindgen(js_name = historyIssue)]
+    pub fn history_issue(&self, channel: Option<String>) -> Result<Option<f64>, JsValue> {
+        let channel = channel
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(error)?;
+        Ok(self.0.core.history_issue(channel).map(|issue| issue as f64))
+    }
+    #[wasm_bindgen(js_name = isGenerationConflict)]
+    pub fn is_generation_conflict(status: Option<u16>, code: Option<String>) -> bool {
+        history_generation::is_generation_conflict(status, code.as_deref())
+    }
     #[wasm_bindgen(js_name = syncDelay)]
     pub fn sync_delay(purpose: &str, attempt: f64, draw_or_ms: f64) -> Result<f64, JsValue> {
         let purpose =

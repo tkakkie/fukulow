@@ -15,7 +15,7 @@ import { createCore, inputMessages } from '#sync-core'
 import { accessOutcome, syncDelay } from './core-wasm'
 import { messageBodyError, topicNameError } from './message-rules'
 import type { SyncCore } from './protocol-types'
-import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
+import type { AccessLifetime, ChannelState, Effect, HistoryObservation, HistoryObservationResult, Input, MoveVersion } from './protocol-types'
 
 export { foldTopicName, MESSAGE_BODY_MAX, messageBodyError, TOPIC_NAME_MAX, topicNameError } from './message-rules'
 export type { ChannelComposerState, TopicComposerState }
@@ -122,7 +122,7 @@ export function createSync(options: SyncOptions) {
       putOlderError(channel, false)
   }
 
-  function dispatch(input: Input): Promise<void> {
+  function dispatch(input: Input, observe?: (result: HistoryObservationResult | undefined) => void): Promise<void> {
     if ((input.type === 'event' || input.type === 'socket_frame') && input.event.type === 'message' && 'message' in input.event) rememberIdentityResponse(input.event.message)
     else if (input.type === 'ack') rememberIdentityResponse(input.message)
     else if (input.type === 'history_result' || input.type === 'events_result') rememberIdentityResponse(input.page)
@@ -141,6 +141,11 @@ export function createSync(options: SyncOptions) {
     const previousRequest = input.type === 'history_failed' ? core.request(input.request) : undefined
     const result = core.step(input)
     state = core.get()
+    if (observe) observe(result.historyObservation)
+    if (input.type === 'observe_history_generation' &&
+      (input.result.kind === 'prefetched' || result.historyObservation === 'ignored' || result.historyObservation === 'stale')) {
+      return Promise.resolve()
+    }
     if (input.type === 'socket_frame') {
       const delivery = result.socketDelivery
       if (delivery?.type === 'activity') {
@@ -198,6 +203,12 @@ export function createSync(options: SyncOptions) {
     notifyChangedComposers?.()
     inputListeners.forEach(listener => listener(input, result, previous))
     return Promise.all(result.effects.map(execute)).then(() => {})
+  }
+
+  function dispatchObservation(input: Extract<Input, { type: 'history_generation' | 'observe_history_generation' }>) {
+    let decision: HistoryObservationResult | undefined
+    void dispatch(input, result => { decision = result })
+    return decision
   }
 
   // A send can become unknown while HTTP is still in flight. Late results still reach the Session owner.
@@ -481,10 +492,12 @@ export function createSync(options: SyncOptions) {
     unwatch: (channel: string) => dispatch({ type: 'unwatch', channel }),
     close: () => dispatch({ type: 'stop' }),
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
+    historyIssue: (channel?: string) => core.historyIssue(channel),
+    observeHistoryResult(result: HistoryObservation, issue: number | undefined, lifetime: AccessLifetime, channel?: string) {
+      return dispatchObservation({ type: 'observe_history_generation', channel, issue, lifetime, result })
+    },
     observeHistoryGeneration(generation?: string) {
-      const before = state.historyEpoch
-      void dispatch({ type: 'history_generation', generation })
-      return before === state.historyEpoch
+      return dispatchObservation({ type: 'history_generation', generation }) !== 'reset'
     },
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     hasUnsavedChanges(): boolean {
