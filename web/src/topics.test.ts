@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { createActivity } from './activity'
 import type { Channel, MessagePage, Result, TimelinePage, TopicPage, TopicSummaryResponse } from './api'
 import { createSession } from './session'
+import { moveEvent } from './protocol-test-helpers'
 import { flush } from './sync-test-helpers'
 import { deferred, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { createTopics } from './topics'
@@ -1357,7 +1358,7 @@ it('selectMainTimeline emits one line per topic_id at its newest position', () =
   expect(lines.filter(l => l.kind === 'topic').map(l => l.latestMessage)).toEqual([msg(7, 'U'), msg(12, 'T')])
 })
 
-it('fences a detached Window held-summary response after Channel Window replacement', async () => {
+it('ignores a late held-summary response after Channel unwatch and rewatch', async () => {
   const activity = createActivity({ watched: () => true })
   const c = topicClient(activity)
   const late = deferred<Result<TopicSummaryResponse>>()
@@ -1385,7 +1386,7 @@ it('fences a detached Window held-summary response after Channel Window replacem
   } finally { activity.close(); await c.sync.close() }
 })
 
-it('fences a detached Window held-main list response after Channel Window replacement', async () => {
+it('ignores a late held-main list response after Channel unwatch and rewatch', async () => {
   const activity = createActivity({ watched: () => true })
   const c = topicClient(activity)
   const late = deferred<Result<TopicPage>>()
@@ -1413,7 +1414,7 @@ it('fences a detached Window held-main list response after Channel Window replac
   } finally { activity.close(); await c.sync.close() }
 })
 
-it('fences a detached Window loadMainLatest response so it cannot prune the replacement Window activity targets', async () => {
+it('ignores a late loadMainLatest response after Channel unwatch and rewatch', async () => {
   const activity = createActivity({ watched: () => true })
   const c = topicClient(activity)
   const late = deferred<Result<TimelinePage>>()
@@ -1446,18 +1447,43 @@ it('fences a deferred ensureSummaryForWindow microtask when the Window is detach
     try {
       await c.boot()
       for (let seq = 11; seq <= 1010; seq++) c.event(seq, seq % 2 ? 'T' : 'U')
-      const unwatch = c.sync.unwatch('A')
       if (mode === 'replaced') {
+        const beforeGeneration = c.topics.get('A').generation
         c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
-          history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, has_more: false, items: [],
+          history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1011, has_more: false, items: [],
         }))
-        await unwatch
-        await c.sync.watch('A')
+        c.handlers[0].onEvent(moveEvent(1011, 'id10'))
+        expect(c.topics.get('A').generation).not.toBe(beforeGeneration)
+        expect(c.sync.get().channels.A?.watched).toBe(true)
       } else {
-        await unwatch
+        await c.sync.unwatch('A')
       }
       await flush()
       expect(c.topicsApi.getTopicSummary).not.toHaveBeenCalled()
     } finally { await c.sync.close() }
   }
+})
+
+it('fences pruneActivity on a detached Window so loadTopic cannot release the replacement Window activity target', async () => {
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    await c.topics.loadTopic('A', 'T')
+    const beforeGeneration = c.topics.get('A').generation
+    let replaced = false
+    const unsubscribe = c.topics.subscribe(() => {
+      if (replaced) return
+      replaced = true
+      unsubscribe()
+      c.handlers[0].onEvent(moveEvent(11, 'id10'))
+      void c.topics.loadSummary('A', 'U')
+    }, 'A')
+    const pending = c.topics.loadTopic('A', 'V')
+    expect(replaced).toBe(true)
+    expect(c.topics.get('A').generation).not.toBe(beforeGeneration)
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+    await pending
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+  } finally { activity.close(); await c.sync.close() }
 })
