@@ -77,8 +77,16 @@ test('leak v23 records typed API errors with v22 schema and conditions', () => {
     ['load/search-engines/d3r-leak/manifest.ts', 'load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs']);
 });
 
+function pinnedV24(): ReturnType<typeof loadManifest>['frozen'] {
+  const text = readFileSync(new URL('../manifest-d3r-leak-v24.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), '38867298bbbe99dafee1687c3fd638df576abfc1971e5142170f4c4295dd4d71');
+  const v24 = JSON.parse(text);
+  assert.equal(v24.sha256, hash(JSON.stringify(v24.frozen)));
+  return v24.frozen;
+}
+
 test('leak v24 records the ServeOptions refactor with v23 schema and conditions', () => {
-  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version, sourceHashes, ...conditions} = pinnedV24();
   const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV23();
   assert.equal(version, previousVersion + 1);
   assert.deepEqual(conditions, previousConditions);
@@ -86,4 +94,15 @@ test('leak v24 records the ServeOptions refactor with v23 schema and conditions'
   const before = new Map(previousSources.map(source => [source.path, source.sha256]));
   assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
     ['load/search-engines/d3r-leak/manifest.ts', 'load/search-engines/d3r/manifest.ts', 'server/src/auth.rs']);
+});
+
+test('leak v25 records the transaction connection guard refactor with v24 schema and conditions', () => {
+  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV24();
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r-leak/manifest.ts', 'load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
 });
