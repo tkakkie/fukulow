@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { accessSync, constants, readFileSync } from 'node:fs'
+import { accessSync, closeSync, constants, openSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { diagnostic, safeFailure, type Stage } from './backup-safety.ts'
 import { psql, run } from './compose-harness.ts'
@@ -20,10 +20,7 @@ export function restoreDrill(archive: string): void {
   const env = { ...process.env }
   delete env.DATABASE_URL
   const dockerOptions = { cwd: repositoryRoot, env }
-  const runDocker = (args: string[], captureStdout = false) => {
-    const command = captureStdout ? 'exec docker "$@" 2>/dev/null' : 'exec docker "$@" 2>/dev/null >/dev/null'
-    return run('/bin/sh', ['-c', command, 'restore-drill', ...args], dockerOptions)
-  }
+  const quiet = { ...dockerOptions, captureOutput: false }
   let stage: Stage = 'image'
   const started = performance.now()
   const name = `fukulow-restore-drill-${randomUUID()}`
@@ -32,18 +29,20 @@ export function restoreDrill(archive: string): void {
     const image = postgresImageFromCompose()
     stage = 'start'
     // No Compose, host ports, bind mounts, shared volumes or production connection string.
-    runDocker(['run', '-d', '--name', name, '--network', 'none', '--tmpfs', '/var/lib/postgresql',
+    run('docker', ['run', '-d', '--name', name, '--network', 'none', '--tmpfs', '/var/lib/postgresql',
       '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_USER=fukulow',
-      '-e', 'POSTGRES_DB=fukulow', image])
+      '-e', 'POSTGRES_DB=fukulow', image], quiet)
     created = true
     stage = 'ready'
     const exec = ['exec', '-i', name]
     let ready = false
     for (let attempt = 0; attempt < 60; attempt++) {
       try {
-        runDocker([...exec, 'pg_isready', '-U', 'fukulow', '-d', 'fukulow'])
+        run('docker', [...exec, 'pg_isready', '-U', 'fukulow', '-d', 'fukulow'], quiet)
         // The entrypoint also briefly runs a temporary server. Wait for the final PID 1.
-        ready = runDocker([...exec, 'cat', '/proc/1/comm'], true).stdout.trim() === 'postgres'
+        // Keep Docker stderr from exhausting the capture limit during the probe.
+        ready = run('docker', [...exec, 'cat', '/proc/1/comm'], { ...dockerOptions, maxBuffer: Infinity })
+          .stdout.trim() === 'postgres'
       } catch { /* startup still in progress */ }
       if (ready) break
       awaitStartupPause()
@@ -52,9 +51,17 @@ export function restoreDrill(archive: string): void {
     const readArchive = (args: string[]) => {
       // Preserve the filesystem error code for the stage diagnostic.
       accessSync(archive, constants.R_OK)
-      // Open the archive relative to the caller and stream it without buffering the dump or its listing.
-      run('/bin/sh', ['-c', 'archive=$1; root=$2; shift 2; { cd "$root" && exec docker "$@"; } 2>/dev/null < "$archive" >/dev/null',
-        'restore-drill', archive, repositoryRoot, ...exec, ...args], { env })
+      // Open relative to the caller and keep archive I/O after the access check in the operation category.
+      try {
+        const input = openSync(archive, 'r')
+        try {
+          run('docker', [...exec, ...args], { ...quiet, stdin: input })
+        } finally {
+          closeSync(input)
+        }
+      } catch {
+        throw new Error('Archive command failed')
+      }
     }
     stage = 'list'
     readArchive(['pg_restore', '--list'])
@@ -63,15 +70,14 @@ export function restoreDrill(archive: string): void {
       '--single-transaction', '--no-owner', '--no-acl'])
     stage = 'sessions'
     const input = readFileSync(new URL('../server/src/auth/end-all-sessions.sql', import.meta.url))
-    // The shared psql helper captures both streams. Keep diagnostics suppressed regardless of their size.
-    psql(exec, ['-U', 'fukulow', '-d', 'fukulow'], { ...dockerOptions, input, maxBuffer: Infinity })
+    psql(exec, ['-U', 'fukulow', '-d', 'fukulow'], { ...quiet, input })
     stage = 'integrity'
-    runDocker([...exec, 'pg_amcheck', '-U', 'fukulow', '-d', 'fukulow', '--install-missing', '--heapallindexed'])
+    run('docker', [...exec, 'pg_amcheck', '-U', 'fukulow', '-d', 'fukulow', '--install-missing', '--heapallindexed'], quiet)
     console.log(`Restore drill passed in ${((performance.now() - started) / 1000).toFixed(2)} seconds (startup, restore, session end, heap/index checks; cleanup follows).`)
   } catch (error) {
     throw safeFailure(stage, error)
   } finally {
-    try { if (created) runDocker(['rm', '-f', '-v', name]) } catch (error) { throw safeFailure('cleanup', error) }
+    try { if (created) run('docker', ['rm', '-f', '-v', name], quiet) } catch (error) { throw safeFailure('cleanup', error) }
   }
 }
 
