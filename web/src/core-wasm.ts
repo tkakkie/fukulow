@@ -23,6 +23,11 @@ export function accessOutcome(endpoint: AccessEndpoint, lifetime: AccessLifetime
   return JSON.parse(WasmCore.accessOutcome(endpoint, lifetime, status, failure.error)) as AccessOutcome
 }
 
+export function isGenerationConflict(failure: { status: Failure; error?: string }): boolean {
+  const status = typeof failure.status === 'number' ? failure.status : undefined
+  return WasmCore.isGenerationConflict(status, failure.error)
+}
+
 type Interned<T> = Omit<T, 'body'> & { body?: number }
 type Send = Extract<CoreResult['effects'][number], { type: 'send' }>
 type Splice = { start: number; delete: number; insert: Interned<Message>[] }
@@ -73,6 +78,7 @@ export function createCore(selfId: string): SyncCore {
     request: id => read<ReturnType<SyncCore['request']>>(core.request(id)) ?? undefined,
     timer: id => read<ReturnType<SyncCore['timer']>>(core.timer(id)) ?? undefined,
     hasPending: () => core.hasPending(),
+    historyIssue: () => core.historyIssue(),
     subscribeIssued: (connection, channel, id) => core.subscribeIssued(connection, coreId(channel), id),
     step(input: Input): CoreResult {
       const out = read<Delta>(core.step(JSON.stringify(coreInput(input))))
@@ -137,7 +143,8 @@ export function createCore(selfId: string): SyncCore {
       const effects = out.effects.map(e => e.type === 'send' ? expandBody<Send>(e, bodies) : e)
       return { effects, changedChannels: new Set(out.changedChannels), records,
         ...(out.moves ? { moves: out.moves } : {}),
-        ...(out.socketDelivery ? { socketDelivery: out.socketDelivery } : {}), stateChanged: out.stateChanged }
+        ...(out.socketDelivery ? { socketDelivery: out.socketDelivery } : {}),
+        ...(out.historyObservation ? { historyObservation: out.historyObservation } : {}), stateChanged: out.stateChanged }
     },
   }
 }

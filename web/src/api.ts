@@ -10,6 +10,7 @@ export async function checkHealth(fetchFn: typeof fetch = fetch): Promise<boolea
 
 import { rememberIdentityResponse } from './identity-order'
 import type { components } from './api-schema'
+import type { HistoryObservation } from './protocol-types'
 
 export type AccountIdentity = components['schemas']['AccountIdentity']
 export type Identity = components['schemas']['Identity']
@@ -24,6 +25,19 @@ export function normalizedFailure(result: Extract<Result<unknown>, { ok: false }
   return result.kind === 'http'
     ? { status: result.status, error: typeof result.error === 'string' ? result.error : undefined }
     : { status: 'network' as const }
+}
+
+export function readHistoryGeneration(data: unknown): { generation: string } | undefined {
+  if (data && typeof data === 'object' && 'history_generation' in data) {
+    const generation = data.history_generation
+    if (typeof generation === 'string') return { generation }
+  }
+}
+
+export function historyObservation(result: Result<unknown>): HistoryObservation {
+  return result.ok
+    ? { kind: 'success', ...readHistoryGeneration(result.data) }
+    : { kind: 'failure', ...normalizedFailure(result) }
 }
 
 // Bound 5xx body reads (used only when Retry-After is absent) so stalled responses cannot hang callers.

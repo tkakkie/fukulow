@@ -12,7 +12,6 @@ import { accessOutcome } from './core-wasm'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import type { InitialTimeline } from './initial-timeline'
 import { createMoveChain, type MoveChainApi } from './move-chain'
-import { observeGeneration } from './observe-generation'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
@@ -87,26 +86,26 @@ export function createSession(options: SessionOptions) {
   let unavailable = false
   let dms: Dms | undefined
   let history: ReturnType<typeof createTopicSync>['sync'] | undefined
+  const accessLifetime = () => options.accountSignal?.aborted ? 'replaced_session' : closed || unavailable ? 'retired_organization' : 'current'
   const reportAccess: NonNullable<SyncOptions['reportSyncAccess']> = (result, source?) => {
     if (result.ok) return
-    const lifetime = options.accountSignal?.aborted ? 'replaced_session' : closed || unavailable ? 'retired_organization' : 'current'
-    const outcome = accessOutcome('organization', lifetime, api.normalizedFailure(result))
+    const outcome = accessOutcome('organization', accessLifetime(), api.normalizedFailure(result))
     if (outcome === 'account_ended') {
       if (notifyEnded() && !closed) void source?.close()
     } else if (outcome === 'organization_unavailable') terminate()
   }
-  const observeResponse = async <T>(promise: Promise<api.Result<T>>, report?: typeof reportAccess): Promise<api.Result<T>> => {
-    const epoch = history?.get().historyEpoch
-    const result = await promise
+  const observeResponse = async <T>(run: () => Promise<api.Result<T>>, report?: typeof reportAccess): Promise<api.Result<T>> => {
+    const issue = history?.historyIssue()
+    const result = await run()
     report?.(result)
-    if (!closed && history && (epoch === undefined || epoch === history.get().historyEpoch)) {
-      if (observeGeneration(history, result) === 'stale') return { ok: false, kind: 'network' }
-    } else if (result.ok && epoch !== undefined && epoch !== history?.get().historyEpoch) return { ok: false, kind: 'network' }
+    const decision = history?.observeHistoryResult(api.historyObservation(result), issue, accessLifetime())
+    if (decision === 'stale' || decision === 'reset') return { ok: false, kind: 'network' }
+    // Retired controllers fence their own completions, so preserve the original HTTP outcome.
     return result
   }
-  const observe = <T>(promise: Promise<api.Result<T>>) => observeResponse(promise, reportAccess)
+  const observe = <T>(run: () => Promise<api.Result<T>>) => observeResponse(run, reportAccess)
   // These controllers report access through sync.reportAccess.
-  const observeHistory = <T>(promise: Promise<api.Result<T>>) => observeResponse(promise)
+  const observeHistory = <T>(run: () => Promise<api.Result<T>>) => observeResponse(run)
   const channelRevokeListeners = new Set<(channelId: string) => void>()
   const activity = createActivity({
     kind: id => isDm(id) ? 'dm' : channels.isOrdinary(id) ? 'channel' : undefined,
@@ -141,20 +140,20 @@ export function createSession(options: SessionOptions) {
   const unreadSource = options.unreadApi ?? unreadApi(organizationId, () => history?.get().historyGeneration)
   const topicComposition = createTopicSync({ ...options.sync, activity, selfId: options.selfId, organizationId,
     isDm, initialTimeline: options.initialTimeline,
-    api: { listChannelEvents: (channel, query) => observe(timeline.listChannelEvents(channel, query)),
-      listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
+    api: { listChannelEvents: (channel, query) => observe(() => timeline.listChannelEvents(channel, query)),
+      listMessages: (channel, query) => observe(() => timeline.listMessages(channel, query)),
       sendMessage: async (channel, body) => {
-        const result = await observe(timeline.sendMessage(channel, body))
+        const result = await observe(() => timeline.sendMessage(channel, body))
         if (!closed && !unavailable) dms?.peerRefusal(channel, result)
         return result
       } },
     topicsApi: {
-      listTimeline: (channel, query) => observeHistory(topicSource.listTimeline(channel, query)),
-      listTopics: (channel, query, signal) => observeHistory(signal ? topicSource.listTopics(channel, query, signal) : topicSource.listTopics(channel, query)),
-      getTopicSummary: (channel, topic, signal) => observeHistory(signal ? topicSource.getTopicSummary(channel, topic, signal) : topicSource.getTopicSummary(channel, topic)),
-      listTopicMessages: (channel, topic, query) => observeHistory(topicSource.listTopicMessages(channel, topic, query)),
+      listTimeline: (channel, query) => observeHistory(() => topicSource.listTimeline(channel, query)),
+      listTopics: (channel, query, signal) => observeHistory(() => signal ? topicSource.listTopics(channel, query, signal) : topicSource.listTopics(channel, query)),
+      getTopicSummary: (channel, topic, signal) => observeHistory(() => signal ? topicSource.getTopicSummary(channel, topic, signal) : topicSource.getTopicSummary(channel, topic)),
+      listTopicMessages: (channel, topic, query) => observeHistory(() => topicSource.listTopicMessages(channel, topic, query)),
     },
-    checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
+    checkMembership: options.sync?.checkMembership ?? (() => observe(() => api.getOrganizationMe(organizationId))),
     onSessionEnded: notifyEnded,
     reportOrganizationUnavailable,
     reportSyncAccess: reportAccess,
@@ -166,7 +165,7 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       repliesApi: {
-        listReplyChain: (channel, anchor, query) => observeHistory(options.accountSignal
+        listReplyChain: (channel, anchor, query) => observeHistory(() => options.accountSignal
           ? replySource.listReplyChain(channel, anchor, query, options.accountSignal)
           : replySource.listReplyChain(channel, anchor, query)),
       },
@@ -187,9 +186,9 @@ export function createSession(options: SessionOptions) {
       isDm,
       readTopicSummary: options.unreadApi ? undefined : topics.readTopicSummary,
       unreadApi: {
-        listChannels: (signal, readId) => observeHistory(unreadSource.listChannels(signal, readId)),
-        markRead: (scope, body) => observeHistory(unreadSource.markRead(scope, body)),
-        getTopicSummary: (channel, topic) => observeHistory(unreadSource.getTopicSummary(channel, topic)),
+        listChannels: (signal, readId) => observeHistory(() => unreadSource.listChannels(signal, readId)),
+        markRead: (scope, body) => observeHistory(() => unreadSource.markRead(scope, body)),
+        getTopicSummary: (channel, topic) => observeHistory(() => unreadSource.getTopicSummary(channel, topic)),
       },
     },
     { sync: replyComposition.sync, topics },
@@ -197,7 +196,7 @@ export function createSession(options: SessionOptions) {
   const applyUnavailable = sync.unavailable
   sync.unavailable = async () => reportOrganizationUnavailable()
   const replyCounts = createReplyCounts(sync, { replies, topics }, {
-    api: (channel, body, signal) => observeHistory(options.replyCountsApi ? options.replyCountsApi(channel, body, signal) : api.getReplyCounts(organizationId, channel, body, signal)),
+    api: (channel, body, signal) => observeHistory(() => options.replyCountsApi ? options.replyCountsApi(channel, body, signal) : api.getReplyCounts(organizationId, channel, body, signal)),
     requestTimeoutMs: options.sync?.requestTimeoutMs, random: options.sync?.random,
   })
   const moveChain = createMoveChain(sync, replies, {
@@ -209,19 +208,19 @@ export function createSession(options: SessionOptions) {
     },
   })
   const navigationTargets = createNavigationTargets({
-    topic: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
-    reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
+    topic: (channel, topic) => observe(() => topicSource.getTopicSummary(channel, topic)),
+    reply: (channel, message) => observe(() => replySource.listReplyChain(channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
   const searchAnchor = createSearchAnchor(sync, {
-    timeline: ({ channelId }, query, signal) => observe(topicSource.listTimeline(channelId, query, signal)),
-    messages: ({ channelId, topicId }, query, signal) => observe(topicId
+    timeline: ({ channelId }, query, signal) => observe(() => topicSource.listTimeline(channelId, query, signal)),
+    messages: ({ channelId, topicId }, query, signal) => observe(() => topicId
       ? topicSource.listTopicMessages(channelId, topicId, query, signal)
       : timeline.listMessages(channelId, query, signal)),
     reply: ({ channelId, messageId }, query, signal) => {
       const account = options.accountSignal
       const combined = account && signal ? AbortSignal.any([account, signal]) : account ?? signal
-      return observe(replySource.listReplyChain(channelId, messageId, query, combined))
+      return observe(() => replySource.listReplyChain(channelId, messageId, query, combined))
     },
   })
   const stopSearchBudget = searchAnchor.subscribe(() => {
@@ -236,11 +235,10 @@ export function createSession(options: SessionOptions) {
   function listChannels(signal?: AbortSignal, readId?: string) {
     const initial = initialChannels
     initialChannels = undefined
-    return observe(initial ? initial.then(result => {
+    return observe(() => initial ? initial.then(result => {
       if (signal?.aborted && result.ok) return { ok: false, kind: 'network' } as const
-      const generation = sync.get().historyGeneration
-      // An unversioned startup response cannot supersede a generation learned while it was in flight.
-      if (result.ok && generation !== undefined && result.data.history_generation !== generation) return readChannels(signal, markChannelsRead(['reconcile']))
+      if (result.ok && sync.observeHistoryResult({ kind: 'prefetched', ...api.readHistoryGeneration(result.data) },
+        undefined, accessLifetime()) === 'stale') return readChannels(signal, markChannelsRead(['reconcile']))
       return result
     }) : readChannels(signal, readId))
   }
@@ -248,9 +246,9 @@ export function createSession(options: SessionOptions) {
   const channels = createChannels(
     {
       listChannels,
-      createChannel: body => observe(source.createChannel(body)),
-      listArchivedChannels: listArchivedChannels && ((signal, readId) => observe(listArchivedChannels(signal, readId))),
-      getChannel: getChannel && ((id, signal) => observe(getChannel(id, signal))),
+      createChannel: body => observe(() => source.createChannel(body)),
+      listArchivedChannels: listArchivedChannels && ((signal, readId) => observe(() => listArchivedChannels(signal, readId))),
+      getChannel: getChannel && ((id, signal) => observe(() => getChannel(id, signal))),
       updateChannel: updateChannel && (async (id, body) => {
         const result = await updateChannel(id, body)
         reportAccess(result)
@@ -274,7 +272,7 @@ export function createSession(options: SessionOptions) {
     {
       initialHint: options.initialChannelHint,
       canOpen: id => !isDm(id) && sync.get().channels[id]?.state !== 'unavailable',
-      verifyOrdinary: (id, signal) => observe(topicSource.listTopics(id, { limit: 1 }, signal)),
+      verifyOrdinary: (id, signal) => observe(() => topicSource.listTopics(id, { limit: 1 }, signal)),
       unavailable: id => { void sync.channelUnavailable(id) },
       onOpen: channel => unread.activityArchive(channel.id, channel.archived),
       onArchivedSnapshot: rows => {
@@ -298,9 +296,9 @@ export function createSession(options: SessionOptions) {
   closeSections = sections.close
   const dmSource = options.dmsApi ?? dmsApi(organizationId)
   dms = createDms({ api: {
-    list: (query, signal) => observe(dmSource.list({ history_generation: history?.get().historyGeneration, ...query }, signal)),
-    changes: (query, signal) => observe(dmSource.changes(query, signal)),
-    open: (body, signal) => observe(dmSource.open(body, signal)),
+    list: (query, signal) => observe(() => dmSource.list({ history_generation: history?.get().historyGeneration, ...query }, signal)),
+    changes: (query, signal) => observe(() => dmSource.changes(query, signal)),
+    open: (body, signal) => observe(() => dmSource.open(body, signal)),
   }, activity, watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
   waitForReady: true,
   baseline: (dm, replace) => unread.activityDmSnapshot(dm, replace),
@@ -343,7 +341,7 @@ export function createSession(options: SessionOptions) {
   let listAccess: MemberListAccess = options.initialRole ?? 'guest'
   const memberListAccess = () => listAccess
   const capabilities = createActivityTarget({
-    load: signal => observe(api.getOrganizationMe(organizationId, undefined, signal)),
+    load: signal => observe(() => api.getOrganizationMe(organizationId, undefined, signal)),
     accept: identity => {
       listAccess = identity.member.role
       // Resume held lists after revalidation. A confirmed Guest starts with no rows.

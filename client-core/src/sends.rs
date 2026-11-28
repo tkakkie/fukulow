@@ -1,6 +1,6 @@
 //! Owns the pending-send lifecycle.
 
-use crate::{engine::Step, merge::Source, *};
+use crate::{engine::Step, history_generation::is_generation_conflict, merge::Source, *};
 use fukulow_api::Message;
 use std::rc::Rc;
 
@@ -149,7 +149,7 @@ impl Step<'_> {
             AccessOutcome::Ignored => return,
             _ => {}
         }
-        if matches!(&result, Err((Failure::Status(409), _, Some(error))) if error == "history_generation_changed")
+        if matches!(&result, Err((status, _, error)) if is_generation_conflict(status.http_status(), error.as_deref()))
         {
             self.reset_history(None);
             return;

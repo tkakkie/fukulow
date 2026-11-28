@@ -1,4 +1,7 @@
-use crate::{engine::Step, merge::Source, socket_replies::Route, *};
+use crate::{
+    engine::Step, history_generation::is_generation_conflict, merge::Source, socket_replies::Route,
+    *,
+};
 use fukulow_api::ServerEvent;
 use std::rc::Rc;
 
@@ -19,6 +22,8 @@ impl Step<'_> {
                 self.core.requests.clear();
                 self.core.timers.clear();
                 self.connect();
+                // This token survives ordinary reconnects. Only a Session or history reset replaces it.
+                self.core.organization_history_issue = self.core.session.connection;
                 self.direct = true;
                 self.force_changed = true;
             }
@@ -28,6 +33,16 @@ impl Step<'_> {
                 self.force_changed = true;
             }
             Input::OrganizationUnavailable => self.organization_unavailable(),
+            Input::ObserveHistoryGeneration {
+                issue,
+                lifetime,
+                result,
+            } => {
+                let decision = self.observe_history_generation(issue, lifetime, result);
+                // A non-reset observation only reads or updates generation metadata.
+                self.direct = decision != HistoryObservationResult::Reset;
+                self.out.history_observation = Some(decision);
+            }
             Input::UserDiscard {
                 channel,
                 client_message_id,
@@ -58,11 +73,16 @@ impl Step<'_> {
     fn running(&mut self, input: Input) {
         match input {
             Input::HistoryGeneration { generation } => {
-                if let Some(generation) = generation {
-                    self.accept_generation(generation);
-                } else {
-                    self.reset_history(None);
-                }
+                self.out.history_observation = Some(match generation {
+                    Some(generation) if self.accept_generation(generation) => {
+                        HistoryObservationResult::Accepted
+                    }
+                    Some(_) => HistoryObservationResult::Reset,
+                    None => {
+                        self.reset_history(None);
+                        HistoryObservationResult::Reset
+                    }
+                });
             }
             Input::SettleHistory { channel, messages } => {
                 if self
@@ -130,10 +150,12 @@ impl Step<'_> {
                     c.state = Availability::Loading;
                     c.subscription = None;
                 }
-                if c.cursor.is_none() {
+                let needs_history = c.cursor.is_none();
+                let empty = c.messages.is_empty();
+                if needs_history {
                     self.history(id, Page::Latest, None);
                 } else {
-                    if c.messages.is_empty() {
+                    if empty {
                         self.history(id, Page::Latest, None);
                     }
                     self.subscribe(id);
@@ -206,24 +228,21 @@ impl Step<'_> {
                 status,
                 error,
             } => {
-                if self.core.requests.get(&request).is_some_and(|r| !r.stale())
-                    && status == Failure::Status(409)
-                {
-                    match error.as_deref() {
-                        Some("history_generation_changed") => {
-                            self.core.requests.remove(&request);
-                            self.reset_history(None);
-                            return;
+                if self.core.requests.get(&request).is_some_and(|r| !r.stale()) {
+                    if is_generation_conflict(status.http_status(), error.as_deref()) {
+                        self.core.requests.remove(&request);
+                        self.reset_history(None);
+                        return;
+                    }
+                    if status == Failure::Status(409)
+                        && error.as_deref() == Some("snapshot_expired")
+                    {
+                        if let Some(Request::History { channel, page, .. }) =
+                            self.core.requests.remove(&request)
+                        {
+                            self.expire_window(channel, page != Page::Latest);
                         }
-                        Some("snapshot_expired") => {
-                            if let Some(Request::History { channel, page, .. }) =
-                                self.core.requests.remove(&request)
-                            {
-                                self.expire_window(channel, page != Page::Latest);
-                            }
-                            return;
-                        }
-                        _ => {}
+                        return;
                     }
                 }
                 self.history_response(request, Err((status, error.as_deref())));
@@ -392,16 +411,7 @@ impl Step<'_> {
                     return;
                 }
                 if caught_up_seq < sub.after {
-                    self.out.effects.push(Effect::Unsubscribe { channel: id });
-                    self.invalidate(id, true);
-                    let pending = self.channel(id).pending.clone();
-                    let pending = self.interrupt_pending_sends(&pending);
-                    *self.channel(id) = ChannelView {
-                        watched: true,
-                        pending,
-                        ..ChannelView::default()
-                    };
-                    self.history(id, Page::Latest, None);
+                    self.restart_channel_history(id);
                 } else {
                     let c = self.channel(id);
                     if !sub.confirmed || sub.watermark != caught_up_seq {

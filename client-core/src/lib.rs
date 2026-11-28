@@ -3,6 +3,7 @@ mod access;
 #[cfg(any(feature = "wasm", test))]
 mod boundary_delta;
 mod engine;
+mod history_generation;
 mod merge;
 pub mod reply_counts;
 mod responses;
@@ -17,6 +18,7 @@ mod types;
 #[cfg(feature = "wasm")]
 mod wasm;
 pub use access::{AccessEndpoint, AccessLifetime, AccessOutcome, access_outcome};
+pub use history_generation::{HistoryObservation, HistoryObservationResult};
 pub use sync_delay::sync_delay;
 pub use types::*;
 
@@ -33,6 +35,7 @@ pub struct Core {
     pub(crate) timers: BTreeMap<Token, Timer>,
     socket_replies: socket_replies::SocketReplies,
     membership_probe_pending: bool,
+    organization_history_issue: Option<Token>,
 }
 impl Core {
     pub fn new(self_id: Uuid) -> Self {
@@ -57,6 +60,7 @@ impl Core {
             timers: BTreeMap::new(),
             socket_replies: socket_replies::SocketReplies::default(),
             membership_probe_pending: false,
+            organization_history_issue: None,
         }
     }
     pub fn session(&self) -> &SessionView {

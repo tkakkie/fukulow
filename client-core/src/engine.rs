@@ -157,33 +157,41 @@ impl<'a> Step<'a> {
         self.core.session.history_generation = generation;
         self.core.session.history_epoch += 1;
         for id in self.ids() {
-            let old = self.channel(id).clone();
-            if old.subscription.is_some() && self.core.session.connected {
-                self.out.effects.push(Effect::Unsubscribe { channel: id });
-            }
-            self.invalidate(id, true);
-            let pending = self.interrupt_pending_sends(&old.pending);
-            *self.channel(id) = ChannelView {
-                watched: old.watched,
-                pending,
-                state: if old.state == Availability::Unavailable {
-                    Availability::Unavailable
-                } else {
-                    Availability::Loading
-                },
-                ..ChannelView::default()
-            };
+            self.clear_channel_history(id);
         }
         // A fresh socket fences frames from retired subscriptions without discarding HTTP
         // completions: their same-session late 401 still has authority.
         self.core.session.connected = false;
         self.connect();
+        self.core.organization_history_issue = self.core.session.connection;
         for id in self.ids() {
             let c = self.channel(id);
             if c.watched && c.state != Availability::Unavailable {
                 self.history(id, Page::Latest, None);
             }
         }
+    }
+    fn clear_channel_history(&mut self, id: Uuid) {
+        let old = self.channel(id).clone();
+        if old.subscription.is_some() && self.core.session.connected {
+            self.out.effects.push(Effect::Unsubscribe { channel: id });
+        }
+        self.invalidate(id, true);
+        let pending = self.interrupt_pending_sends(&old.pending);
+        *self.channel(id) = ChannelView {
+            watched: old.watched,
+            pending,
+            state: if old.state == Availability::Unavailable {
+                Availability::Unavailable
+            } else {
+                Availability::Loading
+            },
+            ..ChannelView::default()
+        };
+    }
+    pub(super) fn restart_channel_history(&mut self, id: Uuid) {
+        self.clear_channel_history(id);
+        self.history(id, Page::Latest, None);
     }
     pub fn subscribe(&mut self, id: Uuid) {
         let connected = self.core.session.connected;
