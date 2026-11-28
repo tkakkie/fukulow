@@ -60,7 +60,7 @@ async fn activity_process_child() {
         .connect_with(options)
         .await
         .unwrap();
-    let app = crate::app(state(&pool).await);
+    let app = crate::app(state(&pool).await, Default::default());
     let listener = TcpListener::bind(std::env::var("ACTIVITY_CHILD_ADDRESS").unwrap())
         .await
         .unwrap();

@@ -35,7 +35,7 @@ impl Fixture {
         let id = Uuid::new_v4();
         let token = member(&pools.admin, org, id, "owner").await;
         let state = AppState::for_test(pools.app.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         Self {
             pools,
             state,

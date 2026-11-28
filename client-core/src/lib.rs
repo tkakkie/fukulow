@@ -4,6 +4,7 @@ pub mod activity_reads;
 pub mod activity_routing;
 #[cfg(any(feature = "wasm", test))]
 mod boundary_delta;
+pub mod detached_sends;
 mod engine;
 mod history_generation;
 mod merge;

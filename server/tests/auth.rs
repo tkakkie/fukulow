@@ -14,32 +14,24 @@ use uuid::Uuid;
 
 const PASSWORD: &str = "correct horse battery staple";
 
+mod support;
 #[path = "support/pools.rs"]
 mod test_support;
+use support::app_state;
 use test_support::TestPools;
 
 fn router(app_pool: &PgPool) -> Router {
-    router_with_cookie_security(app_pool, true)
+    app(app_state(app_pool.clone()), Default::default())
 }
 
 fn router_with_cookie_security(app_pool: &PgPool, cookie_secure: bool) -> Router {
-    app(app_state(app_pool, cookie_secure))
-}
-
-fn app_state(app_pool: &PgPool, cookie_secure: bool) -> AppState {
-    AppState {
-        pool: app_pool.clone(),
-        cookie_secure,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-        socket_gate: Default::default(),
-    }
+    app(
+        AppState {
+            cookie_secure,
+            ..app_state(app_pool.clone())
+        },
+        Default::default(),
+    )
 }
 
 async fn request(
@@ -250,7 +242,7 @@ async fn two_organizations(admin: &PgPool, app: &Router) -> (Value, Uuid) {
 #[fukulow_test::test]
 async fn auth_app_pool_enforces_organization_rls(admin: PgPool) {
     let pools = TestPools::new(admin).await;
-    let state = app_state(&pools.app, true);
+    let state = app_state(pools.app.clone());
     let app_pool = state.pool.clone();
     let flags: (bool, bool) =
         sqlx::query_as("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
@@ -259,7 +251,7 @@ async fn auth_app_pool_enforces_organization_rls(admin: PgPool) {
             .unwrap();
     assert_eq!(flags, (false, false), "auth app role must enforce RLS");
 
-    let (identity, other) = two_organizations(&pools.admin, &app(state)).await;
+    let (identity, other) = two_organizations(&pools.admin, &app(state, Default::default())).await;
     let organization = identity["organization"]["organization_id"]
         .as_str()
         .unwrap()
@@ -282,10 +274,13 @@ async fn assert_setup_status(app_pool: &PgPool, setup_required: bool) {
         "setup-status-test-only".into(),
         "another-status-test-only".into(),
     ] {
-        let app = app(AppState {
-            setup_token,
-            ..app_state(app_pool, true)
-        });
+        let app = app(
+            AppState {
+                setup_token,
+                ..app_state(app_pool.clone())
+            },
+            Default::default(),
+        );
         let response = app
             .oneshot(Request::get("/api/v1/setup").body(Body::empty()).unwrap())
             .await
@@ -381,19 +376,11 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
         ("/api/v1/session", None),
         ("/api/v1/native/session", None),
     ] {
-        let app = app(AppState {
-            pool: pool.clone(),
-            cookie_secure: true,
-            setup_token: setup_token.unwrap_or("setup-token-test-only").to_owned(),
-            sign_in_throttle: Default::default(),
-            account_security_throttle: Default::default(),
-            message_delivery: Default::default(),
-            session_changes: Default::default(),
-            session_cleanup: Default::default(),
-            shutdown: Default::default(),
-            ws_allowed_origins: Default::default(),
-            socket_gate: Default::default(),
-        });
+        let mut state = app_state(pool.clone());
+        if let Some(setup_token) = setup_token {
+            state.setup_token = setup_token.to_owned();
+        }
+        let app = app(state, Default::default());
         let valid_input = if path == "/api/v1/setup" {
             setup_input()
         } else {
@@ -479,10 +466,13 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
 async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(admin: PgPool) {
     let pools = TestPools::new(admin).await;
     let setup_token = "setup-token-test-only";
-    let app = app(AppState {
-        setup_token: setup_token.into(),
-        ..app_state(&pools.app, true)
-    });
+    let app = app(
+        AppState {
+            setup_token: setup_token.into(),
+            ..app_state(pools.app.clone())
+        },
+        Default::default(),
+    );
     let expected = json!({"error": "invalid credentials"});
     for completed in [false, true] {
         for token in [
@@ -542,19 +532,7 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = app(AppState {
-        pool,
-        cookie_secure: true,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-        socket_gate: Default::default(),
-    });
+    let app = app(app_state(pool), Default::default());
     for token in [None, Some(""), Some("wrong-token-test-only")] {
         let mut input = setup_input();
         input.as_object_mut().unwrap().remove("setup_token");
@@ -1280,15 +1258,17 @@ async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_
     let app_pool = TestPools::new(admin).await.app;
     let first = setup(&router(&app_pool)).await;
     for peers in ["192.0.2.1", "192.0.2.0/24", "2001:db8::/32, 192.0.2.0/24"] {
-        let app = app(AppState {
-            setup_token: "setup-token-test-only".into(),
-            sign_in_throttle: fukulow_server::auth::SignInThrottle::with_proxy_config(
-                Some(peers),
-                Some("x-forwarded-for"),
-            )
-            .unwrap(),
-            ..app_state(&app_pool, true)
-        });
+        let app = app(
+            AppState {
+                sign_in_throttle: fukulow_server::auth::SignInThrottle::with_proxy_config(
+                    Some(peers),
+                    Some("x-forwarded-for"),
+                )
+                .unwrap(),
+                ..app_state(app_pool.clone())
+            },
+            Default::default(),
+        );
         let organization: Uuid = first["organization"]["organization_id"]
             .as_str()
             .unwrap()

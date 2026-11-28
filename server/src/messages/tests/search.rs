@@ -32,8 +32,13 @@ impl Fixture {
         let token = member(&pools.admin, org, author).await;
         let public = Uuid::new_v4();
         channel(&pools.admin, org, public, author, false).await;
-        let app =
-            crate::app_with_search(AppState::with_test_pool(pools.app.clone()), engine.clone());
+        let app = crate::app(
+            AppState::with_test_pool(pools.app.clone()),
+            crate::ServeOptions {
+                search_engine: engine.clone(),
+                ..Default::default()
+            },
+        );
         let seed_time = sqlx::query_scalar("SELECT now()::text")
             .fetch_one(&pools.admin)
             .await
@@ -288,7 +293,10 @@ async fn search_requires_a_two_scalar_token_and_limits_trimmed_raw_query_without
 #[fukulow_test::test]
 async fn search_disabled_by_default_returns_unavailable(pool: PgPool) {
     let f = Fixture::new(pool).await;
-    let off = crate::app(AppState::with_test_pool(f.pools.app.clone()));
+    let off = crate::app(
+        AppState::with_test_pool(f.pools.app.clone()),
+        Default::default(),
+    );
     let message = sent(
         &off,
         &f.token,

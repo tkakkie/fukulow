@@ -1,5 +1,5 @@
 {
-  "sha256": "5c40dc32c08eaf11a11cf8bf16c9c0e736fff5a5e8a7a782c1f4f4fff3062626",
+  "sha256": "52f083228edf642edb430ec4d04c82204bb3cb0772adab62e59a7fd68e0ef7af",
   "frozen": {
     "version": 25,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -573,7 +573,7 @@
       },
       {
         "path": "server/src/auth.rs",
-        "sha256": "deb0e3a0b777ab81267310d041816533e0ff664068d126b47d1c77cb44414b0d"
+        "sha256": "628fd34dcd7a11f4beb9482908e20c507f22f59c8a29739dbb73482f7e1f21ec"
       },
       {
         "path": "server/src/auth/authorization.rs",

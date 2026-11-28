@@ -37,7 +37,7 @@ async fn channel_metadata_organization_contention_preserves_rows_notices_and_den
     use std::{sync::Arc, time::Duration};
 
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let org = organization(&pool).await;
     let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
     let foreign_org = organization(&pool).await;
@@ -284,7 +284,7 @@ async fn archive_rechecks_role_grant_and_revision_after_auth(pool: PgPool) {
     use axum::extract::Path;
 
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let org = organization(&pool).await;
     let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
     let admin_id = Uuid::new_v4();

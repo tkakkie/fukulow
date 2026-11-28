@@ -56,7 +56,7 @@ async fn mention_send_before_revoke_or_deactivate_holds_authority_through_commit
             .await
             .unwrap();
         let state = AppState::for_test(pool.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         let key = Uuid::new_v4();
         let gate = pause_commit(key);
         let text = token(target);

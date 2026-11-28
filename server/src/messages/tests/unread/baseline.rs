@@ -17,7 +17,7 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     let delivery = state.message_delivery.clone();
     let mut queue = delivery.queue(org, (viewer_id, 0), 256);
     queue.subscribe(channel);
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let before_main = mention_post(&app, &owner, channel, viewer_id, None).await;
     let before_topic = mention_post(&app, &owner, channel, viewer_id, Some("Hidden")).await;
     let gate = LIST_GATES.register(viewer_id);

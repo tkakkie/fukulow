@@ -95,7 +95,7 @@ async fn role_change_body_errors_follow_path_decoding_and_precede_member_uuid_pa
 #[fukulow_test::test]
 async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgPool) {
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let observed = RecheckObservation::install(&state.session_changes);
     let org = organization(&pool).await;
     let target = Uuid::new_v4();
@@ -158,7 +158,7 @@ async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgP
 async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(pool: PgPool) {
     for multiple in [false, true] {
         let state = AppState::for_test(pool.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         let observed = RecheckObservation::install(&state.session_changes);
         let org = organization(&pool).await;
         let ot = member(&pool, org, Uuid::new_v4(), "owner").await;

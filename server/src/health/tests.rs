@@ -50,7 +50,7 @@ async fn assert_not_ready(router: &Router) {
 
 #[fukulow_test::test(migrations = false)]
 async fn readiness_accepts_not_started_worker(pool: PgPool) {
-    let router = app(AppState::with_test_pool(pool));
+    let router = app(AppState::with_test_pool(pool), Default::default());
     assert_ready(&router).await;
 }
 
@@ -61,7 +61,7 @@ async fn readiness_acquire_timeout_recovers_without_changing_liveness(pool: PgPo
         .connect_with(pool.connect_options().as_ref().clone())
         .await
         .unwrap();
-    let router = app(AppState::with_test_pool(single.clone()));
+    let router = app(AppState::with_test_pool(single.clone()), Default::default());
     assert_ready(&router).await;
     let mut connection = single.acquire().await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), assert_not_ready(&router))
@@ -80,7 +80,10 @@ async fn readiness_acquire_timeout_recovers_without_changing_liveness(pool: PgPo
 async fn readiness_query_timeout_releases_slot_limits_flood_and_recovers(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         let relay = Relay::new(&pool, 1).await;
-        let router = app(AppState::with_test_pool(relay.pool.clone()));
+        let router = app(
+            AppState::with_test_pool(relay.pool.clone()),
+            Default::default(),
+        );
         assert_ready(&router).await;
         relay.hold.send(true).unwrap();
         let mut checks = tokio::task::JoinSet::new();
@@ -115,7 +118,10 @@ async fn readiness_overlapping_healthy_callers_share_one_check(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         // Spare pool capacity would expose accidentally independent checks.
         let relay = Relay::new(&pool, 4).await;
-        let router = app(AppState::with_test_pool(relay.pool.clone()));
+        let router = app(
+            AppState::with_test_pool(relay.pool.clone()),
+            Default::default(),
+        );
         assert_ready(&router).await;
         let before = relay.returns.load(Ordering::SeqCst);
         relay.hold.send(true).unwrap();
@@ -153,7 +159,10 @@ async fn readiness_overlapping_healthy_callers_share_one_check(pool: PgPool) {
 async fn readiness_bounds_return_ping_without_accumulating_connections(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let relay = Relay::new(&pool, 4).await;
-        let router = app(AppState::with_test_pool(relay.pool.clone()));
+        let router = app(
+            AppState::with_test_pool(relay.pool.clone()),
+            Default::default(),
+        );
         for _ in 0..4 {
             assert_ready(&router).await;
             relay.stall_return.store(true, Ordering::SeqCst);
@@ -262,7 +271,10 @@ async fn readiness_query_error_detaches_connection(pool: PgPool) {
 async fn readiness_cancelled_caller_keeps_shared_check_until_cleanup(pool: PgPool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let relay = Relay::new(&pool, 4).await;
-        let router = app(AppState::with_test_pool(relay.pool.clone()));
+        let router = app(
+            AppState::with_test_pool(relay.pool.clone()),
+            Default::default(),
+        );
         assert_ready(&router).await;
         let before = relay.returns.load(Ordering::SeqCst);
         relay.hold.send(true).unwrap();

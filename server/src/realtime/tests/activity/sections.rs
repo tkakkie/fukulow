@@ -587,7 +587,7 @@ async fn lost_section_commit_reply_leaves_recovery_to_an_authorized_read(pool: P
         .unwrap();
     let mut state = f.state.clone();
     state.pool = proxy_pool.clone();
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let id = Uuid::new_v4();
     let response = request(
         &app,

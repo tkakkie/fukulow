@@ -1,5 +1,5 @@
 {
-  "sha256": "fe0ce1fa6796ccdcd6dd6fdf11a3c86f03d4d6baeba9582e31f5eaf4b8ff1afa",
+  "sha256": "8dbc50d689fd27da0ff33da347137553f49859cd97ff84a8e65fb2352a3dfdef",
   "frozen": {
     "version": 23,
     "date": "2026-11-28",
@@ -400,7 +400,7 @@
       },
       {
         "path": "server/src/auth.rs",
-        "sha256": "deb0e3a0b777ab81267310d041816533e0ff664068d126b47d1c77cb44414b0d"
+        "sha256": "628fd34dcd7a11f4beb9482908e20c507f22f59c8a29739dbb73482f7e1f21ec"
       },
       {
         "path": "server/src/auth/authorization.rs",

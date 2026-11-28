@@ -9,5 +9,6 @@ pub(super) use counts::{ListCounts, MissingPositionLog, list_counts};
 #[cfg(test)]
 pub(crate) use handlers::ChannelListQuery;
 pub use handlers::{MarkReadRequest, list_channels, mark_channel_read, mark_topic_read};
+pub(super) use list::visible_channels;
 pub use list::{ChannelList, UnreadChannel};
 pub use mark::ReadPosition;

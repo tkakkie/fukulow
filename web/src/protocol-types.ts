@@ -121,6 +121,7 @@ export type CoreResult = {
 export interface SyncCore {
   get(): SyncView
   request(id: number): Request | undefined
+  canDetachSend(request: number): boolean
   timer(id: number): Timer | undefined
   hasPending(): boolean
   historyIssue(): number | undefined

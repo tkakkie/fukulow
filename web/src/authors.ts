@@ -115,6 +115,15 @@ export function createAuthors(
       }
     },
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    seed(seeds: DisplayIdentity[]) {
+      if (closed || unavailable || seeds.length === 0) return
+      const next = new Map(identities)
+      for (const identity of seeds) {
+        if (!next.has(identity.id)) next.set(identity.id, identity)
+      }
+      identities = next
+      notify()
+    },
     /** #315 can refetch the Member list via load(); every success calls this hook. */
     replaceMembers(members: Member[]) {
       if (closed || unavailable) return

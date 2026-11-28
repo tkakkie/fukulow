@@ -75,7 +75,7 @@ async fn invite_revocation_upgrade_backfills_existing_rows_and_pages_tied_expiri
     assert_eq!(excluded.len(), 2);
     rows.retain(|(id, _)| !excluded.contains(id));
     rows.sort();
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     for (token, owner_role, sizes) in [
         (&owner, true, vec![100, 100, 50]),
         (&admin, false, vec![100, 25]),

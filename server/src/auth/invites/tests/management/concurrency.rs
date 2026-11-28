@@ -5,7 +5,7 @@ async fn invite_management_rechecks_role_activity_and_revision_under_lock(pool: 
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let i = invite(&app, org, &owner, "protected@example.invalid", Role::Member).await;
     for loss in ["demoted", "inactive", "stale"] {
         for delete in [false, true] {
@@ -132,7 +132,7 @@ async fn invite_revoke_and_accept_serialize_in_both_orders_without_partial_write
 ) {
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     for revoke_first in [true, false] {
         let email = format!("{}@new.invalid", Uuid::new_v4());
         let i = invite(&app, org, &owner, &email, Role::Member).await;
@@ -233,7 +233,7 @@ async fn other_issuers_invites_remain_manageable_and_revocation_is_permanent(poo
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
     let (_, issuer, _, issuer_token) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     let i = invite(
         &app,
         org,

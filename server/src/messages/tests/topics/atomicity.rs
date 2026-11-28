@@ -18,7 +18,7 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
     let delivery = state.message_delivery.clone();
     let mut queue = delivery.queue(org, (sender, 0), 256);
     queue.subscribe(channel);
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let key = Uuid::new_v4();
     let waiters = (0..CHANNEL_QUEUE_CAP)
         .map(|_| {
@@ -208,7 +208,7 @@ async fn topic_projection_reauthorizes_after_waiting_for_barrier(pool: PgPool) {
                 sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)").bind(org).bind(channel).bind(id).execute(&pool).await.unwrap();
             }
             let state = AppState::for_test(pool.clone()).await;
-            let app = crate::app(state);
+            let app = crate::app(state, Default::default());
             let message = sent(
                 &app,
                 &owner_token,

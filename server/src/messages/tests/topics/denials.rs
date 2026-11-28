@@ -265,7 +265,7 @@ async fn topic_rest_denial_matrix_has_positive_controls_and_authorization_before
         let token = member(&pool, other, viewer).await;
         let state = AppState::for_test(pool.clone()).await;
         let delivery = state.message_delivery.clone();
-        let app = crate::app(state);
+        let app = crate::app(state, Default::default());
         let key = Uuid::new_v4();
         let canonical = sent(
             &app,
