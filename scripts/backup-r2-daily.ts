@@ -1,5 +1,6 @@
 import { isAbsolute } from 'node:path'
-import { curlRunner, dailyBackup, objectTransport, readPrivateFile, recheckNewest } from './backup-r2.ts'
+import { curlRunner, readPrivateFile } from './backup-curl.ts'
+import { dailyBackup, objectTransport, recheckNewest } from './backup-r2.ts'
 import { discordNotifier } from './backup-notify.ts'
 import { acquireLocalLock, diagnostic, privateDirectory, SafeFailure, safeFailure } from './backup-safety.ts'
 

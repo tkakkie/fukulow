@@ -5,7 +5,6 @@ import { dirname, join } from 'node:path'
 import { privateDirectory, syncDirectory } from './backup-safety.ts'
 
 import { decodeState, validState, type StateStore } from './backup-checker-state.ts'
-export { checkerAlerts, type CheckerState, type StateStore } from './backup-checker-state.ts'
 export function fileStateStore(path: string, sync = syncDirectory): StateStore {
   const directory = dirname(path)
   return {

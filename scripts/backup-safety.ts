@@ -65,14 +65,3 @@ export function sweepPartials(directory: string): void {
     if (info.isDirectory() && info.uid === process.getuid?.() && (info.mode & 0o777) === 0o700) rmSync(path, { recursive: true })
   }
 }
-
-export type RunLock = <T>(work: () => Promise<T>) => Promise<T>
-// Used by local checker fakes; production checker uses a Durable Object lease.
-export function memoryRunLock(): RunLock {
-  let busy = false
-  return async work => {
-    if (busy) throw new SafeFailure('lock', 'busy')
-    busy = true
-    try { return await work() } finally { busy = false }
-  }
-}

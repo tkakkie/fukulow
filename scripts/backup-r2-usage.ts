@@ -1,10 +1,8 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { executeCurl, privateCurlConfig } from './backup-r2.ts'
-
+import { executeCurl, privateCurlConfig } from './backup-curl.ts'
 import type { AnalyticsClient } from './backup-usage-model.ts'
-export * from './backup-usage-model.ts'
 // The private curl config supplies the provider GraphQL endpoint and read-only
 // analytics authentication. Neither is put in arguments, tracked files or logs.
 export async function analyticsClient(configFile: string, execute = executeCurl): Promise<AnalyticsClient> {
