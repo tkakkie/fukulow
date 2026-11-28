@@ -1,5 +1,5 @@
 {
-  "sha256": "8a5d9b34776e8be72f01f76f96bb7efc7d165a4974ad26979bbd2cf1adc09b7c",
+  "sha256": "15b0c60e5c23a58659bf298f1aa2eecf17daf1f4df07e53bc92c924dd17ddaab",
   "frozen": {
     "version": 20,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -173,7 +173,7 @@
       },
       {
         "path": "load/launcher/launcher.ts",
-        "sha256": "d4be9eee7058a6aa29bb4f9c6e78c98bf685a7d1d3c40120c4dc1ff6596eb63c"
+        "sha256": "6b952dc404c53d67df9bcaa9329e1b4b0a3b1939042361d7af73545ffb5782f0"
       },
       {
         "path": "load/package-lock.json",
@@ -241,7 +241,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/manifest.ts",
-        "sha256": "411313d8fbfcbbf908c656d0644b877ac12e35625fd5de890125c551650e444f"
+        "sha256": "7f11894b65cd62a6d837fb75a0018c0998f8b31977bfed6765ed6beb952c495d"
       },
       {
         "path": "load/search-engines/d3r-leak/options.ts",
@@ -297,7 +297,7 @@
       },
       {
         "path": "load/search-engines/d3r/manifest.ts",
-        "sha256": "2297b2831a1f423b0a388aa0289ff49684ed8065c6941c8072775488f1cfd65c"
+        "sha256": "0d2dcf83e48e5c95b85f9e2a4a053fb4a5de76aa679de26f1e8d50b5fbef462c"
       },
       {
         "path": "load/search-engines/d3r/path.ts",

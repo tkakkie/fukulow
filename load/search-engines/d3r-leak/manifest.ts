@@ -11,7 +11,7 @@ import { bootstrap } from './samples.ts';
 
 export const root = fileURLToPath(new URL('../../../', import.meta.url));
 export const schemaCommit = '66e6e266477b1a860358b1d735ad271e7d4f6489';
-export const manifestFile = 'load/search-engines/manifest-d3r-leak-v20.json';
+export const manifestFile = 'load/search-engines/manifest-d3r-leak-v21.json';
 // Pinned to d3r v18: later d3r manifests add migrations outside the frozen #689 conditions.
 const d3rManifest = 'load/search-engines/manifest-v18.json';
 const harness = 'load/search-engines/d3r-leak';
@@ -37,7 +37,7 @@ export function snapshot(positiveK: number | null) {
     ...readdirSync(new URL('.', import.meta.url)).filter(file => file.endsWith('.ts') && !file.endsWith('.test.ts'))
       .map(file => `${harness}/${file}`),
   ];
-  return {version: 20, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze,
+  return {version: 21, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze,
     reviewedAssignments, positiveK,
     migrations: base.migrations, node: base.node,
     sourceHashes: [...new Set(inputs)].sort().map(path => ({path, sha256: hash(readSource(path))}))};
