@@ -131,12 +131,10 @@ export function createSync(options: SyncOptions) {
       input = { ...input, refreshMentionNames: true }
     const previous = state
     if (input.type === 'stop') {
-      composerDrafts.detachSubmitted((channel, id) =>
-        previous.channels[channel]?.pending.some(p => {
-          const request = core.request(p.request)
-          return p.clientMessageId === id && p.state !== 'unknown' && request !== undefined && !request.stale
-        }) ?? false,
-      )
+      composerDrafts.detachSubmitted((channel, id) => {
+        const request = previous.channels[channel]?.pending.find(p => p.clientMessageId === id)?.request
+        return request !== undefined && core.canDetachSend(request)
+      })
     }
     const previousRequest = input.type === 'history_failed' ? core.request(input.request) : undefined
     const result = core.step(input)
