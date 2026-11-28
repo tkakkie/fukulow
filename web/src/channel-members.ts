@@ -1,6 +1,7 @@
 import { createActivityTarget } from './activity'
 import * as api from './api'
-import { canLoadMemberList, memberError, type MemberListAccess } from './members'
+import { memberError } from './member-errors'
+import { canLoadMemberList, type MemberListAccess } from './members'
 import { createRequestDeadlines } from './request-deadlines'
 
 type Deps = Pick<typeof api, 'listChannelMembers' | 'addChannelMember' | 'removeChannelMember' | 'changeChannelManager'>

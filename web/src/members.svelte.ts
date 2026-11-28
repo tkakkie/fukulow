@@ -1,6 +1,6 @@
 import { invitesAdapter } from './invites.svelte'
 import { createSubscriber } from 'svelte/reactivity'
-import { createMembers, createInviteAcceptance } from './members'
+import type { createMembers } from './members'
 import { authorsAdapter } from './authors.svelte'
 
 export function membersAdapter(controller: ReturnType<typeof createMembers>) {
@@ -15,8 +15,4 @@ export function membersAdapter(controller: ReturnType<typeof createMembers>) {
     load: controller.load, activate: controller.activate, scheduleActivate: controller.scheduleActivate, refreshIfActive: controller.refreshIfActive,
     invite: controller.invite, role: controller.role, deactivate: controller.deactivate, unavailable: controller.unavailable, close: controller.close,
   }
-}
-export function inviteAcceptanceAdapter(controller: ReturnType<typeof createInviteAcceptance>) {
-  const subscribe = createSubscriber(update => controller.subscribe(update))
-  return { get state() { subscribe(); return controller.get() }, accept: controller.accept, signOutAndContinue: controller.signOutAndContinue }
 }
