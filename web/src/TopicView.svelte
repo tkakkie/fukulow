@@ -23,11 +23,8 @@
     type ScrollAction,
     type ScrollAnchor,
   } from './timeline-scroll'
-  import {
-    createTimelineViewController,
-    isDocumentVisible,
-    type TimelineRowWindow,
-  } from './timeline-view'
+  import { isDocumentVisible } from './timeline-presentation'
+  import { createTimelineViewController, type TimelineRowWindow } from './timeline-view'
   import type { TopicsAdapter } from './topics.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
   import type { UnreadAdapter } from './unread.svelte'
@@ -221,25 +218,23 @@
     },
     afterUpdate: tick,
     isPositioning: () => positioning,
-    getPresentation: () =>
-      unread
-        ? {
-            awaitingInitialSenders,
-            viewSelected,
-            targetUnavailable,
-            expectedTopicId: topicId,
-            entry: uState?.entry ?? null,
-            searchActive: Boolean(search),
-            searchReady: search?.view?.status === 'ready',
-            initialScrollApplied,
-            skipUnreadVisit,
-            needsOlderUnreadPage,
-            entryPositionAbandoned,
-            firstUnreadMessageId,
-            scrolledFirstUnreadId,
-            onPresented: (visitId, seqs) => unread.presented(visitId, seqs),
-          }
-        : null,
+    presentation: {
+      isEnabled: () => Boolean(unread),
+      isAwaitingInitialSenders: () => awaitingInitialSenders,
+      isViewSelected: () => viewSelected,
+      isTargetUnavailable: () => targetUnavailable,
+      getExpectedTopicId: () => topicId,
+      getEntry: () => uState?.entry ?? null,
+      isSearchActive: () => Boolean(search),
+      isSearchReady: () => search?.view?.status === 'ready',
+      isInitialScrollApplied: () => initialScrollApplied,
+      isSkipUnreadVisit: () => skipUnreadVisit,
+      needsOlderUnreadPage: () => needsOlderUnreadPage,
+      isEntryPositionAbandoned: () => entryPositionAbandoned,
+      getFirstUnreadMessageId: () => firstUnreadMessageId,
+      getScrolledFirstUnreadId: () => scrolledFirstUnreadId,
+      onPresented: (visitId, seqs) => unread?.presented(visitId, seqs),
+    },
     search: {
       isActive: () => Boolean(search),
       jumpToLatest: () => {

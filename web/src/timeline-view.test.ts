@@ -1,11 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { TimelinePresentationSource } from './timeline-presentation'
 import { createTimelineScrollController } from './timeline-scroll'
-import {
-  createTimelineViewController,
-  isDocumentVisible,
-  type TimelinePresentationState,
-  type TimelineRowWindow,
-} from './timeline-view'
+import { createTimelineViewController, type TimelineRowWindow } from './timeline-view'
+import { deferred } from './unread-test-helpers'
 
 type FakeRow = {
   id: string
@@ -34,16 +31,18 @@ function makeFakeRowNode(row: FakeRow): HTMLElement {
   } as unknown as HTMLElement
 }
 
-function makeFakeScrollContainer(opts: {
-  rows?: FakeRow[]
-  top?: number
-  bottom?: number
-  width?: number
-  height?: number
-  scrollTop?: number
-  scrollHeight?: number
-  clientHeight?: number
-} = {}) {
+function makeFakeScrollContainer(
+  opts: {
+    rows?: FakeRow[]
+    top?: number
+    bottom?: number
+    width?: number
+    height?: number
+    scrollTop?: number
+    scrollHeight?: number
+    clientHeight?: number
+  } = {},
+) {
   let rows = opts.rows ?? []
   const top = opts.top ?? 0
   const height = opts.height ?? 400
@@ -104,25 +103,44 @@ function makeKeyEvent(rowId: string | null, key: string): KeyboardEvent {
   } as unknown as KeyboardEvent
 }
 
+function makeReadyPresentation(
+  expectedTopicId: string | null,
+  onPresented: (visitId: symbol, seqs: number[]) => void,
+  isSearchActive: () => boolean = () => false,
+): TimelinePresentationSource {
+  const entry = {
+    id: Symbol('visit'),
+    scope: { topicId: expectedTopicId },
+    boundary: 5,
+    unreadAtEntry: 0,
+  }
+  return {
+    isEnabled: () => true,
+    isAwaitingInitialSenders: () => false,
+    isViewSelected: () => true,
+    isTargetUnavailable: () => false,
+    getExpectedTopicId: () => expectedTopicId,
+    getEntry: () => entry,
+    isSearchActive,
+    isSearchReady: () => true,
+    isInitialScrollApplied: () => true,
+    isSkipUnreadVisit: () => false,
+    needsOlderUnreadPage: () => false,
+    isEntryPositionAbandoned: () => false,
+    getFirstUnreadMessageId: () => null,
+    getScrolledFirstUnreadId: () => null,
+    onPresented,
+  }
+}
+
 const origDocumentDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'document')
 const origCssDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'CSS')
 
-function setVisibilityState(state: string | undefined) {
-  Object.defineProperty(globalThis, 'document', {
-    configurable: true,
-    value: { visibilityState: state },
-  })
-}
-
-function clearDocument() {
-  Object.defineProperty(globalThis, 'document', {
-    configurable: true,
-    value: undefined,
-  })
-}
-
 beforeEach(() => {
-  setVisibilityState('visible')
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: { visibilityState: 'visible' },
+  })
   Object.defineProperty(globalThis, 'CSS', {
     configurable: true,
     value: { escape: (s: string) => s },
@@ -142,207 +160,8 @@ afterEach(() => {
   }
 })
 
-describe('timeline-view: isDocumentVisible', () => {
-  it('returns true when document is absent, visible, or visibilityState is undefined, and false when hidden', () => {
-    clearDocument()
-    expect(isDocumentVisible()).toBe(true)
-
-    setVisibilityState('visible')
-    expect(isDocumentVisible()).toBe(true)
-
-    setVisibilityState(undefined)
-    expect(isDocumentVisible()).toBe(true)
-
-    setVisibilityState('hidden')
-    expect(isDocumentVisible()).toBe(false)
-  })
-})
-
-describe('timeline-view: reportPresented per scope (docs/ui.md §8)', () => {
-  function basePresentation(
-    expectedTopicId: string | null,
-    overrides: Partial<TimelinePresentationState> = {},
-  ): TimelinePresentationState {
-    return {
-      awaitingInitialSenders: false,
-      viewSelected: true,
-      targetUnavailable: false,
-      expectedTopicId,
-      entry: {
-        id: Symbol('visit'),
-        scope: { topicId: expectedTopicId },
-        boundary: 5,
-        unreadAtEntry: 0,
-      },
-      searchActive: false,
-      searchReady: false,
-      initialScrollApplied: true,
-      skipUnreadVisit: false,
-      needsOlderUnreadPage: false,
-      entryPositionAbandoned: false,
-      firstUnreadMessageId: null,
-      scrolledFirstUnreadId: null,
-      onPresented: vi.fn(),
-      ...overrides,
-    }
-  }
-
-  for (const scope of [
-    { label: 'main', topicId: null, wrongTopicId: 't-other' },
-    { label: 'topic', topicId: 't-1', wrongTopicId: null },
-  ] as const) {
-    it(`[${scope.label}] reports visible confirmed seqs when ready and rejects mismatched scope`, () => {
-      const scrollController = createTimelineScrollController()
-      const container = makeFakeScrollContainer({
-        rows: [
-          { id: 'm-1', seq: 1, top: -100, bottom: -20 },
-          { id: 'm-2', seq: 2, top: 20, bottom: 80 },
-          { id: 'm-3', seq: 3, top: 90, bottom: 150 },
-        ],
-      })
-      let presentation = basePresentation(scope.topicId)
-      const ctrl = createTimelineViewController({
-        scrollController,
-        getScrollEl: () => container.el,
-        getRowWindow: () => null,
-        getFocusableMessageIds: () => ['m-1', 'm-2', 'm-3'],
-        setActiveRowId: () => {},
-        afterUpdate: async () => {},
-        getPresentation: () => presentation,
-      })
-
-      ctrl.reportPresented()
-      expect(presentation.onPresented).toHaveBeenCalledTimes(1)
-      expect(presentation.onPresented).toHaveBeenCalledWith(presentation.entry!.id, [2, 3])
-
-      // Mismatched entry scope is rejected
-      const mismatched = basePresentation(scope.topicId, {
-        entry: { id: Symbol('wrong'), scope: { topicId: scope.wrongTopicId }, boundary: 5, unreadAtEntry: 0 },
-      })
-      presentation = mismatched
-      ctrl.reportPresented()
-      expect(mismatched.onPresented).not.toHaveBeenCalled()
-
-      scrollController.destroy()
-    })
-  }
-
-  it('enforces all presentation guards (senders, display, unavailable, visibility, search, unread positioning)', () => {
-    const scrollController = createTimelineScrollController()
-    const container = makeFakeScrollContainer({
-      rows: [{ id: 'm-1', seq: 1, top: 10, bottom: 60 }],
-    })
-    let presentation: TimelinePresentationState | null = basePresentation(null)
-    let scrollEl: HTMLElement | null = container.el
-    const ctrl = createTimelineViewController({
-      scrollController,
-      getScrollEl: () => scrollEl,
-      getRowWindow: () => null,
-      getFocusableMessageIds: () => ['m-1'],
-      setActiveRowId: () => {},
-      afterUpdate: async () => {},
-      getPresentation: () => presentation,
-    })
-
-    const assertBlocked = (patch: Partial<TimelinePresentationState>) => {
-      const onPresented = vi.fn()
-      presentation = basePresentation(null, { ...patch, onPresented })
-      ctrl.reportPresented()
-      expect(onPresented).not.toHaveBeenCalled()
-    }
-
-    assertBlocked({ awaitingInitialSenders: true })
-    assertBlocked({ viewSelected: false })
-    assertBlocked({ targetUnavailable: true })
-    assertBlocked({ entry: null })
-
-    // Hidden document blocks reporting
-    setVisibilityState('hidden')
-    assertBlocked({})
-    setVisibilityState('visible')
-
-    // Zero-geometry container blocks reporting
-    scrollEl = makeFakeScrollContainer({ width: 0, height: 0, rows: [{ id: 'm-1', seq: 1, top: 10, bottom: 60 }] }).el
-    assertBlocked({})
-    scrollEl = container.el
-
-    // Search requires initialScrollApplied && searchReady
-    assertBlocked({ searchActive: true, searchReady: false, initialScrollApplied: true })
-    assertBlocked({ searchActive: true, searchReady: true, initialScrollApplied: false })
-    const onSearchOk = vi.fn()
-    presentation = basePresentation(null, {
-      searchActive: true,
-      searchReady: true,
-      initialScrollApplied: true,
-      onPresented: onSearchOk,
-    })
-    ctrl.reportPresented()
-    expect(onSearchOk).toHaveBeenCalledWith(presentation.entry!.id, [1])
-
-    // Non-search, !skipUnreadVisit guards
-    assertBlocked({ entry: { id: Symbol('v'), scope: { topicId: null }, boundary: null, unreadAtEntry: 0 } })
-    assertBlocked({ needsOlderUnreadPage: true })
-    assertBlocked({ initialScrollApplied: false })
-
-    // Unread at entry (> 0) requires scrolledFirstUnreadId === firstUnreadMessageId unless abandoned
-    assertBlocked({
-      entry: { id: Symbol('v'), scope: { topicId: null }, boundary: 5, unreadAtEntry: 2 },
-      firstUnreadMessageId: 'm-1',
-      scrolledFirstUnreadId: null,
-    })
-    assertBlocked({
-      entry: { id: Symbol('v'), scope: { topicId: null }, boundary: 5, unreadAtEntry: 2 },
-      firstUnreadMessageId: null,
-      scrolledFirstUnreadId: null,
-    })
-    const onUnreadMatched = vi.fn()
-    presentation = basePresentation(null, {
-      entry: { id: Symbol('v'), scope: { topicId: null }, boundary: 5, unreadAtEntry: 2 },
-      firstUnreadMessageId: 'm-1',
-      scrolledFirstUnreadId: 'm-1',
-      onPresented: onUnreadMatched,
-    })
-    ctrl.reportPresented()
-    expect(onUnreadMatched).toHaveBeenCalledTimes(1)
-
-    // Abandoned entry position falls back to initialScrollApplied
-    assertBlocked({
-      entry: { id: Symbol('v'), scope: { topicId: null }, boundary: 5, unreadAtEntry: 2 },
-      entryPositionAbandoned: true,
-      initialScrollApplied: false,
-    })
-    const onAbandonedReady = vi.fn()
-    presentation = basePresentation(null, {
-      entry: { id: Symbol('v'), scope: { topicId: null }, boundary: 5, unreadAtEntry: 2 },
-      entryPositionAbandoned: true,
-      initialScrollApplied: true,
-      onPresented: onAbandonedReady,
-    })
-    ctrl.reportPresented()
-    expect(onAbandonedReady).toHaveBeenCalledTimes(1)
-
-    // skipUnreadVisit bypasses boundary / initialScrollApplied checks
-    const onSkipUnread = vi.fn()
-    presentation = basePresentation(null, {
-      entry: { id: Symbol('v'), scope: { topicId: null }, boundary: null, unreadAtEntry: 3 },
-      skipUnreadVisit: true,
-      initialScrollApplied: false,
-      onPresented: onSkipUnread,
-    })
-    ctrl.reportPresented()
-    expect(onSkipUnread).toHaveBeenCalledTimes(1)
-
-    // Empty visible confirmed seqs does not call onPresented
-    container.setRows([])
-    const onEmpty = vi.fn()
-    presentation = basePresentation(null, { onPresented: onEmpty })
-    ctrl.reportPresented()
-    expect(onEmpty).not.toHaveBeenCalled()
-
-    scrollController.destroy()
-  })
-
-  it('ReplyPanel configuration (no getPresentation) never measures or reports a read position (docs/ui.md §8)', async () => {
+describe('timeline-view: ReplyPanel presentation boundary (docs/ui.md §8)', () => {
+  it('ReplyPanel configuration (no presentation) never measures or reports a read position', async () => {
     const scrollController = createTimelineScrollController()
     const container = makeFakeScrollContainer({
       rows: [
@@ -510,18 +329,18 @@ describe('timeline-view: revealScrollTarget, captureCurrentAnchor and applyScrol
     scrollController.destroy()
   })
 
-  it('applyScrollAction reveals unmounted targets then applies scroll and reports presented, while reply mode applies directly', async () => {
+  it('applyScrollAction waits for async reveal to settle before applying scroll and reporting presented, while reply mode applies directly', async () => {
     const scrollController = createTimelineScrollController()
     const container = makeFakeScrollContainer({
       scrollTop: 200,
       rows: [{ id: 'm-1', seq: 1, top: 0, bottom: 50 }],
     })
     const onPresented = vi.fn()
-    const reveal: TimelineRowWindow['reveal'] = vi.fn(async (id: string) => {
-      container.setRows([
-        { id: 'm-1', seq: 1, top: 0, bottom: 50 },
-        { id, seq: 2, top: 150, bottom: 210 },
-      ])
+    const revealGate = deferred<void>()
+    let revealedId: string | null = null
+    const reveal: TimelineRowWindow['reveal'] = vi.fn((id: string) => {
+      revealedId = id
+      return revealGate.promise
     })
     const mainCtrl = createTimelineViewController({
       scrollController,
@@ -530,26 +349,22 @@ describe('timeline-view: revealScrollTarget, captureCurrentAnchor and applyScrol
       getFocusableMessageIds: () => ['m-1', 'm-2'],
       setActiveRowId: () => {},
       afterUpdate: async () => {},
-      getPresentation: () => ({
-        awaitingInitialSenders: false,
-        viewSelected: true,
-        targetUnavailable: false,
-        expectedTopicId: null,
-        entry: { id: Symbol('v'), scope: { topicId: null }, boundary: 5, unreadAtEntry: 0 },
-        searchActive: false,
-        searchReady: false,
-        initialScrollApplied: true,
-        skipUnreadVisit: false,
-        needsOlderUnreadPage: false,
-        entryPositionAbandoned: false,
-        firstUnreadMessageId: null,
-        scrolledFirstUnreadId: null,
-        onPresented,
-      }),
+      presentation: makeReadyPresentation(null, onPresented),
     })
 
     mainCtrl.applyScrollAction('preserve_anchor', { messageId: 'm-2', offsetTop: 10 })
     expect(reveal).toHaveBeenCalledWith('m-2')
+    // Before reveal settles, scrollTop must stay untouched and presentation must not fire.
+    await Promise.resolve()
+    expect(container.el.scrollTop).toBe(200)
+    expect(onPresented).not.toHaveBeenCalled()
+
+    // Mount the revealed row asynchronously and resolve reveal.
+    container.setRows([
+      { id: 'm-1', seq: 1, top: 0, bottom: 50 },
+      { id: revealedId!, seq: 2, top: 150, bottom: 210 },
+    ])
+    revealGate.resolve()
     await Promise.resolve()
     await Promise.resolve()
     // 200 + (150 - 10) = 340
@@ -596,22 +411,7 @@ describe('timeline-view: jumpToBottom and loadOlderWithAnchor per scope', () => 
       afterUpdate: async () => {
         events.push('tick')
       },
-      getPresentation: () => ({
-        awaitingInitialSenders: false,
-        viewSelected: true,
-        targetUnavailable: false,
-        expectedTopicId: 't-1',
-        entry: { id: Symbol('t'), scope: { topicId: 't-1' }, boundary: 5, unreadAtEntry: 0 },
-        searchActive,
-        searchReady: true,
-        initialScrollApplied: true,
-        skipUnreadVisit: false,
-        needsOlderUnreadPage: false,
-        entryPositionAbandoned: false,
-        firstUnreadMessageId: null,
-        scrolledFirstUnreadId: null,
-        onPresented,
-      }),
+      presentation: makeReadyPresentation('t-1', onPresented, () => searchActive),
       search: {
         isActive: () => searchActive,
         jumpToLatest: () => {
@@ -662,6 +462,53 @@ describe('timeline-view: jumpToBottom and loadOlderWithAnchor per scope', () => 
     hasNewer = true
     await ctrl.jumpToBottom()
     expect(events).toEqual(['loadLatest', 'tick', 'presented'])
+
+    scrollController.destroy()
+  })
+
+  it('jumpToBottom aborts without scrolling or reporting presented if search reopens during the second afterUpdate()', async () => {
+    const scrollController = createTimelineScrollController()
+    const container = makeFakeScrollContainer({
+      scrollTop: 40,
+      scrollHeight: 900,
+      rows: [{ id: 'm-1', seq: 1, top: 10, bottom: 60 }],
+    })
+    const events: string[] = []
+    let searchActive = true
+    let tickCount = 0
+    const onPresented = vi.fn(() => events.push('presented'))
+
+    const ctrl = createTimelineViewController({
+      scrollController,
+      getScrollEl: () => container.el,
+      getRowWindow: () => null,
+      getFocusableMessageIds: () => ['m-1'],
+      setActiveRowId: () => {},
+      afterUpdate: async () => {
+        tickCount += 1
+        events.push(`tick-${tickCount}`)
+        if (tickCount === 2) {
+          searchActive = true
+        }
+      },
+      presentation: makeReadyPresentation(null, onPresented, () => searchActive),
+      search: {
+        isActive: () => searchActive,
+        jumpToLatest: () => {
+          events.push('search.latest')
+          searchActive = false
+        },
+        loadOlder: () => {},
+      },
+      loadLatest: async () => {
+        events.push('loadLatest')
+      },
+    })
+
+    await ctrl.jumpToBottom()
+    expect(events).toEqual(['search.latest', 'tick-1', 'loadLatest', 'tick-2'])
+    expect(container.el.scrollTop).toBe(40)
+    expect(onPresented).not.toHaveBeenCalled()
 
     scrollController.destroy()
   })
