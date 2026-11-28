@@ -1,4 +1,5 @@
 use super::*;
+use crate::messages::row::TOPIC_MESSAGE_COLUMNS;
 
 // Reconstruct every Topic's position BEFORE the exclusive boundary. Current
 // topics.last_seq cannot enumerate Topics that moved after W. Counts use the same
@@ -47,7 +48,7 @@ CROSS JOIN LATERAL (
 ORDER BY p.last_seq DESC
 "#,
         channels::member_visibility_sql(false),
-        message_columns = message_columns!(topic),
+        message_columns = TOPIC_MESSAGE_COLUMNS.as_str(),
     );
     mentions::page_sql(&sql, "p.last_seq DESC")
 }

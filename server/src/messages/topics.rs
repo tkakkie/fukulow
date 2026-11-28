@@ -1,4 +1,5 @@
 use super::page::DirectionalPage;
+use super::row::MESSAGE_COLUMNS;
 use super::*;
 
 pub(crate) mod projection;
@@ -232,7 +233,7 @@ pub async fn topic_history(
                 "SELECT {columns} \
                 FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
                 ORDER BY seq {order} LIMIT $5",
-                columns = message_columns!(),
+                columns = MESSAGE_COLUMNS.as_str(),
             );
             let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
             let messages = sqlx::query(&sql)

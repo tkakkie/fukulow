@@ -3,8 +3,8 @@ pub(crate) mod handlers;
 pub use handlers::list_channel_events;
 
 use super::{
-    Message, MessageError, REPLAY_PAGE_SIZE, check_visibility, mentions, message_columns,
-    message_from_row,
+    Message, MessageError, REPLAY_PAGE_SIZE, check_visibility, mentions, message_from_row,
+    row::REPLAY_MESSAGE_COLUMNS,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -162,7 +162,7 @@ fn page_sql(channel: usize, authorized: bool) -> String {
             OFFSET 0
         ) m ON true
         ORDER BY l.event_seq"#,
-        message_columns = message_columns!(replay)
+        message_columns = REPLAY_MESSAGE_COLUMNS.as_str()
     )
 }
 

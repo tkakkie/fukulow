@@ -51,7 +51,7 @@ pub(crate) mod replies;
 pub use replies::counts::{ReplyCount, ReplyCountPage, ReplyCountRequest, reply_counts};
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 mod row;
-use row::{message_columns, message_from_row};
+use row::message_from_row;
 pub mod search;
 pub(crate) mod send;
 pub use send::send_message;

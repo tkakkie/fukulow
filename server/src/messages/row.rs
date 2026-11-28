@@ -1,31 +1,34 @@
+use std::sync::LazyLock;
+
 use sqlx::{Row, postgres::PgRow};
 
 use super::Message;
 
-// Keep the existing SQL whitespace for each query layout. Callers supply
-// mentions and history_generation separately.
-macro_rules! message_columns {
-    () => {
-        message_columns!(@columns "", " ", " ", " ", " ")
-    };
-    (topic) => {
-        message_columns!(@columns "m.", " ", "\n    ", " ", "\n    ")
-    };
-    (replay) => {
-        message_columns!(@columns "m.", "", "", "\n            ", "\n            ")
-    };
-    (@columns $prefix:literal, $space:literal, $before_sender:literal, $before_reply:literal, $before_timestamp:literal) => {
-        concat!(
-            $prefix, "id,", $space, $prefix, "channel_id,", $space, $prefix, "seq,", $space,
-            $prefix, "version,", $space, $prefix, "deleted,", $space, $prefix, "client_message_id,",
-            $before_sender, $prefix, "sender,", $space, $prefix, "body,", $space, $prefix, "topic_id,",
-            $before_reply, $prefix, "reply_to_id AS reply_to,", $space, $prefix, "reply_root_id,",
-            $before_timestamp, "to_char(", $prefix, "created_at AT TIME ZONE 'UTC',", $space,
-            r#"'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at"#
-        )
-    };
+pub(super) static MESSAGE_COLUMNS: LazyLock<String> =
+    LazyLock::new(|| message_columns("", " ", " ", " ", " "));
+pub(super) static REPLAY_MESSAGE_COLUMNS: LazyLock<String> =
+    LazyLock::new(|| message_columns("m.", "", "", "\n            ", "\n            "));
+#[cfg(test)]
+pub(super) static TOPIC_MESSAGE_COLUMNS: LazyLock<String> =
+    LazyLock::new(|| message_columns("m.", " ", "\n    ", " ", "\n    "));
+
+// Preserve each layout's SQL bytes. The production Topic page keeps its projection
+// literal for load/unread-init's source extractor.
+fn message_columns(
+    prefix: &str,
+    space: &str,
+    before_sender: &str,
+    before_reply: &str,
+    before_timestamp: &str,
+) -> String {
+    format!(
+        "{prefix}id,{space}{prefix}channel_id,{space}{prefix}seq,{space}\
+        {prefix}version,{space}{prefix}deleted,{space}{prefix}client_message_id,\
+        {before_sender}{prefix}sender,{space}{prefix}body,{space}{prefix}topic_id,\
+        {before_reply}{prefix}reply_to_id AS reply_to,{space}{prefix}reply_root_id,\
+        {before_timestamp}to_char({prefix}created_at AT TIME ZONE 'UTC',{space}'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at"
+    )
 }
-pub(super) use message_columns;
 
 pub(super) fn message_from_row(row: &PgRow) -> Result<Message, sqlx::Error> {
     let deleted: bool = row.try_get("deleted")?;

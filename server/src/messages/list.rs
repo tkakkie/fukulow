@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use axum::{
     extract::{
         Path, Query, State,
@@ -9,12 +11,28 @@ use uuid::Uuid;
 
 use super::{
     ListMessagesQuery, MessageError, MessagePage, ValidateListMessages, history, mentions,
-    message_columns, message_from_row, no_store_json, page::DirectionalPage,
+    message_from_row, no_store_json, page::DirectionalPage, row::MESSAGE_COLUMNS,
 };
 use crate::{
     AppState,
     auth::{Auth, ErrorBody},
 };
+
+static ASCENDING_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {} FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
+         ORDER BY seq ASC LIMIT $4",
+        MESSAGE_COLUMNS.as_str(),
+    )
+});
+
+static DESCENDING_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {} FROM messages WHERE organization_id = $1 AND channel_id = $2 \
+         AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4",
+        MESSAGE_COLUMNS.as_str(),
+    )
+});
 
 /// List visible channel messages using exclusive per-channel sequence cursors.
 /// after_seq and before_seq are mutually exclusive; neither selects the latest page.
@@ -56,19 +74,18 @@ pub async fn list_messages(
         async |tx: &mut sqlx::PgConnection, history_generation, w| {
             let page = DirectionalPage::new(&query, limit);
             let sql = if page.ascending {
-                concat!(
-                    "SELECT ", message_columns!(),
-                    " FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
-                     ORDER BY seq ASC LIMIT $4"
-                )
+                ASCENDING_SQL.as_str()
             } else {
-                concat!(
-                    "SELECT ", message_columns!(),
-                    " FROM messages WHERE organization_id = $1 AND channel_id = $2 \
-                       AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
-                )
+                DESCENDING_SQL.as_str()
             };
-            let sql = mentions::page_sql(sql, if page.ascending { "p.seq ASC" } else { "p.seq DESC" });
+            let sql = mentions::page_sql(
+                sql,
+                if page.ascending {
+                    "p.seq ASC"
+                } else {
+                    "p.seq DESC"
+                },
+            );
             let messages = sqlx::query(&sql)
                 .bind(organization_id)
                 .bind(channel_id)
@@ -79,7 +96,12 @@ pub async fn list_messages(
                 .fetch_all(&mut *tx)
                 .await?;
             let (messages, has_more) = page.finish(messages);
-            Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
+            Ok(no_store_json(MessagePage {
+                history_generation,
+                as_of_seq: w,
+                messages,
+                has_more,
+            }))
         },
     )
     .await?;

@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+
+use super::row::MESSAGE_COLUMNS;
 use super::*;
 
 pub(crate) mod counts;
@@ -71,15 +74,15 @@ pub(super) async fn chain_version(
 
 // Separate index branches avoid scanning unrelated Channel Messages or traversing
 // ancestors. Each branch yields at most limit+1 rows, including the null-root row.
-pub(super) const PAGE_SQL: &str = concat!(
-    "SELECT * FROM ((SELECT ",
-    message_columns!(),
-    " FROM messages WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq>$4 AND seq<=$6) \
-     UNION ALL (SELECT ",
-    message_columns!(),
-    " FROM messages WHERE organization_id=$1 AND channel_id=$2 AND reply_root_id=$3 \
-      AND seq>$4 AND seq<=$6 ORDER BY seq LIMIT $5)) chain ORDER BY seq LIMIT $5"
-);
+pub(super) static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
+    let columns = MESSAGE_COLUMNS.as_str();
+    format!(
+        "SELECT * FROM ((SELECT {columns} FROM messages WHERE organization_id=$1 AND channel_id=$2 \
+         AND id=$3 AND seq>$4 AND seq<=$6) \
+         UNION ALL (SELECT {columns} FROM messages WHERE organization_id=$1 AND channel_id=$2 \
+         AND reply_root_id=$3 AND seq>$4 AND seq<=$6 ORDER BY seq LIMIT $5)) chain ORDER BY seq LIMIT $5"
+    )
+});
 
 /// Fetch the root and all descendants from any anchor in the chain. No depth cap.
 /// after_seq defaults to 0 and is exclusive; limit defaults to 50, maximum 200.
@@ -130,7 +133,7 @@ pub async fn reply_chain(
             .await?
             .ok_or(MessageError::ReplyChainNotFound)?;
             let chain_version = chain_version(tx, organization, channel, root_id, w).await?;
-            let mut messages = sqlx::query(&mentions::page_sql(PAGE_SQL, "p.seq"))
+            let mut messages = sqlx::query(&mentions::page_sql(PAGE_SQL.as_str(), "p.seq"))
                 .bind(organization)
                 .bind(channel)
                 .bind(root_id)

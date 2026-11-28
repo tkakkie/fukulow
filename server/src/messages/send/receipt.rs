@@ -1,10 +1,12 @@
+use std::sync::LazyLock;
+
 use uuid::Uuid;
 
 use crate::{
     channels,
     messages::{
-        Message, MessageError, SendMessageRequest, history, mentions, message_columns,
-        message_from_row,
+        Message, MessageError, SendMessageRequest, history, mentions, message_from_row,
+        row::MESSAGE_COLUMNS,
     },
 };
 
@@ -60,22 +62,25 @@ pub(super) async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
     input: &SendMessageRequest,
 ) -> Result<Option<(Message, bool)>, sqlx::Error> {
     use sqlx::Row;
-    sqlx::query(&mentions::page_sql(
-        concat!(
-            "SELECT ", message_columns!(),
-            ", send_digest = fukulow_send_digest($4, $5, lower($6 COLLATE \"C\"), $7) AS same_intent \
-             FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3"
-        ),
-        "p.seq",
-    ))
-    .bind(organization_id)
-    .bind(sender)
-    .bind(input.client_message_id)
-    .bind(channel_id)
-    .bind(&input.body)
-    .bind(input.topic_name.as_deref())
-    .bind(input.reply_to)
-    .try_map(|row| Ok((message_from_row(&row)?, row.try_get("same_intent")?)))
-    .fetch_optional(executor)
-    .await
+    static SQL: LazyLock<String> = LazyLock::new(|| {
+        mentions::page_sql(
+            &format!(
+                "SELECT {}, send_digest = fukulow_send_digest($4, $5, lower($6 COLLATE \"C\"), $7) AS same_intent \
+                 FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
+                MESSAGE_COLUMNS.as_str(),
+            ),
+            "p.seq",
+        )
+    });
+    sqlx::query(SQL.as_str())
+        .bind(organization_id)
+        .bind(sender)
+        .bind(input.client_message_id)
+        .bind(channel_id)
+        .bind(&input.body)
+        .bind(input.topic_name.as_deref())
+        .bind(input.reply_to)
+        .try_map(|row| Ok((message_from_row(&row)?, row.try_get("same_intent")?)))
+        .fetch_optional(executor)
+        .await
 }
