@@ -199,7 +199,13 @@ async fn denied_recipient(pool: PgPool, denial: &str) {
             read_seq: 1,
         },
     ] {
-        delivery.spawn(f.state.pool.clone(), f.organization, event.clone(), None);
+        delivery.spawn(
+            f.state.pool.clone(),
+            f.organization,
+            event.clone(),
+            None,
+            PublicationFence::default(),
+        );
         delivery.drained().await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), allowed.next())
@@ -487,6 +493,52 @@ async fn dm_peer_deactivation_reactivation_and_rename_invalidate_only_current_vi
     assert!(events.contains(&gained(channel)));
     assert!(events.contains(&json!({"type":"members_changed"})));
     assert!(notices(&f, &mut outsider).await.is_empty());
+}
+
+#[fukulow_test::test]
+async fn target_change_keeps_dm_peer_notices_within_the_commit_epoch_snapshot(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (peer, _) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, peer).await;
+    assert_eq!(
+        open_dm(&f, &f.token, peer, false).await.status(),
+        StatusCode::CREATED
+    );
+    let mut early = connect(&f, &f.token).await;
+    notices(&f, &mut early).await;
+    let gate = crate::channels::activity::pause_member(
+        f.organization,
+        Uuid::nil(),
+        "target_state",
+        Some(peer),
+    );
+
+    let response = request(
+        &f.app,
+        "POST",
+        &format!("/api/v1/orgs/{}/members/{peer}/deactivate", f.organization),
+        &f.token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    gate.entered().await;
+    let mut late = connect(&f, &f.token).await;
+    gate.release();
+
+    let events = notices(&f, &mut early).await;
+    assert!(events.contains(&changed()), "{events:?}");
+    assert!(
+        events.contains(&json!({"type":"members_changed"})),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&json!({"type":"channel_members_changed","channel_id":private})),
+        "{events:?}"
+    );
+    assert!(notices(&f, &mut late).await.is_empty());
 }
 
 #[fukulow_test::test]
