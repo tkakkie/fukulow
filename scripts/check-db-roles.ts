@@ -1,11 +1,12 @@
 // Disposable regression for migration preflight, password handling and external PostgreSQL.
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
+import { psql as runPsql, run } from './compose-harness.ts'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
 const name = `fukulow-role-check-${randomUUID().slice(0, 8)}`
@@ -13,10 +14,10 @@ const image = process.env.CHECK_COMPOSE_IMAGE || 'fukulow-app'
 const env = { PATH: process.env.PATH, COMPOSE_DISABLE_ENV_FILE: '1',
   LOAD_PROJECT: name, LOAD_PORT: '18194', LOAD_DB_PASSWORD: 'role-owner-test-only',
   LOAD_APP_PASSWORD: 'role-init-test-only', LOAD_SETUP_TOKEN: 'role-setup-test-only' }
-const run = (...args: string[]) => execFileSync('docker', args,
-  { cwd, env, encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }).trim()
-const load = JSON.parse(run('compose', '--env-file', '/dev/null', '-f', 'load/compose.yml', 'config', '--format', 'json'))
-const sql = (query: string) => run('exec', name, 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1', '-Atc', query)
+const dockerOptions = { cwd, env, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }
+const docker = (...args: string[]) => run('docker', args, dockerOptions).stdout.trim()
+const load = JSON.parse(docker('compose', '--env-file', '/dev/null', '-f', 'load/compose.yml', 'config', '--format', 'json'))
+const sql = (query: string) => runPsql(['exec', name], ['-U', 'fukulow', '-d', 'fukulow', '-Atc', query], dockerOptions).stdout.trim()
 const externalPassword = "external-app-test-only-'\\"
 const passwords = ["role-bound-test-only-'\\; DROP TABLE users; --", 'role-rotated-test-only', env.LOAD_APP_PASSWORD,
   'role-rejected-test-only', 'role-unprivileged-test-only', externalPassword]
@@ -32,7 +33,7 @@ function succeeds(result: ReturnType<typeof command>) {
 }
 
 async function start(init: boolean) {
-  run('run', '-d', '--rm', '--name', name, '--network', name, '--network-alias', 'db',
+  docker('run', '-d', '--rm', '--name', name, '--network', name, '--network-alias', 'db',
     '-e', 'POSTGRES_USER=fukulow', '-e', 'POSTGRES_DB=fukulow', '-e', `POSTGRES_PASSWORD=${env.LOAD_DB_PASSWORD}`,
     '-e', `POSTGRES_APP_PASSWORD=${env.LOAD_APP_PASSWORD}`,
     ...(init ? load.services.db.volumes.flatMap((v: { source: string; target: string }) => ['-v', `${v.source}:${v.target}:ro`]) : []),
@@ -207,7 +208,7 @@ networks:
 }
 
 try {
-  run('network', 'create', name)
+  docker('network', 'create', name)
   await start(false)
   const missing = command(['migrate'])
   assert.equal(missing.status, 1)
@@ -216,8 +217,9 @@ try {
   succeeds(command(['migrate', 'roles']))
   succeeds(command(['migrate']))
   succeeds(command(['migrate', 'roles'], passwords[1]))
-  const appRead = () => run('exec', '-e', `PGPASSWORD=${passwords[1]}`, name, 'psql', '-X', '-h', '127.0.0.1',
-    '-U', 'fukulow_app', '-d', 'fukulow', '-Atc', 'SELECT count(*) > 0 FROM _sqlx_migrations')
+  const appRead = () => runPsql(['exec', '-e', `PGPASSWORD=${passwords[1]}`, name],
+    ['-h', '127.0.0.1', '-U', 'fukulow_app', '-d', 'fukulow', '-Atc', 'SELECT count(*) > 0 FROM _sqlx_migrations'],
+    dockerOptions).stdout.trim()
   assert.equal(appRead(), 't')
   // #314: the SECURITY DEFINER bootstrap check is executable by fukulow_app only, not PUBLIC.
   assert.equal(sql("SELECT has_function_privilege('fukulow_app', 'fukulow_setup_required()', 'EXECUTE'), " +
@@ -236,12 +238,12 @@ try {
   assert.equal(restricted.status, 1)
   assert.match(restricted.stderr, /Database roles update failed \(diagnostics suppressed\)/)
   noSecrets()
-  run('rm', '-f', '-v', name)
+  docker('rm', '-f', '-v', name)
   await start(true)
   succeeds(command(['migrate']))
   noSecrets()
   console.log('PASS missing-role preflight, initdb/rotation/rejection secrets absent from track=all snapshots and sampled statement logs')
-  run('rm', '-f', '-v', name)
+  docker('rm', '-f', '-v', name)
   await start(false)
   checkExternal()
   noSecrets()
