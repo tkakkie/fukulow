@@ -41,7 +41,8 @@ if (command === 'psql') {
 if (command === 'pg_amcheck') {
   assert.deepEqual(args.slice(4), ['-U', 'fukulow', '-d', 'fukulow', '--install-missing', '--heapallindexed']);
 }
-if (stage === process.env.TEST_STAGE) {
+const failOnce = process.env.TEST_FAIL_ONCE === command && process.env.TEST_EMITTED && !existsSync(process.env.TEST_EMITTED);
+if (stage === process.env.TEST_STAGE || failOnce) {
   const privateValues = [input, ${JSON.stringify(archive)},
     ...${JSON.stringify(Object.keys(credentials))}.map(name => process.env[name])].join('\n');
   writeSync(1, privateValues + ${JSON.stringify(stdoutSecret)});
@@ -50,15 +51,20 @@ if (stage === process.env.TEST_STAGE) {
   if (process.env.TEST_MODE === 'timeout') setTimeout(() => { process.exitCode = 43 }, 2500);
   else process.exitCode = 42;
 } else {
+  if (process.env.TEST_STDERR) writeSync(2, ${JSON.stringify(stderrSecret)});
   if (process.env.TEST_NOISY || stage === 'list') {
     const output = Buffer.alloc(1024 * 1024 + 1, 'x');
-    if (command !== 'cat') writeSync(1, output);
-    writeSync(2, output);
+    if (command !== 'cat') process.stdout.write(output);
+    process.stderr.write(output);
   }
   if (command === 'cat') {
     const log = process.env.TEST_PID_LOG;
-    const pid = log && !existsSync(log) ? 'sh' : 'postgres';
-    if (log) appendFileSync(log, pid + '\n');
+    let pid = 'postgres';
+    if (log) {
+      const attempts = existsSync(log) ? readFileSync(log, 'utf8').split('\n').length - 1 : 0;
+      pid = ['sh', 'postgres-temp'][attempts] ?? pid;
+      appendFileSync(log, pid + '\n');
+    }
     console.log(pid);
   }
 }
@@ -66,7 +72,7 @@ if (stage === process.env.TEST_STAGE) {
 
 const caller = `
   import childProcess from 'node:child_process';
-  import { writeSync } from 'node:fs';
+  import fs, { writeSync } from 'node:fs';
   import { syncBuiltinESMExports } from 'node:module';
   import { inspect } from 'node:util';
   import { restoreDrill } from ${JSON.stringify(new URL('./restore-drill.ts', import.meta.url).href)};
@@ -80,6 +86,13 @@ const caller = `
     if (result.error || result.status !== 0) termination = result.error?.code ?? result.status;
     return result;
   };
+  if (process.env.TEST_REMOVE_ARCHIVE_AFTER_ACCESS) {
+    const accessSync = fs.accessSync;
+    fs.accessSync = (path, mode) => {
+      accessSync(path, mode);
+      if (path === process.argv[1]) fs.unlinkSync(path);
+    };
+  }
   syncBuiltinESMExports();
   try {
     restoreDrill(process.argv[1]);
@@ -128,17 +141,22 @@ for (const stage of ['start', 'list', 'restore', 'sessions', 'integrity', 'clean
   }
 }
 
-for (const category of ['missing', 'permission']) {
+for (const category of ['missing', 'permission', 'operation']) {
   const skip = category === 'permission' && process.getuid?.() === 0 && 'root can read mode-000 files'
-  test(`restore drill reports a ${category} archive failure at list`, { skip }, t => {
+  const name = category === 'operation' ? 'restore drill reports an operation error when the archive disappears after access'
+    : `restore drill reports a ${category} archive failure at list`
+  test(name, { skip }, t => {
     const { directory, run } = drillFixture(t)
     if (category === 'permission') writeFileSync(join(directory, archive), archiveData, { mode: 0o000 })
+    if (category === 'operation') writeFileSync(join(directory, archive), archiveData)
 
-    const result = run()
+    const result = run(category === 'operation' ? { TEST_REMOVE_ARCHIVE_AFTER_ACCESS: '1' } : {})
 
     assert.equal(result.error, undefined)
     assert.equal(result.status, 1)
-    const { termination, message, error } = JSON.parse(result.output[3])
+    const report = result.output[3]
+    assert.ok(report)
+    const { termination, message, error } = JSON.parse(report)
     assert.equal(termination, undefined, 'Node rejects the archive before launching pg_restore')
     assert.equal(message, `stage=list category=${category}`)
     assert.ok(!error.includes(archive), 'the archive path stays private')
@@ -147,6 +165,34 @@ for (const category of ['missing', 'permission']) {
   })
 }
 
+for (const command of ['pg_isready', 'cat']) {
+  test(`restore drill suppresses stderr when ${command} fails during readiness`, t => {
+    const { directory, run } = drillFixture(t)
+    writeFileSync(join(directory, archive), archiveData)
+    const emitted = join(directory, 'emitted')
+
+    const result = run({ TEST_FAIL_ONCE: command, TEST_EMITTED: emitted })
+
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 0, result.output[3] ?? '')
+    assert.ok(existsSync(emitted), 'the stub emitted diagnostics before retry')
+    assert.match(result.stdout, /^Restore drill passed in [^\n]+\n$/)
+    assert.equal(result.stderr, '')
+  })
+}
+
+test('restore drill suppresses stderr from successful Docker calls', t => {
+  const { directory, run } = drillFixture(t)
+  writeFileSync(join(directory, archive), archiveData)
+
+  const result = run({ TEST_STDERR: '1' })
+
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.output[3] ?? '')
+  assert.match(result.stdout, /^Restore drill passed in [^\n]+\n$/)
+  assert.equal(result.stderr, '')
+})
+
 test('restore drill keeps the PostgreSQL flags and suppresses large successful output', t => {
   const { directory, run } = drillFixture(t)
   writeFileSync(join(directory, archive), archiveData)
@@ -154,7 +200,7 @@ test('restore drill keeps the PostgreSQL flags and suppresses large successful o
   const result = run({ TEST_NOISY: '1' })
 
   assert.equal(result.error, undefined)
-  assert.equal(result.status, 0, result.output[3])
+  assert.equal(result.status, 0, result.output[3] ?? '')
   assert.match(result.stdout, /^Restore drill passed in [^\n]+\n$/)
   assert.equal(result.stderr.length, 0)
 })
@@ -167,6 +213,6 @@ test('restore drill waits for postgres to be PID 1', t => {
   const result = run({ TEST_PID_LOG: pidLog })
 
   assert.equal(result.error, undefined)
-  assert.equal(result.status, 0, result.output[3])
-  assert.equal(readFileSync(pidLog, 'utf8'), 'sh\npostgres\n')
+  assert.equal(result.status, 0, result.output[3] ?? '')
+  assert.equal(readFileSync(pidLog, 'utf8'), 'sh\npostgres-temp\npostgres\n')
 })
