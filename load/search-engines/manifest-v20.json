@@ -1,0 +1,668 @@
+{
+  "sha256": "b3a47b34bd6b2d587fbe2a30fd6cbcd98da0878052473b8cbabe7b7b254c0907",
+  "frozen": {
+    "version": 20,
+    "date": "2026-11-28",
+    "engine": "d3r",
+    "generator": {
+      "version": 1,
+      "seed": 153202611,
+      "clock": "2026-11-15T00:00:00.000Z"
+    },
+    "node": "26.13.1",
+    "image": "postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42",
+    "shmBytes": 1073741824,
+    "settings": {
+      "shared_buffers": "16384",
+      "work_mem": "4096",
+      "maintenance_work_mem": "65536",
+      "effective_cache_size": "524288",
+      "random_page_cost": "4",
+      "max_connections": "100",
+      "max_worker_processes": "16",
+      "jit": "on",
+      "fsync": "on",
+      "synchronous_commit": "on",
+      "wal_level": "replica",
+      "max_wal_size": "1024",
+      "checkpoint_timeout": "300",
+      "server_encoding": "UTF8"
+    },
+    "removedSettings": {
+      "shared_preload_libraries": "The v13 value preloads the PGroonga WAL and crash-safety libraries, which are absent in plain PostgreSQL.",
+      "pgroonga.enable_wal_resource_manager": "The PGroonga WAL resource manager is absent.",
+      "pgroonga.enable_crash_safe": "The PGroonga crash-safety module is absent."
+    },
+    "sessionPolicy": {
+      "planner": "Query Tuning settings must equal image boot_val",
+      "settings": {
+        "row_security": "on",
+        "default_transaction_read_only": "off",
+        "default_transaction_isolation": "read committed",
+        "client_encoding": "UTF8",
+        "standard_conforming_strings": "on",
+        "statement_timeout": "0"
+      },
+      "appSettings": {
+        "row_security": "on",
+        "default_transaction_read_only": "off",
+        "default_transaction_isolation": "read committed",
+        "client_encoding": "UTF8",
+        "standard_conforming_strings": "on",
+        "statement_timeout": "10000"
+      },
+      "pgbenchGuard": "effective 10s check before each transaction, included in latency"
+    },
+    "sourceHashes": [
+      {
+        "path": ".gitattributes",
+        "sha256": "8be1b56edaa919619d901bd00d0af8b89e1ee210ff1cd2c2cfaf9fc3b4bed172"
+      },
+      {
+        "path": ".node-version",
+        "sha256": "5c293036fc0a61ad76e15d85f454c3c7cec157e181e035b69f95058a2c239144"
+      },
+      {
+        "path": "deploy/db-grants.sql",
+        "sha256": "46debd26d4ccd74c21d358a808affced5adff23f3def5187dcb57eeaaf00f592"
+      },
+      {
+        "path": "deploy/db-role-settings.sql",
+        "sha256": "33cf155262132029911afb8a017953b68a16f65b8a055c0e861f7d9b66665b69"
+      },
+      {
+        "path": "deploy/db-roles.sql",
+        "sha256": "d9756a87c05282bc237333325cbfd4c669b754883fb3cb17206ccdac69e241c2"
+      },
+      {
+        "path": "load/d3r-semantics.ts",
+        "sha256": "4ad1094233ff71ca5e69e59dcec8f1e2f66d225943358c23ee40d4cc55c6f758"
+      },
+      {
+        "path": "load/package-lock.json",
+        "sha256": "0fe702c4d80fc33548b71b144f29f7d7945c73323245e66986e86b42eb51d20c"
+      },
+      {
+        "path": "load/search-engines/Dockerfile",
+        "sha256": "035259bdb2ee0bdbeb1ee2e956d7bdfc27482be4199047e34cce756c36ec2ca3"
+      },
+      {
+        "path": "load/search-engines/b1-query.sql",
+        "sha256": "939e02cb1d21b598ddc766b4cc3a3983503b8b66d3a5b151ac63a27017cd4bb9"
+      },
+      {
+        "path": "load/search-engines/b1.sql",
+        "sha256": "aea7ec294cfbef471240f1a0d82c778c5214295e02a859a43c66d3a6cb72e217"
+      },
+      {
+        "path": "load/search-engines/b1.ts",
+        "sha256": "e9d486af2624595c6c9d099a3da94cd4dd227ef3a89e3a7eb9d1b9f0b6419e66"
+      },
+      {
+        "path": "load/search-engines/bench.ts",
+        "sha256": "9f9e113d6e71a20800864b2486cd85134975d248bb544e83dbffc924c8084869"
+      },
+      {
+        "path": "load/search-engines/bigm.sql",
+        "sha256": "966e24866866a4b76c2feb85a236cc1b655902ffd6c1671d063c2e502c8cbfe8"
+      },
+      {
+        "path": "load/search-engines/cleanup.ts",
+        "sha256": "9c45fa59ef0dd9bb41f3bb381992083ccee0dd987aaa380952d98312d09c2c0a"
+      },
+      {
+        "path": "load/search-engines/d3r/acceptance.ts",
+        "sha256": "085e3647c286e4db94f194ee2710737c9a48bd50616ce257aa251c77578caf37"
+      },
+      {
+        "path": "load/search-engines/d3r/backfill.ts",
+        "sha256": "c9f02b604163327a1a9bfcaf91d6638f538e54c2b529027dcd0726a2585f96e5"
+      },
+      {
+        "path": "load/search-engines/d3r/engine.ts",
+        "sha256": "ad2fda0e8284d40a780e8d6c4019a03376b75ae3ba82b0a50e36b3ff55063539"
+      },
+      {
+        "path": "load/search-engines/d3r/headroom.ts",
+        "sha256": "49b2cb625209e682c461b097a7f052bd2947301244910be7c638f6bad4988d6d"
+      },
+      {
+        "path": "load/search-engines/d3r/labels.ts",
+        "sha256": "ecfe75d622df690dfef2401e7552ece791ec8fd6e495bd61a94538be5b9d191a"
+      },
+      {
+        "path": "load/search-engines/d3r/manifest.ts",
+        "sha256": "fa04d67c04e859efee9fbfa7c76aa5f3b638b1cfdfe993eaedc0b2f991138fc8"
+      },
+      {
+        "path": "load/search-engines/d3r/path.ts",
+        "sha256": "ac31ff1d792ff73ccd479dae197fbc16b0a58a936137ace7154e37eadf228cc8"
+      },
+      {
+        "path": "load/search-engines/d3r/rls.ts",
+        "sha256": "71473667b6204847a96fe6aeced87214faa5028259bf4902935ee87c85ff52c8"
+      },
+      {
+        "path": "load/search-engines/d3r/run.ts",
+        "sha256": "10711b683294cc7a7a260f13f74be0a247ba263b53b621f60c82c799bf94135a"
+      },
+      {
+        "path": "load/search-engines/d3r/session.ts",
+        "sha256": "e0035a6f57e8687cdbe9f95b0bb08c3c7e7d2845ffa8d263ed16be006ffa22b1"
+      },
+      {
+        "path": "load/search-engines/d3r/snapshot.ts",
+        "sha256": "89a23fd442c1b6f70170a3d245dac4f8ddcedc35473b74a29280dbe0a1b8473a"
+      },
+      {
+        "path": "load/search-engines/d3r/timing.ts",
+        "sha256": "f00f68151b632e735e63a593dd85371fab3f97f2730be106565f8f66f08e28ec"
+      },
+      {
+        "path": "load/search-engines/definer.sql",
+        "sha256": "996d2f421215ac33b8c542841701f706196c56199952081cade3be2e9f85d2c2"
+      },
+      {
+        "path": "load/search-engines/definer.ts",
+        "sha256": "ad4f2f8d6f4917d9a3bd06405243cc600d4d0c164bcee1a9c28bd2569799c641"
+      },
+      {
+        "path": "load/search-engines/manifest-v13.json",
+        "sha256": "8f251bfd2c646cbf73fc8028de145af4505ad3f5711cc1b585f60bab284f82fc"
+      },
+      {
+        "path": "load/search-engines/manifest.ts",
+        "sha256": "c8d5b0b29139a05487415f02f2552a6aeb95e2f2e9944870f839a44b4e1ff719"
+      },
+      {
+        "path": "load/search-engines/pgroonga.sql",
+        "sha256": "77247b66eb7179990b6d35ab13e185eec75663e7674c846cb5504fa02237a688"
+      },
+      {
+        "path": "load/search-engines/quality/dataset.ts",
+        "sha256": "ec16de2e782723af3dd4f11eef27dc59d1228fd83a9f0805b39b46bb500d8461"
+      },
+      {
+        "path": "load/search-engines/quality/metrics.ts",
+        "sha256": "2a868175bdd2c3917404fee82291427060a3ac614a4d72df275c274b2904f822"
+      },
+      {
+        "path": "load/search-engines/quality/modes.ts",
+        "sha256": "e17e0e1f70de1bf4f411c79ccb3e42f0eb7cbd96da6726dd2c9994d3bdfba885"
+      },
+      {
+        "path": "load/search-engines/quality/run.ts",
+        "sha256": "d7c06b8d1b914f38b1d4411039045fa52fd3b862565e449edbc7c83426aa268d"
+      },
+      {
+        "path": "load/search-engines/quality/summarize.ts",
+        "sha256": "faf8abf51c59d48f33b5da311b266a6b6414d9e7254b459fd94e8309c9b72e7a"
+      },
+      {
+        "path": "load/search-engines/queries.ts",
+        "sha256": "b32d69535d9a3298733f67e862ec8321dc355ceaca762e09d8b45e7709076508"
+      },
+      {
+        "path": "load/search-engines/run.ts",
+        "sha256": "7fdf187ccf92f89a040f9291469b3db6e9dc881e8e33ac1b7cc36063b16029b1"
+      },
+      {
+        "path": "load/search-engines/runtime.ts",
+        "sha256": "4039c956a3e1cb5c78232551fa3bf982120ea6d3086fab1272b3218acdb59d7e"
+      },
+      {
+        "path": "load/search-engines/schema.sql",
+        "sha256": "ead322707a434a5dcb35e703e5f376b707dde0eb0d932e0aa67da1ccac3b22fb"
+      },
+      {
+        "path": "load/search-engines/seed.ts",
+        "sha256": "bf23d30b595dbc2bfe3ebf533356f34c1019ceeac2da725373d57c5d2c6fec3f"
+      },
+      {
+        "path": "load/search-engines/summarize.ts",
+        "sha256": "c026befa228dfd508213bf938f058267664d965b4c32dae1cc22e7c9523b1b55"
+      },
+      {
+        "path": "load/search-engines/trgm.sql",
+        "sha256": "d68359574d6672358b1a1e48b03ea1324b0e98a1fdddb7b0c70b88514347c37e"
+      },
+      {
+        "path": "server/migrations/202611080001_auth.sql",
+        "sha256": "28349d93a7e94e0a8e134e80b37336091074fc92d119bb93991d8737389e6a73"
+      },
+      {
+        "path": "server/migrations/202611090001_channels.sql",
+        "sha256": "1a05e69d3d556c36edbe42ab8b462bb19a4fc9355b500c55c4a473f7d31d3a56"
+      },
+      {
+        "path": "server/migrations/202611090002_messages.sql",
+        "sha256": "870de83d557adb582238b3f45e1fa22641a217e029daf6504539b68adcc3cafd"
+      },
+      {
+        "path": "server/migrations/202611090003_channel_names.sql",
+        "sha256": "d41231a2dbe4e0631383e71300625b58cc428896bf3a4b9ddd5e1345a8806c48"
+      },
+      {
+        "path": "server/migrations/202611090004_channel_name_length.sql",
+        "sha256": "bf25e4b37d839d0d052d0aed5b910e629c6a761497186da33120c55992d691a1"
+      },
+      {
+        "path": "server/migrations/202611090053_session_cleanup.sql",
+        "sha256": "cda129a84cc6e93c43c87b432fb768413493ef5769becd0bbade1b8153e7091a"
+      },
+      {
+        "path": "server/migrations/202611090075_drop_sessions_expiry.sql",
+        "sha256": "0a1685d74150785f0b5bab65d484ce0ff1c1d4d00ef8248d7389ecc19f4930ed"
+      },
+      {
+        "path": "server/migrations/202611100146_account_members.sql",
+        "sha256": "43036c12a2212ef1d5552a8b86db6d156ea5b4236286a4ef42b7ab74dffd57c2"
+      },
+      {
+        "path": "server/migrations/202611100172_member_protection_indexes.sql",
+        "sha256": "7625730e4b699870e3cb99c256408e38c75a5b51d5bc6b23457bfe7baadc893f"
+      },
+      {
+        "path": "server/migrations/202611110001_topics.sql",
+        "sha256": "51704296fb3e071873f6fc82f03694fd841c3f71c45f9ca94231166ce3cd4468"
+      },
+      {
+        "path": "server/migrations/202611110197_revoke_exposed_sessions.sql",
+        "sha256": "72f714453259852d758f4dddffdd283371c83f5c3475f09b667d54ef260f1fc2"
+      },
+      {
+        "path": "server/migrations/202611110198_replies.sql",
+        "sha256": "e4ffde2b99967edc03d923a977a79cfddc52ac056dd6d53c9ed821eb21bc4066"
+      },
+      {
+        "path": "server/migrations/202611110199_unread.sql",
+        "sha256": "8f6641e7ba66bae72f75414c5282839db14afc1b75d867921e603eed4d2e33ec"
+      },
+      {
+        "path": "server/migrations/202611110200_invites.sql",
+        "sha256": "d4be53c94380f87dace96f77fcae5e4a842c81265bf3aa279a3bc6ead6b7cf97"
+      },
+      {
+        "path": "server/migrations/202611110201_unread_access.sql",
+        "sha256": "662db2a4d69347cf5c260b9c4428c5e52cd658a739153872df86efb528b004f1"
+      },
+      {
+        "path": "server/migrations/202611110202_channel_grant_lifetime.sql",
+        "sha256": "509fd99ea87ba451e7c07ae480e134871e363988f8040412227b0aec282c2021"
+      },
+      {
+        "path": "server/migrations/202611130311_channel_managers.sql",
+        "sha256": "090f1307fb3bc32065f0eaafc52f076aefdb01926dfa592819f228cee24e5abf"
+      },
+      {
+        "path": "server/migrations/202611130314_tenant_rls.sql",
+        "sha256": "990e06102bfe3dc7946829f4c3d90de9e4c2c6f28c5c200c8ca758898799cb4e"
+      },
+      {
+        "path": "server/migrations/202611140299_channel_name_nonempty.sql",
+        "sha256": "b2fa3bb58b9b609ad63e35dfb1ef515d9aeb63ad8dd5385179ae59f9d82415a6"
+      },
+      {
+        "path": "server/migrations/202611140300_message_mentions.sql",
+        "sha256": "59c3535e337da44449af9fa9398ad1283fc9c16f614c225c64a55d49564d7e26"
+      },
+      {
+        "path": "server/migrations/202611140303_invite_revocation.sql",
+        "sha256": "0a396b54103f51c84a28f6a523cac2158aeb195c2b2d92ff7173e8a852b7a611"
+      },
+      {
+        "path": "server/migrations/202611140370_direct_messages.sql",
+        "sha256": "5d1102622b4218b1dac31b1944f5a4c8b8a8f7de684ec01c3064c7a6e39ad9c9"
+      },
+      {
+        "path": "server/migrations/202611140386_dm_discovery_reclamation.sql",
+        "sha256": "f53bd27277ef9b3d2597e80fec3edd23b845042a0cde8d4183a34b8905b32933"
+      },
+      {
+        "path": "server/migrations/202611140387_main_unread_covering.sql",
+        "sha256": "ae0d76686b764b2dcef511b39bf9b95bebab844be0256b810e58a23a51206782"
+      },
+      {
+        "path": "server/migrations/202611140388_invite_expiry_scan.sql",
+        "sha256": "1960c4400b9a88e916a7b2096c81747648c86c543bf61bbeaed3f17737975779"
+      },
+      {
+        "path": "server/migrations/202611140389_member_directory_order.sql",
+        "sha256": "0c6c38b8fefd1309cf6f6ee55e41f402166487894bed1135e0715c0800a09512"
+      },
+      {
+        "path": "server/migrations/202611150390_mention_main_unread_covering.sql",
+        "sha256": "66bba5ea888ebebc7614059659a1c894f701d0c9220e4c319bdc1b6252109be0"
+      },
+      {
+        "path": "server/migrations/202611170225_public_channel_topic_positions.sql",
+        "sha256": "dfd0ee562b17ad14861ab34dfeeaab0d4f6200c8463f5f059cda513ee8dde19d"
+      },
+      {
+        "path": "server/migrations/202611170515_channel_log.sql",
+        "sha256": "8fcb2c959e81b10ee283db3a7da67b9fbbd36f124d0fff35c2ae5c631109d69c"
+      },
+      {
+        "path": "server/migrations/202611180515_message_receipts.sql",
+        "sha256": "6806e4032e519ff56c9e414528d81a5a62ed33a3edc3df326bb1e91f1bdab29b"
+      },
+      {
+        "path": "server/migrations/202611190515_history_generation.sql",
+        "sha256": "b429a7b093a5924e5ee1b31761cae97bd37f8a6031fb41f293dc30e3d505665c"
+      },
+      {
+        "path": "server/migrations/202611200141_move_to_topic.sql",
+        "sha256": "7011cba9d82bdf1ee5134bf29de390105da3ed5e85594aaad10f7c8a821f630c"
+      },
+      {
+        "path": "server/migrations/202611200204_member_sections.sql",
+        "sha256": "a42447eda0b19033229f89ae059742aacdd6ee3a879a4b412a17f39a434a21cf"
+      },
+      {
+        "path": "server/migrations/202611200223_invite_cleanup.sql",
+        "sha256": "c2d4fe1945a9c76f22a8edc25101633e664df8ee43650205330926df580ce22a"
+      },
+      {
+        "path": "server/migrations/202611200410_channel_archive.sql",
+        "sha256": "ff22b99ee96a73a664a738deab99e340636a032e2c96871309882d1c3bdfbf7c"
+      },
+      {
+        "path": "server/migrations/202611200621_send_receipt_null_topic.sql",
+        "sha256": "6b17bdd583efbb8b904a5c70abf34c250c067a7cacc9eb5d572bc4034e08158a"
+      },
+      {
+        "path": "server/migrations/202611200654_section_placement_channel_lookup.sql",
+        "sha256": "de3b3eb8d2ed675b25b87294265db6b07fa15c90aef6302e82f25166596e42f4"
+      },
+      {
+        "path": "server/migrations/202611210725_message_search.sql",
+        "sha256": "3bca4a8c7d4ae2113e62aae9c8a4afb959246758288743dfaa8df40f0ccebe26"
+      },
+      {
+        "path": "server/migrations/202611221100_unread_counts.sql",
+        "sha256": "09dfcbf2bcc078cd47e92d7b3b62490ece56a346774290482dc4a3629798c96f"
+      },
+      {
+        "path": "server/migrations/202611221101_topics_page.sql",
+        "sha256": "c82845b2ae9a993afe34d3fb272d8b840713227318387a5603b84de567091e1d"
+      },
+      {
+        "path": "server/migrations/202611231100_unread_counts_update_first.sql",
+        "sha256": "1b1e4658a832dc225053353ec4cc2d4c498fa2237d9b8d0c9c722ad00df37dcd"
+      },
+      {
+        "path": "server/migrations/202611260620_create_from_messages.sql",
+        "sha256": "2854d02dc7ecab34ebfebcd7c19ce13f71ca4c013bed362bcca8b6eb579a48a4"
+      },
+      {
+        "path": "server/migrations/202611280001_messages_no_delete.sql",
+        "sha256": "e5c1a411e2d0cbf7cc7b0bd61745885943f03327d19cbd3ddb87c3d82410218a"
+      },
+      {
+        "path": "server/src/auth.rs",
+        "sha256": "1d5c138ff263fb1ee758cefe499b99084ca3312fc56b5ce7707dcc81bb62a3fa"
+      },
+      {
+        "path": "server/src/auth/authorization.rs",
+        "sha256": "d5538146973a73671e06ffead4cc4a8e1454713d088efa0b6e7cba87c6e54323"
+      },
+      {
+        "path": "server/src/channels.rs",
+        "sha256": "4026f44d90e4c1da4cfa9d8b0fad3850f3d275e0ffd31590f1c9e6adebd30fdd"
+      },
+      {
+        "path": "server/src/database/context.rs",
+        "sha256": "866c34b9d68c64fde5e1e8388bb3a0ce47c086adcc43296f07a157ca30c62583"
+      },
+      {
+        "path": "server/src/messages/search.rs",
+        "sha256": "c48938c952bd90dc4ca48591da28290c3d59f7df609ef99106ba5d8ccd04e1bb"
+      },
+      {
+        "path": "server/src/messages/search/d3r.rs",
+        "sha256": "12777dcfb118b9481d32c57bc01614e9f9749549c8a7020bed6d11d3827f0aba"
+      },
+      {
+        "path": "server/src/messages/search/page.sql",
+        "sha256": "fef512d69a2af0c733898e78d58f2cb25b9934880ea94b0a20c1e5a602bcf753"
+      }
+    ],
+    "migrations": [
+      "server/migrations/202611080001_auth.sql",
+      "server/migrations/202611090001_channels.sql",
+      "server/migrations/202611090002_messages.sql",
+      "server/migrations/202611090003_channel_names.sql",
+      "server/migrations/202611090004_channel_name_length.sql",
+      "server/migrations/202611090053_session_cleanup.sql",
+      "server/migrations/202611090075_drop_sessions_expiry.sql",
+      "server/migrations/202611100146_account_members.sql",
+      "server/migrations/202611100172_member_protection_indexes.sql",
+      "server/migrations/202611110001_topics.sql",
+      "server/migrations/202611110197_revoke_exposed_sessions.sql",
+      "server/migrations/202611110198_replies.sql",
+      "server/migrations/202611110199_unread.sql",
+      "server/migrations/202611110200_invites.sql",
+      "server/migrations/202611110201_unread_access.sql",
+      "server/migrations/202611110202_channel_grant_lifetime.sql",
+      "server/migrations/202611130311_channel_managers.sql",
+      "server/migrations/202611130314_tenant_rls.sql",
+      "server/migrations/202611140299_channel_name_nonempty.sql",
+      "server/migrations/202611140300_message_mentions.sql",
+      "server/migrations/202611140303_invite_revocation.sql",
+      "server/migrations/202611140370_direct_messages.sql",
+      "server/migrations/202611140386_dm_discovery_reclamation.sql",
+      "server/migrations/202611140387_main_unread_covering.sql",
+      "server/migrations/202611140388_invite_expiry_scan.sql",
+      "server/migrations/202611140389_member_directory_order.sql",
+      "server/migrations/202611150390_mention_main_unread_covering.sql",
+      "server/migrations/202611170225_public_channel_topic_positions.sql",
+      "server/migrations/202611170515_channel_log.sql",
+      "server/migrations/202611180515_message_receipts.sql",
+      "server/migrations/202611190515_history_generation.sql",
+      "server/migrations/202611200141_move_to_topic.sql",
+      "server/migrations/202611200204_member_sections.sql",
+      "server/migrations/202611200223_invite_cleanup.sql",
+      "server/migrations/202611200410_channel_archive.sql",
+      "server/migrations/202611200621_send_receipt_null_topic.sql",
+      "server/migrations/202611200654_section_placement_channel_lookup.sql",
+      "server/migrations/202611210725_message_search.sql",
+      "server/migrations/202611221100_unread_counts.sql",
+      "server/migrations/202611221101_topics_page.sql",
+      "server/migrations/202611231100_unread_counts_update_first.sql",
+      "server/migrations/202611260620_create_from_messages.sql",
+      "server/migrations/202611280001_messages_no_delete.sql"
+    ],
+    "setup": {
+      "forceSearchRls": "ALTER TABLE public.messages FORCE ROW LEVEL SECURITY;\nALTER TABLE public.message_search_terms FORCE ROW LEVEL SECURITY;\nALTER TABLE public.users FORCE ROW LEVEL SECURITY;\nALTER TABLE public.channels FORCE ROW LEVEL SECURITY;\nALTER TABLE public.channel_members FORCE ROW LEVEL SECURITY;",
+      "backfill": "Verified physical PostgreSQL snapshot of the base, restore and denial fixtures",
+      "round": "Create measured from the restored base template, restart PostgreSQL, then warm each query in a fresh psql session"
+    },
+    "queryPath": {
+      "sources": {
+        "engine": "server/src/messages/search/d3r.rs",
+        "page": "server/src/messages/search/page.sql",
+        "search": "server/src/messages/search.rs",
+        "channels": "server/src/channels.rs",
+        "auth": "server/src/auth.rs",
+        "authorization": "server/src/auth/authorization.rs",
+        "context": "server/src/database/context.rs"
+      },
+      "role": "fukulow_app",
+      "pageSize": 20,
+      "history": "full",
+      "context": "REPEATABLE READ READ ONLY with transaction-local Organization context",
+      "plan": "force_generic_plan on the production d3r page statement",
+      "statementTimeout": "2s",
+      "rls": "forced and active on all five search tables"
+    },
+    "performance": {
+      "querySet": [
+        [
+          "ja1-frequent",
+          "開"
+        ],
+        [
+          "ja1-rare",
+          "麒"
+        ],
+        [
+          "ja2-frequent",
+          "開発"
+        ],
+        [
+          "ja2-rare",
+          "麒麟"
+        ],
+        [
+          "ja3-frequent",
+          "確認し"
+        ],
+        [
+          "ja3-rare",
+          "特殊照合"
+        ],
+        [
+          "ascii1",
+          "a"
+        ],
+        [
+          "ascii2",
+          "ph"
+        ],
+        [
+          "ascii3",
+          "pha"
+        ],
+        [
+          "ascii1-rare",
+          "ø"
+        ],
+        [
+          "ascii2-rare",
+          "zx"
+        ],
+        [
+          "ascii-rare",
+          "QZX"
+        ],
+        [
+          "nfc",
+          "がぎ"
+        ],
+        [
+          "nfd",
+          "がぎ"
+        ],
+        [
+          "accent",
+          "CAFÉ"
+        ],
+        [
+          "casefold",
+          "STRASSE"
+        ],
+        [
+          "greek",
+          "ΣΊΣΥΦΟΣ"
+        ],
+        [
+          "mixed",
+          "照合z9"
+        ],
+        [
+          "space1",
+          "開発 API"
+        ],
+        [
+          "space2",
+          "開発  API"
+        ],
+        [
+          "literal-percent",
+          "x%y"
+        ],
+        [
+          "literal-underscore",
+          "a_b"
+        ],
+        [
+          "literal-backslash",
+          "c\\d"
+        ],
+        [
+          "trim",
+          "　開発 "
+        ],
+        [
+          "bom",
+          "﻿開発﻿"
+        ],
+        [
+          "width",
+          "ｶﾀｶﾅ"
+        ],
+        [
+          "fullwidth",
+          "ＡＢＣ"
+        ],
+        [
+          "scalar",
+          "🦉"
+        ]
+      ],
+      "rows": 1000000,
+      "restoreRows": 1000,
+      "queryHash": "235429d523255e8dd19ae5311165f2548c8133bf93934bd860d23dcdd273758b",
+      "queries": 28,
+      "clients": 5,
+      "transactions": 20,
+      "rounds": 3,
+      "warmupSweeps": 1
+    },
+    "smoke": {
+      "label": "SMOKE / NON-EVALUATION",
+      "performance": {
+        "rows": 1000,
+        "clients": 1,
+        "transactions": 1,
+        "rounds": 1
+      }
+    },
+    "rehearsal": {
+      "label": "REHEARSAL / NON-EVALUATION",
+      "performance": {
+        "rounds": 1
+      },
+      "evidence": "never; only completeness against the formal checks is recorded"
+    },
+    "timing": {
+      "timeouts": {
+        "docker": 120000,
+        "build": 900000,
+        "psql": 900000,
+        "benchmark": 900000,
+        "cleanup": 10000
+      },
+      "startupAttempts": 60,
+      "startupPollMs": 500,
+      "qualityTimed": false
+    },
+    "criteria": {
+      "p95LimitMs": 500,
+      "samplesPerQueryRound": 100,
+      "shortIds": [
+        "ja1-frequent",
+        "ja1-rare",
+        "ascii1",
+        "ascii1-rare",
+        "scalar"
+      ],
+      "shortRejection": "search_query_too_short",
+      "index": "All accepted first-round plans execute the term lookup index and have no Messages Seq Scan.",
+      "completeness": "All pages in order, for six Members, against the independent full-history token-containment scan.",
+      "denials": "All #153 cases with positive controls, both unforced and forced, adapted to full history and d3r rejections.",
+      "restore": "Custom dump, clean database restore, grants, checksums, RLS, term verification and six-Member completeness.",
+      "backfill": "Every seeded Message has independently verified terms. A mismatch invalidates the run."
+    }
+  }
+}

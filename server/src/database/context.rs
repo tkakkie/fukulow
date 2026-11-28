@@ -1,5 +1,11 @@
+use super::Access;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
+
+enum Context {
+    Organization(Uuid),
+    Account(Uuid),
+}
 
 /// One autocommit SELECT, with $1 bound as the Organization UUID. The local
 /// setting ends with the statement's implicit transaction. The materialized
@@ -67,9 +73,8 @@ where
 {
     with_context(
         pool,
-        organization,
-        false,
-        true,
+        Context::Organization(organization),
+        Access::ReadWrite,
         super::Discard::Close,
         confirm_rollback,
         body,
@@ -88,9 +93,8 @@ where
 {
     with_context(
         pool,
-        organization,
-        false,
-        true,
+        Context::Organization(organization),
+        Access::ReadWrite,
         super::Discard::Detach,
         |_| false,
         body,
@@ -109,9 +113,8 @@ where
 {
     with_context(
         pool,
-        organization,
-        true,
-        true,
+        Context::Organization(organization),
+        Access::Snapshot,
         super::Discard::Close,
         |_| false,
         body,
@@ -130,9 +133,8 @@ where
 {
     with_context(
         pool,
-        organization,
-        true,
-        true,
+        Context::Organization(organization),
+        Access::Snapshot,
         super::Discard::Detach,
         |_| false,
         body,
@@ -151,9 +153,8 @@ where
 {
     with_context(
         pool,
-        account,
-        false,
-        false,
+        Context::Account(account),
+        Access::ReadWrite,
         super::Discard::Close,
         |_| false,
         body,
@@ -172,9 +173,8 @@ where
 {
     with_context(
         pool,
-        account,
-        true,
-        false,
+        Context::Account(account),
+        Access::Snapshot,
         super::Discard::Close,
         |_| false,
         body,
@@ -184,9 +184,8 @@ where
 
 async fn with_context<T, E>(
     pool: &PgPool,
-    id: Uuid,
-    read_only: bool,
-    organization: bool,
+    context: Context,
+    access: Access,
     discard: super::Discard,
     confirm_rollback: fn(&E) -> bool,
     body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
@@ -196,17 +195,18 @@ where
 {
     super::transaction(
         pool,
-        read_only,
+        access,
         discard,
         confirm_rollback,
         async |connection: &mut PgConnection| {
-            if organization {
-                set_organization(connection, id).await?;
-            } else {
-                sqlx::query("SELECT set_config('fukulow.account_id', $1, true)")
-                    .bind(id.to_string())
-                    .execute(&mut *connection)
-                    .await?;
+            match context {
+                Context::Organization(id) => set_organization(connection, id).await?,
+                Context::Account(id) => {
+                    sqlx::query("SELECT set_config('fukulow.account_id', $1, true)")
+                        .bind(id.to_string())
+                        .execute(&mut *connection)
+                        .await?;
+                }
             }
             body(connection).await
         },

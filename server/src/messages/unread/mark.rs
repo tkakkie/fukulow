@@ -89,6 +89,7 @@ async fn mark_inner(
                     read_seq,
                 },
                 Some(member.0),
+                channels::activity::PublicationFence::default(),
             );
         }
         Ok::<_, MessageError>((read_seq, history_generation))

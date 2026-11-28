@@ -82,6 +82,7 @@ impl Case {
                 Notice::ChannelListChanged,
                 Some(self.target),
                 None,
+                PublicationFence::default(),
             )
             .await
             .unwrap();

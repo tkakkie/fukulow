@@ -40,6 +40,7 @@ use notice_budget::NoticeBudget;
 #[cfg(test)]
 use notice_budget::notice_query_slot;
 use publish::ActivityBatch;
+pub(crate) use publish::PublicationFence;
 pub(super) use publish::SectionsPublication;
 use revocations::{Capture, Check, Revocations};
 #[cfg(test)]
@@ -132,11 +133,6 @@ type Registry = Arc<Mutex<HashMap<Uuid, Arc<Entry>>>>;
 #[derive(Clone)]
 pub struct Activity {
     entries: Registry,
-    epochs: Option<Arc<HashMap<Uuid, u64>>>,
-    directory_epochs: Option<Arc<HashMap<Uuid, u64>>>,
-    exclude_guests: bool,
-    directory_member: Option<Uuid>,
-    directory_channels: Vec<Uuid>,
     capacity: Arc<Semaphore>,
     notice_queries: Arc<OnceLock<NoticeBudget>>,
     batches: Arc<Mutex<HashMap<(Uuid, Uuid), ActivityBatch>>>,
@@ -149,11 +145,6 @@ impl Default for Activity {
     fn default() -> Self {
         Self {
             entries: Default::default(),
-            epochs: None,
-            directory_epochs: None,
-            exclude_guests: false,
-            directory_member: None,
-            directory_channels: Vec::new(),
             capacity: Arc::new(Semaphore::new(40)),
             notice_queries: Default::default(),
             batches: Default::default(),
@@ -200,7 +191,11 @@ impl Activity {
             entry,
         }
     }
-    fn snapshot(&self, organization: Uuid) -> Vec<(Arc<Entry>, u64)> {
+    fn snapshot(
+        &self,
+        organization: Uuid,
+        epochs: Option<&HashMap<Uuid, u64>>,
+    ) -> Vec<(Arc<Entry>, u64)> {
         lock_ignoring_poison(&self.entries)
             .values()
             .filter_map(|e| {
@@ -209,8 +204,7 @@ impl Activity {
                 }
                 let b = lock_ignoring_poison(&e.buffer);
                 let epoch = b.epoch;
-                self.epochs
-                    .as_ref()
+                epochs
                     .is_none_or(|epochs| epochs.get(&e.id) == Some(&epoch))
                     .then(|| (e.clone(), epoch))
             })
@@ -224,7 +218,7 @@ impl Activity {
     }
     fn retire_inner(&self, organization: Uuid, member: Uuid, retirement: Retirement<'_>) {
         for (entry, _) in self
-            .snapshot(organization)
+            .snapshot(organization, None)
             .into_iter()
             .filter(|(e, _)| e.member.0 == member)
         {
@@ -638,18 +632,22 @@ mod tests {
     }
     #[test]
     fn captured_registration_epochs_never_include_a_replacement_socket() {
-        let mut activity = Activity::default();
+        let activity = Activity::default();
         let old = entry();
         let mut replacement = entry();
         Arc::get_mut(&mut replacement).unwrap().organization = old.organization;
         Arc::get_mut(&mut replacement).unwrap().member = old.member;
-        activity.epochs = Some(Arc::new(HashMap::from([(old.id, 0)])));
+        let epochs = HashMap::from([(old.id, 0)]);
         activity
             .entries
             .lock()
             .unwrap()
             .insert(replacement.id, replacement);
-        assert!(activity.snapshot(old.organization).is_empty());
+        assert!(
+            activity
+                .snapshot(old.organization, Some(&epochs))
+                .is_empty()
+        );
     }
     #[test]
     fn newer_access_transition_replaces_the_shared_key_and_moves_to_the_tail() {

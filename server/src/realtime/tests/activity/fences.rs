@@ -34,7 +34,14 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
             let organization = f.organization;
             tokio::spawn(async move {
                 publisher
-                    .publish(&pool, organization, notice, target, None)
+                    .publish(
+                        &pool,
+                        organization,
+                        notice,
+                        target,
+                        None,
+                        PublicationFence::default(),
+                    )
                     .await
                     .unwrap();
             })
@@ -237,6 +244,7 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                             notice(first),
                             Some(f.member),
                             None,
+                            PublicationFence::default(),
                         )
                         .await
                         .unwrap();
@@ -249,7 +257,14 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                 let winner = notice(if fence_first { first } else { second });
                 let publication = tokio::spawn(async move {
                     publisher
-                        .publish(&publish_pool, organization, winner, Some(target), None)
+                        .publish(
+                            &publish_pool,
+                            organization,
+                            winner,
+                            Some(target),
+                            None,
+                            PublicationFence::default(),
+                        )
                         .await
                         .unwrap();
                 });
@@ -286,6 +301,7 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                             notice(second),
                             Some(f.member),
                             None,
+                            PublicationFence::default(),
                         )
                         .await
                         .unwrap();
@@ -316,6 +332,7 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                         notice(3),
                         Some(f.member),
                         None,
+                        PublicationFence::default(),
                     )
                     .await
                     .unwrap();

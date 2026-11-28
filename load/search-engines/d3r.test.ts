@@ -164,8 +164,17 @@ test('v18 records the replay and Search 429 sources with v17 conditions', () => 
   ].sort());
 });
 
+function pinnedV19(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v19.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), 'b53d17065b65c96534bd2f049dee8356a73bdc4224a212e385eafeee53c6c25f');
+  const v19 = JSON.parse(text);
+  assert.equal(v19.sha256, 'e1daacb402ef6ad4d938634589f189427b38684596f58bf0f6c0fc4702441243');
+  assert.equal(v19.sha256, hash(JSON.stringify(v19.frozen)));
+  return v19;
+}
+
 test('v19 records Message retention with v18 conditions', () => {
-  const {version, date, migrations, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version, date, migrations, sourceHashes, ...conditions} = pinnedV19().frozen;
   const {version: previousVersion, date: previousDate, migrations: previousMigrations,
     sourceHashes: previousSources, ...previousConditions} = pinnedV18().frozen;
   assert.equal(version, previousVersion + 1);
@@ -177,6 +186,17 @@ test('v19 records Message retention with v18 conditions', () => {
   const before = new Map(previousSources.map(source => [source.path, source.sha256]));
   assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
     ['load/search-engines/d3r/manifest.ts', added]);
+});
+
+test('v20 records the database context refactor with v19 conditions', () => {
+  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV19().frozen;
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {
