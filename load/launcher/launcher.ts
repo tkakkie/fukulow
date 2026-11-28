@@ -47,6 +47,10 @@ export type Deps = {
 };
 export type Result = { outcome: 'done' | 'stop'; reason?: string; jobs: { name: string; exit: number | null }[] };
 
+export function launchExitCode(outcome: Result['outcome']): number {
+  return outcome === 'done' ? 0 : 3;
+}
+
 // Processes that make a host busy (same list as the hand-written waiters).
 export const workerPattern = /codex exec|agy -p|cargo (test|build|nextest|check|clippy)|playwright|vitest|k6 run|node load\//;
 export const maxLoad15 = 3;
@@ -551,6 +555,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   try { result = await body(); } catch (error) { failure = { error }; }
   const released = await release();
   if (result && released.problems.length > 0) result = { outcome: 'stop', reason: `workload not confirmed stopped, HOST-BUSY kept: ${released.problems.join('; ')}`, jobs };
+  if (result?.outcome === 'done' && released.hostBusy === 'lost') result = { outcome: 'stop', reason: 'HOST-BUSY lost before release', jobs };
   // The record a judge binds to: the session id in every artefact, which jobs ran (with their
   // outputs, workload labels, exits and confirmations), and the release.
   const session: Session = {

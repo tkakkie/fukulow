@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { HostRecord } from '../harness-core/host-record.ts';
 import { formatHostBusy, parseHostBusy } from './host-busy.ts';
-import { clockEvents, dockerPollMs, dockerSettleMs, fixedRate, launch, pollMs, workers, type Deps } from './launcher.ts';
+import { clockEvents, dockerPollMs, dockerSettleMs, fixedRate, launch, launchExitCode, pollMs, workers, type Deps } from './launcher.ts';
 import { darwin, linux, type Platform } from './platform.ts';
 import { parseQueue, type Queue } from './queue.ts';
 
@@ -215,6 +215,31 @@ test('the second job waits while either a container or a worker is running', asy
   assert.deepEqual(idle.reasonsSeen, ['containers running', `workers running: ${worker}`]);
 });
 
+for (const [command, reason] of [['docker ps -q', 'docker ps failed'], ['ps -Ao pid=,command=', 'ps failed']]) {
+  test(`the second job keeps waiting when ${command} fails`, async () => {
+    const w = world();
+    const d = deps(w);
+    let failing = false;
+    afterFirstWorkloadCheck(d, () => { failing = true; });
+    const exec = d.exec;
+    d.exec = (argv, cwd) => failing && argv.join(' ') === command ? { status: 1, stdout: '' } : exec(argv, cwd);
+    const sleep = d.sleep;
+    let polls = 0;
+    d.sleep = async ms => {
+      assert.equal(ms, pollMs);
+      assert.equal(w.spawned.length, 1);
+      assert.equal(w.files.has('/runs/chain/b-idle.json'), false);
+      failing = ++polls < 2;
+      await sleep(ms);
+    };
+    assert.equal((await launch(queue(), d)).outcome, 'done');
+    assert.equal(w.spawned.length, 2);
+    assert.equal(polls, 2);
+    const idle = JSON.parse(w.files.get('/runs/chain/b-idle.json')!);
+    assert.deepEqual(idle.reasonsSeen, [reason]);
+  });
+}
+
 test('a missing or replaced HOST-BUSY between jobs stops the queue and preserves a replacement', async () => {
   for (const replacement of [null, formatHostBusy('other', ['c'], new Date(0), 'sess-2')]) {
     const w = world();
@@ -234,6 +259,37 @@ test('a missing or replaced HOST-BUSY between jobs stops the queue and preserves
     assert.equal(session.hostBusy, 'lost');
   }
 });
+
+for (const loss of ['deleted', 'unreadable', 'replaced']) {
+  test(`HOST-BUSY ${loss} during the final job stops the queue`, async () => {
+    const w = world();
+    const d = deps(w);
+    const q = queue();
+    const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+    const spawn = d.spawn;
+    d.spawn = (argv, opts) => {
+      const child = spawn(argv, opts);
+      if (opts.env?.FUKULOW_LAUNCH_JOB === 'b') {
+        if (loss === 'deleted') w.files.delete(q.hostBusy);
+        if (loss === 'replaced') w.files.set(q.hostBusy, replacement);
+        if (loss === 'unreadable') {
+          const read = d.read;
+          d.read = path => path === q.hostBusy ? null : read(path);
+        }
+      }
+      return child;
+    };
+    const r = await launch(q, d);
+    assert.deepEqual(r, { outcome: 'stop', reason: 'HOST-BUSY lost before release', jobs: [{ name: 'a', exit: 0 }, { name: 'b', exit: 0 }] });
+    assert.equal(launchExitCode(r.outcome), 3);
+    const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+    assert.equal(session.outcome, 'stop');
+    assert.equal(session.reason, r.reason);
+    assert.equal(session.hostBusy, 'lost');
+    if (loss === 'replaced') assert.equal(w.files.get(q.hostBusy), replacement);
+    else assert.equal(w.files.has(q.hostBusy), loss === 'unreadable');
+  });
+}
 
 test('a signal interrupts the second job idle wait, stops the queue and releases HOST-BUSY', async () => {
   const w = world({ signal: { at: 'wait' } });

@@ -1,5 +1,5 @@
 {
-  "sha256": "89196ef55766f953c08215599fe2247cd66a8951ea250663729524127a05b05d",
+  "sha256": "cca897c84e6a700765b33c1418f105e58ece95bddbb5d28ab732279acfa4748d",
   "frozen": {
     "version": 20,
     "schemaCommit": "66e6e266477b1a860358b1d735ad271e7d4f6489",
@@ -173,7 +173,7 @@
       },
       {
         "path": "load/launcher/launcher.ts",
-        "sha256": "861e9605e51d7f3c7d5c531b29302c8e370726085ebe8f0b3147a23def313f64"
+        "sha256": "08f6151e06fc55054626e7cc58a979cc493d6dfc44090c926fdc83d2ef0ea54e"
       },
       {
         "path": "load/package-lock.json",

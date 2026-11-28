@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
 import { dockerFreeBytes, freeBytes } from './harness-core/host.ts';
-import { fixedRate, launch, type Child } from './launcher/launcher.ts';
+import { fixedRate, launch, launchExitCode, type Child } from './launcher/launcher.ts';
 import { currentPlatform } from './launcher/platform.ts';
 import { parseQueue } from './launcher/queue.ts';
 
@@ -94,4 +94,4 @@ const result = await launch(queue, {
   onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => { signalled.abort(); handler(s); }); },
 });
 console.log(JSON.stringify(result));
-process.exit(result.outcome === 'done' ? 0 : 3);
+process.exit(launchExitCode(result.outcome));
