@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { requirementViolations, type HostRecord } from '../harness-core/host-record.ts';
 import { tctl, type ThermalSample } from '../harness-core/thermal.ts';
-import type { Platform } from './platform.ts';
+import type { LoadAverages, Platform } from './platform.ts';
 import type { PolicySnapshot } from '../harness-core/cpu-policy.ts';
 import { formatHostBusy } from './host-busy.ts';
 import type { Job, Queue } from './queue.ts';
@@ -21,6 +21,7 @@ export type Deps = {
   // Follows the logs of containers with this label into the file until the returned stop is called.
   captureLogs(label: string, file: string): () => void;
   exists(path: string): boolean;
+  read(path: string): string | null;
   // Creates the file only if it does not exist (O_EXCL); false when it already exists.
   claim(path: string, text: string): boolean;
   remove(path: string): void;
@@ -45,6 +46,10 @@ export type Deps = {
   onSignal(handler: (signal: string) => void): void;
 };
 export type Result = { outcome: 'done' | 'stop'; reason?: string; jobs: { name: string; exit: number | null }[] };
+
+export function launchExitCode(outcome: Result['outcome']): number {
+  return outcome === 'done' ? 0 : 3;
+}
 
 // Processes that make a host busy (same list as the hand-written waiters).
 export const workerPattern = /codex exec|agy -p|cargo (test|build|nextest|check|clippy)|playwright|vitest|k6 run|node load\//;
@@ -78,17 +83,25 @@ export function workers(ps: string, self: number): string[] {
 }
 
 export function busyReasons(d: Deps, busyPath: string): string[] {
+  const held = d.exists(busyPath);
+  const { reasons } = hostActivity(d);
+  return held ? [`HOST-BUSY held: ${busyPath}`, ...reasons] : reasons;
+}
+
+function hostActivity(d: Deps): { reasons: string[]; loads: LoadAverages } {
   const r: string[] = [];
-  if (d.exists(busyPath)) r.push(`HOST-BUSY held: ${busyPath}`);
   const containers = d.exec(['docker', 'ps', '-q']);
   if (containers.status !== 0) r.push('docker ps failed');
   else if (containers.stdout.trim() !== '') r.push('containers running');
   const ps = d.exec(['ps', '-Ao', 'pid=,command=']);
   if (ps.status !== 0) r.push('ps failed');
-  else if (workers(ps.stdout, d.pid).length > 0) r.push(`workers running: ${workers(ps.stdout, d.pid).slice(0, 3).join(' | ')}`);
-  const load = d.platform.load15();
-  if (!(load < maxLoad15)) r.push(`load15 ${load.toFixed(2)} >= ${maxLoad15}`);
-  return r;
+  else {
+    const running = workers(ps.stdout, d.pid);
+    if (running.length > 0) r.push(`workers running: ${running.slice(0, 3).join(' | ')}`);
+  }
+  const loads = d.platform.loadAverages();
+  if (!(loads.load15 < maxLoad15)) r.push(`load15 ${loads.load15.toFixed(2)} >= ${maxLoad15}`);
+  return { reasons: r, loads };
 }
 
 export function preflight(d: Deps, q: Queue, job: Job, record: HostRecord): string[] {
@@ -178,11 +191,13 @@ export function fixedRate(ms: number, fn: () => void, t: { mono(): number; setTi
   return () => { stopped = true; t.clearTimeout(handle); };
 }
 
+type IdleEvidence = LoadAverages & { at: string; waitedMs: number; reasonsSeen: string[] };
+
 export type Session = {
   id: string; queue: string; outcome: Result['outcome'] | 'error'; reason?: string;
   // thermalSampleSeconds: the period the launcher's sampler actually ran with for the job.
-  jobs: (Result['jobs'][number] & { out?: string; workloadLabel?: string; thermalSampleSeconds?: number; confirmations?: Job['confirmations']; frequencyGo?: Job['go'] })[];
-  hostBusy: 'released' | 'kept' | 'never claimed'; workloadProblems: string[]; finished: string;
+  jobs: (Result['jobs'][number] & { out?: string; workloadLabel?: string; thermalSampleSeconds?: number; confirmations?: Job['confirmations']; frequencyGo?: Job['go']; idle?: IdleEvidence })[];
+  hostBusy: 'released' | 'kept' | 'lost' | 'never claimed'; workloadProblems: string[]; finished: string;
 };
 
 export async function launch(q: Queue, d: Deps): Promise<Result> {
@@ -193,7 +208,10 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   const launchSession = d.sessionId();
   const record = (file: string, value: Record<string, unknown>) => d.write(join(q.chainDir, file), JSON.stringify({ ...value, launchSession }, null, 2) + '\n');
   const jobs: Result['jobs'] = [];
-  let claimed = false;
+  let claimText: string | null = null;
+  const ownsClaim = () => claimText !== null && d.read(q.hostBusy) === claimText;
+  let claimLostBeforeSpawn = false;
+  const idleEvidence = new Map<string, IdleEvidence>();
   let child: Child | null = null;
   const started: { child: Child; job: Job }[] = [];
   // At the claim: every container (any state), and those live then. Release compares live state
@@ -269,6 +287,10 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     } finally { onAbort.delete(stopRunning); child = null; }
   };
   const stop = (reason: string): Result => { log(`STOP: ${reason}`); return { outcome: 'stop', reason, jobs }; };
+  const stopForLostClaim = (where: string): Result => {
+    claimLostBeforeSpawn = true;
+    return stop(`HOST-BUSY missing, unreadable or replaced ${where}`);
+  };
   // Every process group the launcher started has ended, and no container is running: none ran when
   // HOST-BUSY was claimed, so any container now is the workload's, whether or not its label was
   // given or typed right (fail closed). Anything unconfirmed keeps HOST-BUSY held.
@@ -324,16 +346,58 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     else if (last.length > 0) problems.push(`containers created since the claim still present: ${last.join(', ')}`);
     return problems;
   };
+  const lostClaim = 'HOST-BUSY lost before release';
   const release = async (): Promise<{ hostBusy: Session['hostBusy']; problems: string[] }> => {
     endLogs();
-    if (!claimed) return { hostBusy: 'never claimed', problems: [] };
+    if (claimText === null) return { hostBusy: 'never claimed', problems: [] };
     let problems: string[];
     try { problems = await stopWorkload(); } catch (e) { problems = [`workload check failed: ${String(e)}`]; }
+    // A failed ownership check at spawn stays lost even if the marker can be read again.
+    if (claimLostBeforeSpawn || !ownsClaim()) {
+      note(problems.length === 0 ? lostClaim : `${lostClaim}; workload not confirmed stopped: ${problems.join('; ')}`);
+      return { hostBusy: 'lost', problems };
+    }
     if (problems.length === 0) {
-      try { d.remove(q.hostBusy); claimed = false; } catch (e) { problems.push(`HOST-BUSY removal failed: ${String(e)}`); }
+      try { d.remove(q.hostBusy); } catch (e) { problems.push(`HOST-BUSY removal failed: ${String(e)}`); }
     }
     note(problems.length === 0 ? 'HOST-BUSY released' : `HOST-BUSY kept: ${problems.join('; ')}`);
     return { hostBusy: problems.length === 0 ? 'released' : 'kept', problems };
+  };
+  const waitForIdle = async (job: Job): Promise<string | null> => {
+    const startedAt = d.mono();
+    const reasonsSeen = new Set<string>();
+    let previous = new Set<string>();
+    log(`${job.name}: waiting for an idle host`);
+    const finish = (status: string) => {
+      const waitedMs = d.mono() - startedAt;
+      log(`${job.name}: idle wait ${status} after ${waitedMs} ms`);
+      return waitedMs;
+    };
+    for (;;) {
+      const problem = aborted ?? (ownsClaim() ? null : 'HOST-BUSY missing, unreadable or replaced');
+      if (problem !== null) {
+        finish('stopped');
+        return problem;
+      }
+      const { reasons, loads } = hostActivity(d);
+      if (reasons.length === 0) {
+        if (!ownsClaim()) {
+          finish('stopped');
+          return 'HOST-BUSY missing, unreadable or replaced';
+        }
+        const at = d.now().toISOString();
+        const evidence = { ...loads, at, waitedMs: finish('done'), reasonsSeen: [...reasonsSeen] };
+        record(`${job.name}-idle.json`, evidence);
+        idleEvidence.set(job.name, evidence);
+        return null;
+      }
+      for (const reason of reasons) {
+        if (!previous.has(reason)) log(`${job.name}: idle wait: ${reason}`);
+        reasonsSeen.add(reason);
+      }
+      previous = new Set(reasons);
+      await d.sleep(pollMs);
+    }
   };
   // #796 L5: wait until Tctl is at most maxTctlC. Elapsed time is monotonic and taken after each Tctl
   // read completes, so a reading after maxWaitSeconds never passes, however slow the read or
@@ -414,17 +478,21 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   };
   // A job's chain records are written by this session only: an existing one (an earlier session's)
   // would be mixed with this session's, so it is a STOP.
-  const leftovers = (job: Job) => ['cooldown.json', 'host-before.json', 'launch-check.json', 'thermal.jsonl', 'host-after.json', 'clock-events.json']
+  const leftovers = (job: Job) => ['idle.json', 'cooldown.json', 'host-before.json', 'launch-check.json', 'thermal.jsonl', 'host-after.json', 'clock-events.json']
     .map(f => join(q.chainDir, `${job.name}-${f}`)).filter(f => d.exists(f));
   const body = async (): Promise<Result> => {
     log(`queue ${q.name} (launch session ${launchSession}): ${q.jobs.map(j => `${j.name} (#${j.issue})`).join(', ')}; waiting for an idle host`);
     for (;;) {
       if (aborted) return stop(`${aborted} while waiting`);
-      if (busyReasons(d, q.hostBusy).length === 0 &&
-        d.claim(q.hostBusy, formatHostBusy(q.name, q.jobs.map(j => j.name), d.now(), launchSession))) break;
+      if (busyReasons(d, q.hostBusy).length === 0) {
+        const text = formatHostBusy(q.name, q.jobs.map(j => j.name), d.now(), launchSession);
+        if (d.claim(q.hostBusy, text)) {
+          claimText = text;
+          break;
+        }
+      }
       await d.sleep(pollMs);
     }
-    claimed = true;
     log('HOST-BUSY claimed');
     const snapshot = d.exec(['docker', 'ps', '-a', '--format', '{{.ID}} {{.State}}']);
     if (snapshot.status !== 0) return stop('docker ps -a failed; no container snapshot, nothing started');
@@ -435,6 +503,8 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       if (aborted) return stop(`${aborted}; ${job.name} not started`);
       const old = leftovers(job);
       if (old.length > 0) return stop(`${job.name}: chain records from another session exist: ${old.join(', ')}; job not started`);
+      const idleProblem = await waitForIdle(job);
+      if (idleProblem !== null || aborted) return stop(`${idleProblem ?? aborted} while waiting for idle; ${job.name} not started`);
       log(`${job.name}: go "${job.go.quote}" (${job.go.date})`);
       for (const [what, c] of Object.entries(job.confirmations ?? {})) log(`${job.name}: confirmed ${what}: "${c.quote}" (${c.date})`);
       if (job.cooldown) {
@@ -446,6 +516,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       const problems = preflight(d, q, job, before);
       if (problems.length > 0) return stop(`${job.name} preflight: ${problems.join('; ')}`);
       if (job.gate) {
+        if (!ownsClaim()) return stopForLostClaim(`before the gate; ${job.name} not started`);
         const gate = await run(job.gate, `${job.name}-gate.log`, job);
         log(`${job.name} gate: exit=${gate}`);
         if (aborted) return stop(`${aborted} during the gate; ${job.name} not started`);
@@ -464,9 +535,13 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       const sampling = job.thermalSampleSeconds === undefined ? null : sampleThermal(job, job.thermalSampleSeconds);
       if (typeof sampling === 'string') return stop(`${job.name} first thermal sample: ${sampling}; job not started`);
       if (aborted) { sampling?.(); return stop(`${aborted}; ${job.name} not started`); }
-      log(`${job.name}: start (once, no rerun)`);
       let exit: number | null;
-      try { exit = await run(d.platform.inhibit(job.command), `${job.name}.log`, job, late.policy); } finally { sampling?.(); }
+      try {
+        const command = d.platform.inhibit(job.command);
+        if (!ownsClaim()) return stopForLostClaim(`before ${job.name}; job not started`);
+        log(`${job.name}: start (once, no rerun)`);
+        exit = await run(command, `${job.name}.log`, job, late.policy);
+      } finally { sampling?.(); }
       endLogs();
       jobs.push({ name: job.name, exit });
       record(`${job.name}-host-after.json`, d.platform.record(q.chainDir) as unknown as Record<string, unknown>);
@@ -491,12 +566,21 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   let failure: { error: unknown } | null = null;
   try { result = await body(); } catch (error) { failure = { error }; }
   const released = await release();
-  if (result && released.problems.length > 0) result = { outcome: 'stop', reason: `workload not confirmed stopped, HOST-BUSY kept: ${released.problems.join('; ')}`, jobs };
+  const problems = released.problems.join('; ');
+  const releaseProblem = released.problems.length === 0 ? undefined : released.hostBusy === 'lost'
+    ? `${lostClaim}; workload not confirmed stopped: ${problems}`
+    : `workload not confirmed stopped, HOST-BUSY kept: ${problems}`;
+  if (result && releaseProblem) {
+    const reason = released.hostBusy === 'lost' && result.reason ? `${result.reason}; ${releaseProblem}` : releaseProblem;
+    result = { outcome: 'stop', reason, jobs };
+  }
+  if (result?.outcome === 'done' && released.hostBusy === 'lost') result = { outcome: 'stop', reason: lostClaim, jobs };
   // The record a judge binds to: the session id in every artefact, which jobs ran (with their
   // outputs, workload labels, exits and confirmations), and the release.
   const session: Session = {
-    id: launchSession, queue: q.name, outcome: result?.outcome ?? 'error', reason: result?.reason ?? (failure ? String(failure.error) : undefined),
-    jobs: jobs.map(j => { const x = q.jobs.find(y => y.name === j.name); return { ...j, out: x?.out, workloadLabel: x?.workloadLabel, thermalSampleSeconds: periods[j.name], confirmations: x?.confirmations, frequencyGo: x?.issue === 796 ? x.go : undefined }; }),
+    id: launchSession, queue: q.name, outcome: result?.outcome ?? 'error',
+    reason: result?.reason ?? (failure ? [String(failure.error), releaseProblem].filter(Boolean).join('; ') : undefined),
+    jobs: jobs.map(j => { const x = q.jobs.find(y => y.name === j.name); return { ...j, out: x?.out, workloadLabel: x?.workloadLabel, thermalSampleSeconds: periods[j.name], confirmations: x?.confirmations, frequencyGo: x?.issue === 796 ? x.go : undefined, idle: idleEvidence.get(j.name) }; }),
     hostBusy: released.hostBusy, workloadProblems: released.problems, finished: d.now().toISOString(),
   };
   try { d.write(join(q.chainDir, 'session.json'), JSON.stringify(session, null, 2) + '\n'); } catch (e) { note(`session.json: ${String(e)}`); }

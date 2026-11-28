@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { HostRecord } from '../harness-core/host-record.ts';
 import { formatHostBusy, parseHostBusy } from './host-busy.ts';
-import { clockEvents, fixedRate, launch, workers, type Deps } from './launcher.ts';
+import { clockEvents, dockerPollMs, dockerSettleMs, fixedRate, launch, launchExitCode, pollMs, workers, type Deps } from './launcher.ts';
 import { darwin, linux, type Platform } from './platform.ts';
 import { parseQueue, type Queue } from './queue.ts';
 
@@ -16,7 +16,7 @@ const queue = (jobs = [job('a'), job('b')]): Queue => parseQueue(JSON.stringify(
 type World = {
   files: Map<string, string>; containers: string; ps: string; load: number[]; violations: string[]; exits: number[];
   head: string; dirty: string; node: string; free: number | null; dockerFree?: number | null; spawned: string[][]; captured: string[]; stoppedLogs: number;
-  kills: number; busyAtExit: boolean[]; psLater?: string;
+  kills: number; busyAtExit: boolean[];
   // Thermal fakes: Tctl per reading (the last one repeats; null is unreadable), the clock that sleep advances,
   // the host record and the sampler's intervals and stops.
   tctl: (number | null)[]; clock: number; record?: HostRecord; noThermal?: boolean; everyMs: number[]; samplerStops: number;
@@ -40,7 +40,8 @@ function world(over: Partial<World> = {}): World {
 }
 function deps(w: World, platform?: Platform): Deps {
   const p: Platform = platform ?? { name: 'fake', inhibit: a => ['inhibit', ...a], violations: () => w.violations,
-    load15: () => (w.load.length > 1 ? w.load.shift()! : w.load[0]), record: () => w.record ?? ({ fake: true } as unknown as HostRecord),
+    loadAverages: () => ({ load1: 2.44, load5: 2.52, load15: w.load.length > 1 ? w.load.shift()! : w.load[0] }),
+    record: () => w.record ?? ({ fake: true } as unknown as HostRecord),
     thermal: now => {
       if (w.noThermal) return null;
       if (w.thermalThrows) throw new Error('EIO');
@@ -54,7 +55,7 @@ function deps(w: World, platform?: Platform): Deps {
     exec: argv => {
       const k = argv.join(' ');
       if (k === 'docker ps -q') return { status: 0, stdout: w.containers };
-      if (k.startsWith('ps ')) { const out = w.ps; if (w.psLater !== undefined) w.ps = w.psLater; return { status: 0, stdout: out }; }
+      if (k.startsWith('ps ')) return { status: 0, stdout: w.ps };
       if (k === 'git rev-parse HEAD') return { status: 0, stdout: w.head };
       if (k === 'git status --porcelain') return { status: 0, stdout: w.dirty };
       if (k === 'cat .node-version') return { status: 0, stdout: w.node };
@@ -80,6 +81,7 @@ function deps(w: World, platform?: Platform): Deps {
     },
     captureLogs: (label, file) => { w.captured.push(`${label} -> ${file}`); return () => { w.stoppedLogs++; }; },
     exists: path => w.files.has(path),
+    read: path => w.files.get(path) ?? null,
     claim: (path, text) => { if (w.files.has(path)) return false; w.files.set(path, text); return true; },
     remove: path => { w.files.delete(path); },
     append: (path, text) => { w.files.set(path, (w.files.get(path) ?? '') + text); },
@@ -148,6 +150,171 @@ test('the launcher waits until the host is idle, then claims HOST-BUSY', async (
   assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
+// Apply a change after the last Docker snapshot of the first job's workload check.
+function afterFirstWorkloadCheck(d: Deps, change: () => void) {
+  const exec = d.exec;
+  let snapshots = 0;
+  d.exec = (argv, cwd) => {
+    const result = exec(argv, cwd);
+    // One snapshot at claim, then both endpoints of the settle window and every poll between.
+    if (argv.join(' ') === 'docker ps -a --format {{.ID}} {{.State}}' && ++snapshots === 2 + dockerSettleMs / dockerPollMs) change();
+    return result;
+  };
+}
+
+test('the second job waits for load15 to drop below the limit and records its idle release', async () => {
+  const w = world();
+  const d = deps(w);
+  afterFirstWorkloadCheck(d, () => { w.load = [3.04, 3.04, 3, 2.1]; });
+  const sleep = d.sleep;
+  let polls = 0;
+  d.sleep = async ms => {
+    assert.equal(ms, pollMs);
+    assert.equal(w.spawned.length, 1);
+    assert.equal(w.files.has('/runs/chain/b-host-before.json'), false);
+    assert.equal(w.files.has('/runs/chain/b-cooldown.json'), false);
+    polls++;
+    await sleep(ms);
+  };
+  const r = await launch(queue([job('a'), job('b', { ...cooling, gate: ['node', 'gate.ts'] })]), d);
+  assert.equal(r.outcome, 'done');
+  assert.equal(w.spawned.length, 3);
+  assert.equal(polls, 3);
+  const { launchSession, ...idle } = JSON.parse(w.files.get('/runs/chain/b-idle.json')!);
+  assert.equal(launchSession, 'sess-1');
+  assert.deepEqual(idle, {
+    load1: 2.44, load5: 2.52, load15: 2.1, at: new Date(w.clock - 2 * dockerSettleMs).toISOString(),
+    waitedMs: 3 * pollMs, reasonsSeen: ['load15 3.04 >= 3', 'load15 3.00 >= 3'],
+  });
+  const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+  assert.deepEqual(session.jobs[1].idle, idle);
+  assert.equal(session.jobs[0].idle.waitedMs, 0);
+  assert.match(chain(w), /b: waiting for an idle host/);
+  assert.equal(chain(w).match(/b: idle wait: load15 3\.04/g)?.length, 1);
+  assert.match(chain(w), new RegExp(`b: idle wait done after ${3 * pollMs} ms`));
+});
+
+test('the second job waits while either a container or a worker is running', async () => {
+  const w = world();
+  const d = deps(w);
+  afterFirstWorkloadCheck(d, () => { w.containers = 'c1\n'; });
+  const sleep = d.sleep;
+  const worker = '77 cargo test --all';
+  let polls = 0;
+  d.sleep = async ms => {
+    assert.equal(ms, pollMs);
+    assert.equal(w.spawned.length, 1);
+    w.containers = '';
+    w.ps = ++polls === 1 ? worker : '';
+    await sleep(ms);
+  };
+  assert.equal((await launch(queue(), d)).outcome, 'done');
+  assert.equal(w.spawned.length, 2);
+  assert.equal(polls, 2);
+  const idle = JSON.parse(w.files.get('/runs/chain/b-idle.json')!);
+  assert.deepEqual(idle.reasonsSeen, ['containers running', `workers running: ${worker}`]);
+});
+
+for (const [command, reason] of [['docker ps -q', 'docker ps failed'], ['ps -Ao pid=,command=', 'ps failed']]) {
+  test(`the second job keeps waiting when ${command} fails`, async () => {
+    const w = world();
+    const d = deps(w);
+    let failing = false;
+    afterFirstWorkloadCheck(d, () => { failing = true; });
+    const exec = d.exec;
+    d.exec = (argv, cwd) => failing && argv.join(' ') === command ? { status: 1, stdout: '' } : exec(argv, cwd);
+    const sleep = d.sleep;
+    let polls = 0;
+    d.sleep = async ms => {
+      assert.equal(ms, pollMs);
+      assert.equal(w.spawned.length, 1);
+      assert.equal(w.files.has('/runs/chain/b-idle.json'), false);
+      failing = ++polls < 2;
+      await sleep(ms);
+    };
+    assert.equal((await launch(queue(), d)).outcome, 'done');
+    assert.equal(w.spawned.length, 2);
+    assert.equal(polls, 2);
+    const idle = JSON.parse(w.files.get('/runs/chain/b-idle.json')!);
+    assert.deepEqual(idle.reasonsSeen, [reason]);
+  });
+}
+
+test('a missing or replaced HOST-BUSY between jobs stops the queue and preserves a replacement', async () => {
+  for (const replacement of [null, formatHostBusy('other', ['c'], new Date(0), 'sess-2')]) {
+    const w = world();
+    const d = deps(w);
+    const q = queue();
+    afterFirstWorkloadCheck(d, () => {
+      if (replacement === null) w.files.delete(q.hostBusy);
+      else w.files.set(q.hostBusy, replacement);
+    });
+    const r = await launch(q, d);
+    assert.equal(r.outcome, 'stop');
+    assert.match(r.reason ?? '', /HOST-BUSY missing, unreadable or replaced.*b not started/);
+    assert.deepEqual(r.jobs, [{ name: 'a', exit: 0 }]);
+    assert.equal(w.spawned.length, 1);
+    assert.equal(w.files.get(q.hostBusy) ?? null, replacement);
+    const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+    assert.equal(session.hostBusy, 'lost');
+  }
+});
+
+for (const loss of ['deleted', 'unreadable', 'replaced']) {
+  test(`HOST-BUSY ${loss} during the final job stops the queue`, async () => {
+    const w = world();
+    const d = deps(w);
+    const q = queue();
+    const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+    const spawn = d.spawn;
+    d.spawn = (argv, opts) => {
+      const child = spawn(argv, opts);
+      if (opts.env?.FUKULOW_LAUNCH_JOB === 'b') {
+        if (loss === 'deleted') w.files.delete(q.hostBusy);
+        if (loss === 'replaced') w.files.set(q.hostBusy, replacement);
+        if (loss === 'unreadable') {
+          const read = d.read;
+          d.read = path => path === q.hostBusy ? null : read(path);
+        }
+      }
+      return child;
+    };
+    const r = await launch(q, d);
+    assert.deepEqual(r, { outcome: 'stop', reason: 'HOST-BUSY lost before release', jobs: [{ name: 'a', exit: 0 }, { name: 'b', exit: 0 }] });
+    assert.equal(launchExitCode(r.outcome), 3);
+    const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+    assert.equal(session.outcome, 'stop');
+    assert.equal(session.reason, r.reason);
+    assert.equal(session.hostBusy, 'lost');
+    if (loss === 'replaced') assert.equal(w.files.get(q.hostBusy), replacement);
+    else assert.equal(w.files.has(q.hostBusy), loss === 'unreadable');
+  });
+}
+
+test('a signal interrupts the second job idle wait, stops the queue and releases HOST-BUSY', async () => {
+  const w = world({ signal: { at: 'wait' } });
+  const d = deps(w);
+  const q = queue();
+  afterFirstWorkloadCheck(d, () => { w.load = [5]; });
+  let polls = 0;
+  d.sleep = async ms => {
+    assert.equal(ms, pollMs);
+    assert.equal(w.spawned.length, 1);
+    assert.equal(w.files.has(q.hostBusy), true);
+    polls++;
+    w.signal?.handler?.('SIGINT');
+  };
+  const r = await launch(q, d);
+  assert.equal(r.outcome, 'stop');
+  assert.match(r.reason ?? '', /SIGINT while waiting for idle; b not started/);
+  assert.equal(w.spawned.length, 1);
+  assert.equal(w.kills, 0);
+  assert.equal(polls, 1);
+  assert.equal(w.files.has('/runs/chain/b-idle.json'), false);
+  assert.equal(w.files.has(q.hostBusy), false);
+  assert.match(chain(w), /b: idle wait stopped after 0 ms/);
+});
+
 test('a held HOST-BUSY is never taken over or removed', async () => {
   const w = world({ signal: { at: 'wait' } });
   w.files.set('/runs/HOST-BUSY', 'other chain\n');
@@ -171,8 +338,6 @@ test('each preflight STOP ends the queue before launch and releases HOST-BUSY', 
     [{ free: 10 * GiB }, {}, /host free 10\.0 GiB < 40 GiB/],
     [{ free: null }, { image: 'postgres:18.6', workloadLabel: 'l' }, /host free unreadable.*Docker free unreadable/],
     [{ dockerFree: 5 * GiB }, { image: 'postgres:18.6', workloadLabel: 'l' }, /Docker free 5\.0 GiB < 40 GiB/],
-    // A worker that starts after the idle check (the first ps) is caught by the preflight (the second).
-    [{ psLater: '1 /sbin/init\n77 cargo test --all\n' }, {}, /workers running: 77 cargo test/],
   ];
   for (const [over, extra, pattern] of cases) {
     const w = world(over);
@@ -188,12 +353,27 @@ test('each preflight STOP ends the queue before launch and releases HOST-BUSY', 
   assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
+test('a worker that starts after the per-job idle check is caught by preflight', async () => {
+  const w = world();
+  const d = deps(w);
+  const record = d.platform.record;
+  d.platform.record = path => {
+    w.ps = '77 cargo test --all\n';
+    return record(path);
+  };
+  const r = await launch(queue([job('a')]), d);
+  assert.equal(r.outcome, 'stop');
+  assert.match(r.reason ?? '', /a preflight: workers running: 77 cargo test/);
+  assert.equal(w.spawned.length, 0);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
+});
+
 test('containers that appear after the idle check stop the job', async () => {
   const w = world();
   const d = deps(w);
   let calls = 0;
   const exec = d.exec;
-  d.exec = (argv, cwd) => (argv.join(' ') === 'docker ps -q' && ++calls > 1 ? { status: 0, stdout: 'c1\n' } : exec(argv, cwd));
+  d.exec = (argv, cwd) => (argv.join(' ') === 'docker ps -q' && ++calls > 2 ? { status: 0, stdout: 'c1\n' } : exec(argv, cwd));
   const r = await launch(queue([job('a')]), d);
   assert.match(r.reason ?? '', /containers running/);
   assert.equal(w.spawned.length, 0);
@@ -295,6 +475,131 @@ test('platform parts: sleep prevention and conditions', () => {
 });
 
 const cooling = { cooldown: { maxTctlC: 50, maxWaitSeconds: 1200 } };
+
+for (const loss of ['deleted', 'unreadable', 'replaced']) {
+  for (const phase of ['cool-down', 'preflight', 'gate run']) {
+    test(`HOST-BUSY ${loss} during the ${phase} blocks the next spawn`, async () => {
+      const w = world({ tctl: [70, 40] });
+      const d = deps(w);
+      const gate = ['node', 'gate.ts'];
+      const q = queue([job('a', { ...cooling, gate, thermalSampleSeconds: 5, postgresLogLabel: 'io.fukulow.test=a' })]);
+      const original = formatHostBusy(q.name, ['a'], d.now(), 'sess-1');
+      const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+      const loseMarker = () => {
+        assert.ok(w.files.has('/runs/chain/a-idle.json'));
+        assert.equal(w.files.get(q.hostBusy), original);
+        if (loss === 'deleted') w.files.delete(q.hostBusy);
+        if (loss === 'replaced') w.files.set(q.hostBusy, replacement);
+        if (loss === 'unreadable') {
+          const read = d.read;
+          d.read = path => path === q.hostBusy ? null : read(path);
+        }
+      };
+      if (phase === 'cool-down') {
+        const sleep = d.sleep;
+        d.sleep = ms => { loseMarker(); return sleep(ms); };
+      } else if (phase === 'preflight') {
+        const freeBytes = d.freeBytes;
+        d.freeBytes = path => { loseMarker(); return freeBytes(path); };
+      } else {
+        const spawn = d.spawn;
+        d.spawn = (argv, opts) => {
+          const child = spawn(argv, opts);
+          if (argv === q.jobs[0].gate) return { ...child, done: child.done.then(code => { loseMarker(); return code; }) };
+          return child;
+        };
+      }
+
+      const r = await launch(q, d);
+      const gateRan = phase === 'gate run';
+      const reason = gateRan ? 'before a; job not started' : 'before the gate; a not started';
+      assert.deepEqual(r, { outcome: 'stop', reason: `HOST-BUSY missing, unreadable or replaced ${reason}`, jobs: [] });
+      assert.equal(launchExitCode(r.outcome), 3);
+      assert.deepEqual(w.spawned, gateRan ? [gate] : []);
+      assert.doesNotMatch(chain(w), /a: start \(once, no rerun\)/);
+      assert.deepEqual([w.captured.length, w.stoppedLogs, w.samplerStops], gateRan ? [1, 1, 1] : [0, 0, 0]);
+      const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+      assert.equal(session.hostBusy, 'lost');
+      assert.equal(w.files.get(q.hostBusy), loss === 'deleted' ? undefined : loss === 'replaced' ? replacement : original);
+    });
+  }
+}
+
+test('the claim is checked after job setup and an unreadable marker is left in place even if it becomes readable again', async () => {
+  const w = world();
+  const d = deps(w);
+  const q = queue([job('a', { thermalSampleSeconds: 5, postgresLogLabel: 'io.fukulow.test=a' })]);
+  const read = d.read;
+  const inhibit = d.platform.inhibit;
+  d.platform = { ...d.platform, inhibit: argv => {
+    assert.deepEqual(w.everyMs, [5000]);
+    assert.equal(w.captured.length, 1);
+    d.read = path => {
+      if (path !== q.hostBusy) return read(path);
+      d.read = read;
+      return null;
+    };
+    return inhibit(argv);
+  } };
+  const r = await launch(q, d);
+  assert.deepEqual(r, { outcome: 'stop', reason: 'HOST-BUSY missing, unreadable or replaced before a; job not started', jobs: [] });
+  assert.equal(launchExitCode(r.outcome), 3);
+  assert.deepEqual(w.spawned, []);
+  assert.deepEqual([w.samplerStops, w.stoppedLogs], [1, 1]);
+  assert.equal(JSON.parse(w.files.get('/runs/chain/session.json')!).hostBusy, 'lost');
+  assert.equal(w.files.get(q.hostBusy), formatHostBusy(q.name, ['a'], d.now(), 'sess-1'));
+});
+
+test('the second job does not spawn when HOST-BUSY is replaced after its idle wait', async () => {
+  const w = world();
+  const d = deps(w);
+  const q = queue();
+  const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+  const freeBytes = d.freeBytes;
+  d.freeBytes = path => {
+    if (w.files.has('/runs/chain/b-idle.json')) w.files.set(q.hostBusy, replacement);
+    return freeBytes(path);
+  };
+  const r = await launch(q, d);
+  assert.deepEqual(r, { outcome: 'stop', reason: 'HOST-BUSY missing, unreadable or replaced before b; job not started',
+    jobs: [{ name: 'a', exit: 0 }] });
+  assert.equal(launchExitCode(r.outcome), 3);
+  assert.deepEqual(w.envs.map(env => env?.FUKULOW_LAUNCH_JOB), ['a']);
+  assert.match(chain(w), /a: start \(once, no rerun\)/);
+  assert.doesNotMatch(chain(w), /b: start \(once, no rerun\)/);
+  assert.equal(JSON.parse(w.files.get('/runs/chain/session.json')!).hostBusy, 'lost');
+  assert.equal(w.files.get(q.hostBusy), replacement);
+});
+
+test('a lost claim before the job spawn preserves the marker and reports a lingering gate workload', async () => {
+  const w = world();
+  const d = deps(w);
+  const gate = ['node', 'gate.ts'];
+  const q = queue([job('a', { gate })]);
+  const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+  const spawn = d.spawn;
+  d.spawn = (argv, opts) => {
+    const child = spawn(argv, opts);
+    return { ...child, done: child.done.then(code => {
+      w.files.set(q.hostBusy, replacement);
+      w.psAll = ['c1 running\n'];
+      return code;
+    }) };
+  };
+
+  const r = await launch(q, d);
+  const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+  const problem = /containers not live at the claim were live after the job: c1 running/;
+  assert.deepEqual(w.spawned, [gate]);
+  assert.equal(w.files.get(q.hostBusy), replacement);
+  assert.equal(session.hostBusy, 'lost');
+  assert.match(session.workloadProblems.join(), problem);
+  assert.equal(r.outcome, 'stop');
+  assert.equal(session.reason, r.reason);
+  assert.match(session.reason, /HOST-BUSY lost.*workload not confirmed stopped/);
+  assert.match(session.reason, problem);
+  assert.match(chain(w), /HOST-BUSY lost.*workload not confirmed stopped.*c1 running/);
+});
 
 test('the cool-down waits until Tctl is at most the limit, then starts the job, and keeps every reading', async () => {
   const w = world({ tctl: [70, 60, 50] });
@@ -486,7 +791,7 @@ test('every artefact, the HOST-BUSY marker and each spawn carry the one launch s
   assert.equal((await launch(queue([job('a', label)]), d)).outcome, 'done');
   assert.deepEqual(parseHostBusy(marker), { jobs: ['a'], session: 'sess-1' });
   assert.deepEqual(w.envs.map(e => e?.FUKULOW_LAUNCH_SESSION), ['sess-1', 'sess-1']); // gate and job
-  for (const f of ['a-cooldown.json', 'a-host-before.json', 'a-launch-check.json', 'a-host-after.json']) {
+  for (const f of ['a-idle.json', 'a-cooldown.json', 'a-host-before.json', 'a-launch-check.json', 'a-host-after.json']) {
     assert.equal(JSON.parse(w.files.get('/runs/chain/' + f) ?? '{}').launchSession, 'sess-1', f);
   }
   const lines = files(w, '-thermal.jsonl')[0].trim().split('\n').map(l => JSON.parse(l));
@@ -496,7 +801,7 @@ test('every artefact, the HOST-BUSY marker and each spawn carry the one launch s
 });
 
 test('chain records an earlier session left for the job are a STOP, never appended to', async () => {
-  for (const f of ['a-thermal.jsonl', 'a-cooldown.json', 'a-host-before.json']) {
+  for (const f of ['a-idle.json', 'a-thermal.jsonl', 'a-cooldown.json', 'a-host-before.json']) {
     const w = world();
     w.files.set('/runs/chain/' + f, '{"launchSession":"old"}\n');
     const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), deps(w));
