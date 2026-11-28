@@ -636,14 +636,20 @@
     const canRestore = pending.some(
       (entry) => entry.clientMessageId === id && entry.status === 'failed' && !entry.retryable,
     )
-    confirmReplaceDraftWithFailedSend(
-      id,
-      composerState.draft,
-      canRestore,
-      (d) => rc.setDraft(d),
-      (targetId) => rc.restore(targetId),
-      composerRef,
-    )
+    if (
+      confirmReplaceDraftWithFailedSend(
+        id,
+        composerState.draft,
+        canRestore,
+        (d) => rc.setDraft(d),
+        (targetId) => rc.restore(targetId),
+        null,
+      )
+    ) {
+      void tick().then(() => {
+        if (confirmReplaceId === null) focusTarget(composerRef)
+      })
+    }
   }
 
   function handleCancelReplace() {

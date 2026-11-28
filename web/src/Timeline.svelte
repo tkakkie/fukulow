@@ -537,18 +537,24 @@
     if (!id) return
     const target = mainPending.find((p) => p.clientMessageId === id && p.status === 'failed')
     const canRestore = !targetUnavailable && Boolean(target)
-    confirmReplaceDraftWithFailedSend(
-      id,
-      cState.draft,
-      canRestore,
-      (draft) => channel.setDraft(draft),
-      (targetId) => channel.restore(targetId),
-      composerRef,
-      {
-        currentTopicDraft: cState.topicDraft,
-        setTopicDraft: (topicDraft) => channel.setTopicDraft(topicDraft),
-      },
-    )
+    if (
+      confirmReplaceDraftWithFailedSend(
+        id,
+        cState.draft,
+        canRestore,
+        (draft) => channel.setDraft(draft),
+        (targetId) => channel.restore(targetId),
+        null,
+        {
+          currentTopicDraft: cState.topicDraft,
+          setTopicDraft: (topicDraft) => channel.setTopicDraft(topicDraft),
+        },
+      )
+    ) {
+      void tick().then(() => {
+        if (confirmReplaceId === null) focusTarget(composerRef)
+      })
+    }
   }
 
   function handleCancelReplace() {

@@ -1,4 +1,4 @@
-import { flushSync, mount, unmount } from 'svelte'
+import { flushSync, mount, tick, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import Composer from './Composer.svelte'
 import SectionDialogs, { type SectionDialogMode } from './SectionDialogs.svelte'
@@ -891,6 +891,42 @@ describe('Dialog native <dialog> + showModal() (#843)', () => {
     expect(dialog!.open).toBe(false)
     expect(dom.doc.querySelector('dialog:modal')).toBeNull()
 
+    await unmount(instance)
+  })
+
+  it('omits disallowed tabindex on <dialog> and falls back to focusing <dialog> when it has no focusable controls', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const opener = dom.doc.createElement('button')
+    opener.textContent = '開く'
+    host.appendChild(opener)
+    opener.focus()
+
+    const state = $state({ open: true })
+    const instance = mount(Dialog, {
+      target: host as unknown as Element,
+      props: {
+        get open() { return state.open },
+        title: '操作なしダイアログ',
+        description: 'ボタンがありません。',
+      },
+    })
+    flushSync()
+    await tick()
+
+    const dialog = dom.doc.querySelector('dialog:modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.getAttribute('tabindex')).toBeNull()
+    expect(dom.doc.activeElement).toBe(dialog)
+
+    // Tab with no focusable controls keeps focus on <dialog> itself.
+    const tab = dialog!.keydown('Tab')
+    expect(tab.defaultPrevented).toBe(true)
+    expect(dom.doc.activeElement).toBe(dialog)
+
+    state.open = false
+    flushSync()
+    await tick()
     await unmount(instance)
   })
 })

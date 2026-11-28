@@ -168,7 +168,6 @@
     class="ui-dialog"
     aria-modal="true"
     aria-label={title}
-    tabindex="-1"
     oncancel={handleDialogCancel}
     onkeydown={handleDialogKeydown}
   >
@@ -204,6 +203,10 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-16);
+  }
+
+  .ui-dialog::backdrop {
+    background-color: transparent;
   }
 
   .ui-dialog__header {
