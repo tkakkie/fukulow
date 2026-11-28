@@ -357,5 +357,9 @@ pub fn database_failure(error: &sqlx::Error) {
     }
 }
 
+pub(crate) fn internal_failure(kind: &'static str, failure_kind: &'static str) {
+    tracing::warn!(target: TARGET, event = "database_failure", kind, failure_kind);
+}
+
 #[cfg(test)]
 pub(crate) mod tests;

@@ -104,7 +104,7 @@ pub(super) async fn record_move(
     organization: Uuid,
     actor: Uuid,
     event: &MessageMoveEvent,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), crate::database::InternalError> {
     sqlx::query(
         "INSERT INTO channel_log (organization_id, channel_id, event_seq, kind, message_id, sender, operation_id, source_topic_id, destination_topic_id) \
          VALUES ($1, $2, $3, 'move', $4, $5, $6, $7, $8)",
@@ -124,7 +124,7 @@ pub(super) async fn record_move(
     .await?
     .rows_affected();
     if advanced != 1 {
-        return Err(sqlx::Error::RowNotFound);
+        return Err(crate::database::InternalError::Invariant);
     }
     Ok(())
 }
@@ -171,7 +171,7 @@ pub(super) fn hydrate(
     mut after: i64,
     through: i64,
     limit: i64,
-) -> Result<Vec<ChannelEvent>, sqlx::Error> {
+) -> Result<Vec<ChannelEvent>, crate::database::InternalError> {
     let last_expected = after.max(through.min(after.saturating_add(limit)));
     let mut messages = Vec::with_capacity(rows.len());
     let only = rows.len() == 1;
@@ -180,12 +180,12 @@ pub(super) fn hydrate(
             if only {
                 continue; // Authorized empty page's LEFT JOIN sentinel.
             }
-            return Err(sqlx::Error::RowNotFound);
+            return Err(crate::database::InternalError::Invariant);
         };
         if after.checked_add(1) != Some(position)
             || row.try_get::<Option<bool>, _>("duplicate")? == Some(true)
         {
-            return Err(sqlx::Error::RowNotFound);
+            return Err(crate::database::InternalError::Invariant);
         }
         let event = match row.try_get::<&str, _>("kind")? {
             "create" if row.try_get::<Option<i64>, _>("seq")? == Some(position) => {
@@ -203,13 +203,13 @@ pub(super) fn hydrate(
                 destination_topic_id: row.try_get("destination_topic_id")?,
                 operation_id: row.try_get("operation_id")?,
             }),
-            _ => return Err(sqlx::Error::RowNotFound),
+            _ => return Err(crate::database::InternalError::Invariant),
         };
         messages.push(event);
         after = position;
     }
     if after != last_expected {
-        return Err(sqlx::Error::RowNotFound);
+        return Err(crate::database::InternalError::Invariant);
     }
     Ok(messages)
 }
@@ -234,7 +234,7 @@ pub(crate) async fn replay_page(
     channel: Uuid,
     after: i64,
     through: i64,
-) -> Result<Vec<ChannelEvent>, sqlx::Error> {
+) -> Result<Vec<ChannelEvent>, crate::database::InternalError> {
     let sql = replay_page_sql();
     let rows = crate::database::organization_statement(
         pool,
@@ -311,12 +311,12 @@ async fn authorized_page(
     .await?;
     check_visibility(
         rows.first()
-            .ok_or(sqlx::Error::RowNotFound)?
+            .ok_or(crate::database::InternalError::Invariant)?
             .try_get::<Option<bool>, _>("visible")?,
     )?;
     let history_generation: Uuid = rows
         .first()
-        .ok_or(sqlx::Error::RowNotFound)?
+        .ok_or(crate::database::InternalError::Invariant)?
         .try_get("history_generation")?;
     if generation.is_some_and(|old| old != history_generation) {
         return Err(MessageError::HistoryGenerationChanged);

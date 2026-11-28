@@ -381,7 +381,7 @@ impl Drop for Lead {
                 .charged
                 .then(|| Pending::Unknown(self.limiter.now() + UNKNOWN_TTL, self.intent))
                 .or_else(|| self.kept_marker());
-            let failure = super::MessageError::Database(sqlx::Error::WorkerCrashed);
+            let failure = super::MessageError::from(crate::database::InternalError::Unavailable);
             self.limiter
                 .finish(self.key, next, Settled::Executed(Some(Arc::new(failure))));
             return;
@@ -390,7 +390,7 @@ impl Drop for Lead {
         let next = self.kept_marker();
         let settled = if self.charged {
             // Paid but never executed: identical waiters must not pay again.
-            let failure = super::MessageError::Database(sqlx::Error::WorkerCrashed);
+            let failure = super::MessageError::from(crate::database::InternalError::Unavailable);
             Settled::Refused(Arc::new(failure))
         } else {
             Settled::Released

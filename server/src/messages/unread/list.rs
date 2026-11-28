@@ -69,7 +69,9 @@ pub(in crate::messages) async fn visible_channels(
                     unread_count,
                     main_mention_unread_count,
                     mention_unread_count,
-                } = counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
+                } = counts
+                    .remove(&channel.id)
+                    .ok_or(crate::database::InternalError::Invariant)?;
                 result.push(UnreadChannel {
                     channel,
                     history_generation,

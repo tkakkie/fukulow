@@ -247,7 +247,7 @@ impl auth::activity::ActivityChange for TargetChange {
                             },
                         )
                         .await?;
-                    return Ok::<_, sqlx::Error>(());
+                    return Ok::<_, crate::database::InternalError>(());
                 }
                 let before_grants: HashSet<_> = self
                     .before
@@ -362,7 +362,7 @@ impl auth::activity::ActivityChange for TargetChange {
                             .await?;
                     }
                 }
-                Ok::<_, sqlx::Error>(())
+                Ok::<_, crate::database::InternalError>(())
             };
             let _ = tokio::time::timeout(Duration::from_secs(10), work).await;
         });
@@ -395,7 +395,7 @@ impl Activity {
         channel: Uuid,
         public: bool,
         role: Role,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), crate::database::InternalError> {
         let (organization, target) = (change.organization, change.target);
         #[cfg(test)]
         test_pause(organization, channel, "revocation", Some(target)).await;
@@ -465,7 +465,7 @@ impl Activity {
         entry: &Entry,
         channel: Uuid,
         mutation: Capture,
-    ) -> Result<impl auth::activity::ActivityChange, sqlx::Error> {
+    ) -> Result<impl auth::activity::ActivityChange, crate::database::InternalError> {
         let change = TargetChange {
             activity: self.clone(),
             organization: entry.organization,

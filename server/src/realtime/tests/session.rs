@@ -658,3 +658,56 @@ async fn fallback_close_answers_keepalive_and_preserves_close_code() {
         tungstenite::Message::Pong(vec![1].into())
     );
 }
+
+#[fukulow_test::test]
+async fn initial_session_check_deadline_closes_1011_and_allows_reconnect(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let isolated = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .acquire_timeout(Duration::from_secs(60))
+        .connect_with(f.state.pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let changes = crate::auth::SessionChanges::default();
+    let worker = changes.pause_fallback();
+    let session_check = changes.pause_session_check();
+    let server = Server::start(crate::app(
+        AppState {
+            pool: isolated.clone(),
+            session_changes: changes,
+            ..f.state.clone()
+        },
+        Default::default(),
+    ))
+    .await;
+
+    let mut socket = server.connect(&f.token).await;
+    session_check.entered_within(Duration::from_secs(2)).await;
+    let held = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(isolated.acquire().await.unwrap());
+        }
+        held
+    })
+    .await
+    .unwrap();
+    let started = tokio::time::Instant::now();
+    session_check.release();
+    let frame = tokio::time::timeout(Duration::from_secs(7), delivery_next(&mut socket, None))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let tungstenite::Message::Close(Some(close)) = frame else {
+        panic!("expected initial Session check to close the socket");
+    };
+    assert_eq!(u16::from(close.code), 1011);
+    assert!(started.elapsed() >= Duration::from_secs(5));
+
+    drop(held);
+    worker.release();
+    let mut reconnected = server.connect(&f.token).await;
+    subscribe(&mut reconnected, f.channel, 0).await;
+    ready(&mut reconnected, f.channel, 0).await;
+}

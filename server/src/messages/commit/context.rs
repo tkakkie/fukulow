@@ -36,12 +36,12 @@ async fn send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort(po
             "SELECT set_config('fukulow.organization_id', $1, true)"
         );
         assert_eq!(
-            settings(tx.connection().unwrap()).await,
+            settings(tx.connection_mut().unwrap()).await,
             (Some(organization.to_string()), None)
         );
         if outcome >= 3 {
             sqlx::query("SELECT 1 / 0")
-                .execute(tx.connection().unwrap())
+                .execute(tx.connection_mut().unwrap())
                 .await
                 .unwrap_err();
         }
@@ -79,7 +79,7 @@ async fn send_context_cancelled_begin_setting_work_and_cleanup_discard(pool: PgP
             async |single: &PgPool| {
                 let mut tx = begin(single, Uuid::new_v4()).await;
                 sqlx::query("SELECT 314314")
-                    .execute(tx.connection()?)
+                    .execute(tx.connection_mut()?)
                     .await?;
                 if statement == "ROLLBACK" {
                     tx.rollback().await
@@ -98,7 +98,9 @@ async fn send_context_failed_rollback_discards_connection(pool: PgPool) {
     let pools = pools(pool).await;
     interrupted::failed_rollback(&pools.app, async |single: &PgPool, pid| {
         let tx = begin(single, Uuid::new_v4()).await;
-        let error = tx.rollback().await.unwrap_err();
+        let crate::database::InternalError::Db(error) = tx.rollback().await.unwrap_err() else {
+            panic!("expected the original SQLx error");
+        };
         assert_eq!(
             error.as_database_error().unwrap().code().as_deref(),
             Some("22012")

@@ -248,8 +248,17 @@ test('v22 records the ServeOptions refactor with v21 conditions', () => {
     ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs']);
 });
 
+function pinnedV23(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v23.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), 'ffa26c9be8bd9769211b95f424b8f2d5212054ee5d3e4e808d969f13abecc249');
+  const v23 = JSON.parse(text);
+  assert.equal(v23.sha256, '8dbc50d689fd27da0ff33da347137553f49859cd97ff84a8e65fb2352a3dfdef');
+  assert.equal(v23.sha256, hash(JSON.stringify(v23.frozen)));
+  return v23;
+}
+
 test('v23 records the transaction connection guard refactor with v22 conditions', () => {
-  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version, sourceHashes, ...conditions} = pinnedV23().frozen;
   const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV22().frozen;
   assert.equal(version, previousVersion + 1);
   assert.deepEqual(conditions, previousConditions);
@@ -257,6 +266,17 @@ test('v23 records the transaction connection guard refactor with v22 conditions'
   const before = new Map(previousSources.map(source => [source.path, source.sha256]));
   assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
     ['load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
+});
+
+test('v24 records the typed internal failure refactor with v23 conditions', () => {
+  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV23().frozen;
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs']);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {

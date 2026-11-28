@@ -249,7 +249,9 @@ pub(crate) async fn identities(
         .collect();
     rows.into_iter()
         .map(|(id, peer, created_at)| {
-            let (name, active) = peers.remove(&peer).ok_or(sqlx::Error::RowNotFound)?;
+            let (name, active) = peers
+                .remove(&peer)
+                .ok_or(crate::database::InternalError::Invariant)?;
             Ok(SelectedDm {
                 identity: DmDiscovery {
                     id,
@@ -266,18 +268,36 @@ pub(crate) async fn identities(
         .collect()
 }
 
+#[derive(Debug)]
+pub(crate) enum SendError {
+    Denied(ApiError),
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for SendError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Db(error)
+    }
+}
+
+impl From<ApiError> for SendError {
+    fn from(error: ApiError) -> Self {
+        Self::Denied(error)
+    }
+}
+
 pub(crate) async fn send_locks(
     connection: &mut PgConnection,
     org: Uuid,
     sender: (Uuid, i64),
     channel: Uuid,
     targets: &[Uuid],
-) -> Result<Option<(Vec<(Uuid, i64, Uuid)>, Vec<Uuid>)>, ApiError> {
+) -> Result<Option<(Vec<(Uuid, i64, Uuid)>, Vec<Uuid>)>, SendError> {
     let Some((a, b)) = pair(connection, org, channel).await? else {
         return Ok(None);
     };
     if ![a, b].contains(&sender.0) {
-        return Err(ApiError::channel_not_found());
+        return Err(ApiError::channel_not_found().into());
     }
     let mut ids = targets.to_vec();
     ids.extend([a, b]);
@@ -294,7 +314,7 @@ pub(crate) async fn send_locks(
         .iter()
         .any(|g| g.0 == actor.id && g.1 == actor.membership_revision)
     {
-        return Err(ApiError::channel_not_found());
+        return Err(ApiError::channel_not_found().into());
     }
     let accepted = members
         .into_iter()
@@ -317,7 +337,7 @@ pub(crate) async fn eligible_peer(
     org: Uuid,
     sender: Uuid,
     grants: &[(Uuid, i64, Uuid)],
-) -> Result<(), ApiError> {
+) -> Result<(), SendError> {
     let ids = grants
         .iter()
         .map(|g| g.0)
@@ -332,7 +352,7 @@ pub(crate) async fn eligible_peer(
         .iter()
         .any(|g| g.0 == peer.id && g.1 == peer.membership_revision)
     {
-        return Err(ApiError::dm_peer_access_lapsed());
+        return Err(ApiError::dm_peer_access_lapsed().into());
     }
     Ok(())
 }

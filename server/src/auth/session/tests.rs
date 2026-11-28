@@ -227,7 +227,7 @@ async fn fallback_database_timeout_is_bounded_and_does_not_claim_session_ended(p
         .await
         .unwrap()
         .unwrap_err();
-    assert!(matches!(error, sqlx::Error::PoolTimedOut));
+    assert!(matches!(error, InternalError::Unavailable));
 }
 
 #[tokio::test]
@@ -308,7 +308,7 @@ async fn worker_failure_during_initial_check_is_not_admitted(pool: PgPool) {
     }
     state.session_changes.panic_worker().await;
     checked.release();
-    assert!(matches!(watch.await, Err(sqlx::Error::PoolClosed)));
+    assert!(matches!(watch.await, Err(InternalError::Unavailable)));
 }
 
 #[tokio::test]
@@ -508,4 +508,35 @@ async fn stale_membership_registration_cannot_revoke_or_replace_a_newer_epoch() 
     assert!(sessions.entries.is_empty());
     assert!(sessions.by_token.is_empty());
     assert!(sessions.by_member.is_empty());
+}
+
+#[test]
+fn session_check_failure_keeps_legacy_labels_and_distinguishes_local_failures() {
+    let output = crate::observability::tests::Capture::default();
+    tracing::subscriber::with_default(output.subscriber(), || {
+        for error in [
+            InternalError::Deadline,
+            InternalError::Db(sqlx::Error::PoolTimedOut),
+            InternalError::Unavailable,
+            InternalError::Db(sqlx::Error::PoolClosed),
+            InternalError::Saturated,
+        ] {
+            report_session_check_failure(&error);
+        }
+    });
+    let fields: Vec<_> = output
+        .events()
+        .into_iter()
+        .map(|event| event["fields"].clone())
+        .collect();
+    use serde_json::json;
+    assert_eq!(
+        fields,
+        [
+            json!({"event": "database_failure", "kind": "pool_timeout", "failure_kind": "deadline"}),
+            json!({"event": "database_failure", "kind": "pool_timeout"}),
+            json!({"event": "database_failure", "kind": "pool_closed", "failure_kind": "unavailable"}),
+            json!({"event": "database_failure", "kind": "pool_closed"}),
+        ]
+    );
 }

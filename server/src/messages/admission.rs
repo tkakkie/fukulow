@@ -1,6 +1,6 @@
 use super::MessageError;
-use crate::lock_ignoring_poison;
 use crate::observability::{Admission as Rejection, admission};
+use crate::{database::InternalError, lock_ignoring_poison};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -21,7 +21,7 @@ pub(super) async fn within_work_deadline<T>(
 ) -> Result<T, MessageError> {
     tokio::time::timeout(WORK_TIMEOUT, work)
         .await
-        .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
+        .map_err(|_| MessageError::from(InternalError::Deadline))?
 }
 
 pub(super) struct Admission {
@@ -167,7 +167,7 @@ impl Admission {
         organization: Uuid,
         channel: Uuid,
         send: bool,
-    ) -> Result<Permit, sqlx::Error> {
+    ) -> Result<Permit, InternalError> {
         let key = (organization, channel);
         let slots = lock_ignoring_poison(&self.channels)
             .entry(key)
@@ -242,15 +242,12 @@ async fn acquire(
     semaphore: &Arc<Semaphore>,
     deadline: tokio::time::Instant,
     rejection: Rejection,
-) -> Result<OwnedSemaphorePermit, sqlx::Error> {
+) -> Result<OwnedSemaphorePermit, InternalError> {
     match tokio::time::timeout_at(deadline, semaphore.clone().acquire_owned()).await {
         Ok(Ok(permit)) => Ok(permit),
         _ => {
             admission(rejection);
-            Err(sqlx::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "message work admission rejected",
-            )))
+            Err(InternalError::Saturated)
         }
     }
 }
@@ -525,9 +522,7 @@ mod tests {
                 .await
                 .err()
                 .unwrap();
-            assert!(
-                matches!(error, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
-            );
+            assert!(matches!(error, InternalError::Saturated));
         }
         // Identical Channel UUID in another Organization has independent limits.
         drop(

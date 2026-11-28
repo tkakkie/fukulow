@@ -1,8 +1,8 @@
 use super::super as messages;
 use super::{Delivery, LIVE_QUEUE_CAPACITY, LiveMessage, registry::ChannelFanout};
-use crate::lock_ignoring_poison;
 #[cfg(test)]
 use crate::test_support::{Gate, Gates};
+use crate::{database::InternalError, lock_ignoring_poison};
 #[cfg(test)]
 use std::sync::Mutex;
 use std::{collections::HashSet, sync::Arc};
@@ -15,7 +15,7 @@ impl Delivery {
         organization: Uuid,
         event: messages::ChannelEvent,
         channel: &ChannelFanout,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), InternalError> {
         #[cfg(test)]
         publication_gate(match &event.payload {
             messages::log::Payload::Create(message) => message.client_message_id,
@@ -33,7 +33,7 @@ impl Delivery {
                 crate::observability::admission(
                     crate::observability::Admission::NotificationExecution,
                 );
-                sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into())
+                InternalError::Saturated
             })?;
         let after =
             cursor.get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(event.seq) - 1);
@@ -57,12 +57,12 @@ impl Delivery {
                 messages::replay_page(pool, organization, event.channel_id, *after, event.seq - 1)
                     .await?;
             if page.is_empty() {
-                return Err(sqlx::Error::RowNotFound);
+                return Err(InternalError::Invariant);
             }
             let last = page
                 .last()
                 .map(|event| event.seq)
-                .ok_or(sqlx::Error::RowNotFound)?;
+                .ok_or(InternalError::Invariant)?;
             self.fan_out(pool, organization, channel, &page).await;
             *after = last;
         }

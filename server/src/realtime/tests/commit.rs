@@ -73,7 +73,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
                 initial_seq + 1
             )
             .await,
-            Err(sqlx::Error::RowNotFound)
+            Err(crate::database::InternalError::Invariant)
         ));
 
         // A concurrent same-key retry must wait for the original outcome, then use its row.
@@ -153,7 +153,7 @@ async fn ambiguous_commit_rollback_allows_gap_free_same_key_retry(pool: PgPool) 
     silent(&mut between).await;
     assert!(matches!(
         messages::replay_page(&pool, f.organization, f.channel, 0, 1).await,
-        Err(sqlx::Error::RowNotFound)
+        Err(crate::database::InternalError::Invariant)
     ));
     let canonical = send(&f, &f.token, f.channel, key, "rolled back").await;
     assert_eq!(canonical["created_seq"], 1);
@@ -476,7 +476,7 @@ async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(po
     ready(&mut between, channel, 0).await;
     assert!(matches!(
         messages::replay_page(&pool, f.organization, channel, 0, 1).await,
-        Err(sqlx::Error::RowNotFound)
+        Err(crate::database::InternalError::Invariant)
     ));
     sqlx::query("DROP TRIGGER sleep_commit ON messages")
         .execute(&pool)

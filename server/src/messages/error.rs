@@ -6,6 +6,7 @@ use axum::{
 
 use super::{limiter, no_store_json};
 use crate::auth::{ApiError, ApiErrorDetail, ErrorBody};
+use crate::database::InternalError;
 
 #[derive(Debug)]
 pub enum MessageError {
@@ -33,10 +34,22 @@ pub enum MessageError {
     Throttled(u64),
     /// A send-limiter tracking cap was reached.
     LimiterSaturated,
-    Database(sqlx::Error),
+    Internal(InternalError),
+    DmDatabase(sqlx::Error),
+    ReplayedFailure,
 }
 
 impl MessageError {
+    pub(super) fn send_outcome_unknown(&self) -> bool {
+        // DM authorization previously erased SQLSTATE before settlement. Keep its
+        // retry decision even now that the original cause is retained.
+        match self {
+            Self::Internal(error) => !super::commit::definitely_rolled_back(error),
+            Self::DmDatabase(_) => true,
+            _ => false,
+        }
+    }
+
     /// The same response for an identical request that waited on this one. Database
     /// details are not shared; the response is the same 500.
     pub(super) fn replay(&self) -> Self {
@@ -63,9 +76,9 @@ impl MessageError {
             Self::ProjectionAdmissionRejected => Self::ProjectionAdmissionRejected,
             Self::Throttled(seconds) => Self::Throttled(*seconds),
             Self::LimiterSaturated => Self::LimiterSaturated,
-            Self::Database(_) => Self::Database(sqlx::Error::Protocol(
-                "identical in-flight send failed".into(),
-            )),
+            Self::Internal(_) | Self::DmDatabase(_) | Self::ReplayedFailure => {
+                Self::ReplayedFailure
+            }
         }
     }
 }
@@ -81,7 +94,19 @@ impl From<limiter::Refusal> for MessageError {
 
 impl From<sqlx::Error> for MessageError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+        Self::Internal(error.into())
+    }
+}
+
+impl From<InternalError> for MessageError {
+    fn from(error: InternalError) -> Self {
+        Self::Internal(error)
+    }
+}
+
+impl From<tokio::task::JoinError> for MessageError {
+    fn from(error: tokio::task::JoinError) -> Self {
+        InternalError::from(error).into()
     }
 }
 
@@ -111,7 +136,12 @@ impl IntoResponse for MessageError {
                 StatusCode::CONFLICT,
                 "client message id reused with different body, channel, Topic or reply target",
             ),
-            Self::Database(error) => return ApiError::from(error).into_response(),
+            Self::Internal(error) => return ApiError::from(error).into_response(),
+            Self::DmDatabase(error) => return ApiError::from(error).into_response(),
+            Self::ReplayedFailure => {
+                crate::observability::internal_failure("other", "send_replay");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
             Self::Throttled(seconds) => {
                 return retry_later(StatusCode::TOO_MANY_REQUESTS, seconds, "send_rate_limited");
             }
@@ -157,12 +187,24 @@ fn retry_later(status: StatusCode, seconds: u64, error: &str) -> Response {
         .into_response()
 }
 
+impl From<crate::channels::dms::SendError> for MessageError {
+    fn from(error: crate::channels::dms::SendError) -> Self {
+        match error {
+            crate::channels::dms::SendError::Denied(error) => dm_error(error),
+            crate::channels::dms::SendError::Db(error) => Self::DmDatabase(error),
+        }
+    }
+}
+
 pub(super) fn dm_error(error: ApiError) -> MessageError {
     match error.2 {
         Some(ApiErrorDetail::OrganizationUnavailable) => MessageError::OrganizationUnavailable,
         Some(ApiErrorDetail::ChannelNotFound) => MessageError::NotFound,
         Some(ApiErrorDetail::DmPeerDeactivated) => MessageError::DmPeerDeactivated,
         Some(ApiErrorDetail::DmPeerAccessLapsed) => MessageError::DmPeerAccessLapsed,
-        _ => MessageError::Database(sqlx::Error::Protocol("DM authorization failed".into())),
+        _ => InternalError::Invariant.into(),
     }
 }
+
+#[cfg(test)]
+mod tests;

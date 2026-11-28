@@ -16,13 +16,13 @@ use tokio::{
 
 /// Execute a statement on PostgreSQL, withhold its response, then cancel its owner.
 /// The same test exercises the unknown-BEGIN-depth gap in SQLx and in-flight cleanup.
-pub(crate) async fn at(
+pub(crate) async fn at<E: std::fmt::Debug>(
     admin: &PgPool,
     app: &PgPool,
     statement: &str,
-    work: impl AsyncFnOnce(&PgPool) -> Result<(), sqlx::Error>,
+    work: impl AsyncFnOnce(&PgPool) -> Result<(), E>,
 ) {
-    interrupted(admin, app, statement, false, work).await;
+    interrupted(admin, app, statement, None, work).await;
 }
 
 /// Keep the response stalled through the owner's deadline and replacement acquire.
@@ -30,17 +30,29 @@ pub(crate) async fn at_deadline(
     admin: &PgPool,
     app: &PgPool,
     statement: &str,
-    work: impl AsyncFnOnce(&PgPool) -> Result<(), sqlx::Error>,
+    work: impl AsyncFnOnce(&PgPool) -> Result<(), crate::database::InternalError>,
 ) {
-    interrupted(admin, app, statement, true, work).await;
+    interrupted(
+        admin,
+        app,
+        statement,
+        Some(|result| {
+            assert!(matches!(
+                result,
+                Err(crate::database::InternalError::Deadline)
+            ));
+        }),
+        work,
+    )
+    .await;
 }
 
-async fn interrupted(
+async fn interrupted<E: std::fmt::Debug>(
     admin: &PgPool,
     app: &PgPool,
     statement: &str,
-    deadline: bool,
-    work: impl AsyncFnOnce(&PgPool) -> Result<(), sqlx::Error>,
+    check_deadline: Option<fn(Result<(), E>)>,
+    work: impl AsyncFnOnce(&PgPool) -> Result<(), E>,
 ) {
     tokio::time::timeout(Duration::from_secs(15), async {
         let options = app.connect_options();
@@ -144,8 +156,8 @@ async fn interrupted(
             result = &mut pending => panic!("response escaped the relay gate ({statement}): {result:?}"),
             () = executed => {}
         }
-        if deadline {
-            assert!(matches!(pending.await, Err(sqlx::Error::PoolTimedOut)));
+        if let Some(check_deadline) = check_deadline {
+            check_deadline(pending.await);
             assert_eq!(single.size(), 0, "deadline must free the permit before graceful cleanup");
         } else {
             drop(pending);

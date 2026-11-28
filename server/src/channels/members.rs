@@ -250,8 +250,7 @@ async fn mutate_inner(
         }
         Ok::<_, ApiError>(())
     })
-    .await
-    .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    .await??;
     Ok((
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],

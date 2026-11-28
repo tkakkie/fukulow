@@ -126,11 +126,13 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
     assert_eq!(positions(&pool, org, channel).await, [1, 3]);
     assert!(matches!(
         replay_page(&app_pool, org, channel, 0, 3).await,
-        Err(sqlx::Error::RowNotFound)
+        Err(crate::database::InternalError::Invariant)
     ));
     assert!(matches!(
         authorized_replay_page(&app_pool, org, (sender, 0), channel, 0, 3).await,
-        Err(MessageError::Database(sqlx::Error::RowNotFound))
+        Err(MessageError::Internal(
+            crate::database::InternalError::Invariant
+        ))
     ));
 
     let delivery = Delivery::default();
@@ -710,11 +712,13 @@ async fn replay_detects_duplicate_at_page_boundary(pool: PgPool) {
     let restricted = crate::test_app_pool(pool.clone()).await;
     assert!(matches!(
         replay_page(&restricted, org, channel, 0, 50).await,
-        Err(sqlx::Error::RowNotFound)
+        Err(crate::database::InternalError::Invariant)
     ));
     assert!(matches!(
         authorized_replay_page(&restricted, org, (sender, 0), channel, 0, 50).await,
-        Err(MessageError::Database(sqlx::Error::RowNotFound))
+        Err(MessageError::Internal(
+            crate::database::InternalError::Invariant
+        ))
     ));
     assert_error(
         event_response(&app, &token, channel, "?after_seq=0&limit=49").await,

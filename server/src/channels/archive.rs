@@ -125,8 +125,7 @@ pub async fn update_channel(
         }
         Ok::<_, ApiError>(())
     })
-    .await
-    .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    .await??;
     Ok((
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],

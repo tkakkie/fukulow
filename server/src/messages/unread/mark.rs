@@ -94,8 +94,7 @@ async fn mark_inner(
         }
         Ok::<_, MessageError>((read_seq, history_generation))
     })
-    .await
-    .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
+    .await??;
     Ok(ReadPosition {
         read_seq,
         history_generation,

@@ -124,7 +124,7 @@ impl Notification {
             };
             self.completed = publication.await.is_ok_and(|result| {
                 if let Err(error) = &result {
-                    crate::observability::database_failure(error);
+                    crate::report_internal_failure(error);
                 }
                 result.is_ok()
             });
