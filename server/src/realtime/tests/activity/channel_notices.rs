@@ -34,6 +34,45 @@ async fn public_channel_creation_notifies_non_guests_and_private_creation_only_t
 }
 
 #[fukulow_test::test]
+async fn channel_creation_excludes_a_guest_even_with_a_current_grant(pool: PgPool) {
+    use crate::auth::activity::{ActivityChanges, ChannelChange};
+
+    let f = fixture(&pool).await;
+    let (guest, token) = member(&pool, f.organization).await;
+    role(&pool, &f, guest, "guest").await;
+    grant(&pool, &f, f.channel, guest).await;
+    let mut guest_socket = connect(&f, &token).await;
+    let mut creator = connect(&f, &f.token).await;
+    let activity = &f.state.message_delivery.channel_access.activity;
+
+    // Model a grant becoming visible before the asynchronous creation publication proves access.
+    activity.channel(
+        pool.clone(),
+        f.organization,
+        ChannelChange::Created {
+            channel: f.channel,
+            creator: f.member,
+            public: true,
+        },
+    );
+    assert_eq!(
+        notices(&f, &mut creator).await,
+        vec![json!({"type":"channel_access_gained","channel_id":f.channel})]
+    );
+    assert!(notices(&f, &mut guest_socket).await.is_empty());
+
+    activity.channel(
+        pool,
+        f.organization,
+        ChannelChange::Members { channel: f.channel },
+    );
+    assert_eq!(
+        notices(&f, &mut guest_socket).await,
+        vec![json!({"type":"channel_members_changed","channel_id":f.channel})]
+    );
+}
+
+#[fukulow_test::test]
 async fn grant_notifies_target_gain_and_channel_viewers_members_changed(pool: PgPool) {
     let f = fixture(&pool).await;
     owner(&pool, &f).await;

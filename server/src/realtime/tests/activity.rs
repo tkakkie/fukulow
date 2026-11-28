@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::activity::PublicationFence;
 
 mod access_loss;
 mod archive;

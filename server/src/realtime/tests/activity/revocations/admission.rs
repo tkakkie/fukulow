@@ -201,7 +201,8 @@ async fn queued_activity_publication_denies_lost_private_access(pool: PgPool) {
                 f.organization,
                 notice.clone(),
                 None,
-                None
+                None,
+                PublicationFence::default(),
             ));
             assert!(publish.as_mut().now_or_never().is_none());
             sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
