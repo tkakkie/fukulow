@@ -24,6 +24,7 @@ mod delivery;
 pub mod dms;
 mod error;
 pub use error::MessageError;
+#[cfg(test)]
 use error::dm_error;
 mod failure;
 mod guards;

@@ -238,7 +238,7 @@ pub async fn change_role<G: RoleChangeGuard + Send + 'static>(
         .await;
     if let Some(notice) = notice { notice.committed(state.pool.clone()); }
     Ok::<_, ApiError>(row)
-    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    }).await??;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(Member {
@@ -332,8 +332,7 @@ pub async fn deactivate<G: RoleChangeGuard + Send + 'static>(
         }
         Ok::<_, ApiError>(())
     })
-    .await
-    .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    .await??;
     Ok((
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],

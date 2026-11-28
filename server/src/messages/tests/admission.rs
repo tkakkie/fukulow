@@ -269,9 +269,12 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
     tokio::time::pause();
     tokio::time::advance(super::super::admission::WORK_TIMEOUT).await;
     tokio::time::resume();
-    assert!(
-        matches!(task.await.unwrap(), Err(MessageError::Database(sqlx::Error::Io(error))) if error.kind() == std::io::ErrorKind::TimedOut)
-    );
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(MessageError::Internal(
+            crate::database::InternalError::Deadline
+        ))
+    ));
     assert_eq!(delivery.admission(&app_pool).available_permits(), 1);
     assert_eq!(delivery.admission(&app_pool).queued_sends(), 0);
     drop((first, second));

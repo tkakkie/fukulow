@@ -5,6 +5,7 @@ pub use handlers::move_chain;
 
 use super::*;
 use crate::auth::{Action, Actor, Resource, authorize};
+use crate::database::InternalError;
 use fukulow_api::{MessageEventType, MessageMoveEvent, MoveEventKind};
 use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
@@ -123,7 +124,7 @@ async fn chain(
         MessageError::ReplyParentNotFound => MessageError::ReplyChainNotFound,
         error => error,
     })?
-    .ok_or(sqlx::Error::RowNotFound)?;
+    .ok_or(InternalError::Invariant)?;
     // Check chain-independent denials before reading the descendants.
     if !authorize(actor, Action::MoveChain { owns_chain: true }, resource).allowed {
         return Err(MessageError::MoveNotAllowed);
@@ -168,7 +169,7 @@ async fn chain(
     let root_message = members
         .iter()
         .find(|m| m.id == root)
-        .ok_or(sqlx::Error::RowNotFound)?;
+        .ok_or(InternalError::Invariant)?;
     let source = root_message.topic_id;
     let version = if members.len() <= MAX_CHAIN {
         validate_members(&members, root, request.anchor, source)?;
@@ -176,7 +177,7 @@ async fn chain(
             .iter()
             .map(|m| m.version)
             .max()
-            .ok_or(sqlx::Error::RowNotFound)?
+            .ok_or(InternalError::Invariant)?
     } else {
         replies::chain_version(tx, request.organization, request.channel, root, i64::MAX).await?
     };
@@ -193,7 +194,7 @@ async fn chain(
         .fetch_one(tx)
         .await?;
         if mismatched_child {
-            return Err(sqlx::Error::Protocol("inconsistent Reply chain root".into()).into());
+            return Err(InternalError::Invariant.into());
         }
     }
     Ok(Chain {
@@ -209,7 +210,7 @@ fn validate_members(
     root: Uuid,
     anchor: Uuid,
     source: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), InternalError> {
     let by_id: std::collections::HashMap<_, _> = members.iter().map(|m| (m.id, m.seq)).collect();
     if !by_id.contains_key(&anchor)
         || members.iter().any(|m| {
@@ -223,7 +224,7 @@ fn validate_members(
                 }
         })
     {
-        return Err(sqlx::Error::Protocol("inconsistent Reply chain".into()));
+        return Err(InternalError::Invariant);
     }
     Ok(())
 }
@@ -241,7 +242,7 @@ async fn persist(
     let org = request.organization;
     let channel = request.channel;
     let mut tx = commit::Transaction::begin(&state.pool, permit, "BEGIN", Some(org)).await?;
-    let (outcome, event) = match prepare(tx.connection()?, request).await {
+    let (outcome, event) = match prepare(tx.connection_mut()?, request).await {
         Err(error) => {
             tx.rollback().await?;
             return Err(error);
@@ -301,8 +302,8 @@ async fn prepare(tx: &mut PgConnection, request: &Move) -> Result<Prepared, Mess
             let destination = request
                 .destination(tx)
                 .await?
-                .ok_or(sqlx::Error::RowNotFound)?;
-            let topic = chain.source.ok_or(sqlx::Error::RowNotFound)?;
+                .ok_or(InternalError::Invariant)?;
+            let topic = chain.source.ok_or(InternalError::Invariant)?;
             Ok(Prepared::Canonical(MoveChainResponse {
                 history_generation: generation,
                 operation_id: operation.operation_id,
@@ -363,7 +364,7 @@ async fn prepare_new(
         Some(id) => id,
         None => topics::join(tx, org, channel, None, request.input.topic_name.as_deref())
             .await?
-            .ok_or(sqlx::Error::RowNotFound)?,
+            .ok_or(InternalError::Invariant)?,
     };
     let event = move_seq.map(|seq| MessageMoveEvent {
         event_type: MessageEventType::Message,
@@ -401,7 +402,7 @@ async fn apply_move(
     actor: Uuid,
     chain: &Chain,
     event: &MessageMoveEvent,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), InternalError> {
     let (updated, live, consistent): (i64, i64, Option<bool>) = sqlx::query_as(
         "WITH moved AS (UPDATE messages SET topic_id=$4, version=$5 \
          WHERE organization_id=$1 AND channel_id=$2 AND id=ANY($3) \
@@ -417,7 +418,7 @@ async fn apply_move(
     .fetch_one(&mut *tx)
     .await?;
     if updated != chain.ids.len() as i64 || consistent != Some(true) {
-        return Err(sqlx::Error::Protocol("incomplete Reply chain Move".into()));
+        return Err(InternalError::Invariant);
     }
     topics::repair_after_move(
         tx,

@@ -7,6 +7,7 @@ use crate::{
     AppState,
     auth::Auth,
     channels::{AccessWatch, activity::Registration},
+    database::InternalError,
     messages::{self, LIVE_QUEUE_CAPACITY, LiveQueue, MessageError},
 };
 use axum::extract::ws::{Message as Frame, WebSocket};
@@ -19,6 +20,12 @@ const MAX_SUBSCRIPTIONS: usize = 256;
 fn database_failure(operation: &'static str, error: &sqlx::Error) -> u16 {
     tracing::info_span!(target: "fukulow", "database", operation)
         .in_scope(|| crate::observability::database_failure(error));
+    1011
+}
+
+fn internal_failure(operation: &'static str, error: &InternalError) -> u16 {
+    tracing::info_span!(target: "fukulow", "database", operation)
+        .in_scope(|| crate::report_internal_failure(error));
     1011
 }
 
@@ -266,8 +273,8 @@ impl<'a> Connection<'a> {
             Err(MessageError::OrganizationUnavailable) => {
                 Err(super::CLOSE_ORGANIZATION_UNAVAILABLE)
             }
-            Err(MessageError::Database(error)) => {
-                Err(database_failure("websocket_authorize", &error))
+            Err(MessageError::Internal(error)) => {
+                Err(internal_failure("websocket_authorize", &error))
             }
             Err(_) => Err(1011),
         }
@@ -292,7 +299,7 @@ impl<'a> Connection<'a> {
             .message_delivery
             .latest_seq(&self.state.pool, organization, channel)
             .await
-            .map_err(|error| database_failure("websocket_latest_seq", &error))?;
+            .map_err(|error| internal_failure("websocket_latest_seq", &error))?;
         if !self.refresh(socket, channel).await? {
             return Ok(());
         }
@@ -326,8 +333,8 @@ impl<'a> Connection<'a> {
                 Err(MessageError::OrganizationUnavailable) => {
                     return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                 }
-                Err(MessageError::Database(error)) => {
-                    return Err(database_failure("websocket_replay", &error));
+                Err(MessageError::Internal(error)) => {
+                    return Err(internal_failure("websocket_replay", &error));
                 }
                 Err(_) => return Err(1011),
             };
@@ -492,7 +499,7 @@ impl<'a> Connection<'a> {
                     channel_id,
                 )
                 .await
-                .map_err(|error| database_failure("websocket_subscribed_seq", &error))?;
+                .map_err(|error| internal_failure("websocket_subscribed_seq", &error))?;
             if !self.protected(socket, channel_id).await? {
                 return Ok(());
             }

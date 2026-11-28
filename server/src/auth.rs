@@ -21,6 +21,8 @@ mod admission_tests;
 mod cleanup;
 #[cfg(test)]
 mod credential_tests;
+#[cfg(test)]
+mod internal_error_tests;
 pub mod invites;
 pub mod members;
 mod password;
@@ -29,6 +31,7 @@ pub mod security;
 mod text_input_tests;
 use password::{PasswordWorkers, check_password, hash_password};
 mod session;
+pub(crate) use session::report_session_check_failure;
 mod throttle;
 pub use cleanup::SessionCleanup;
 pub use session::{SessionChanges, SubscriptionRecheck, SubscriptionScope};
@@ -181,6 +184,22 @@ impl From<sqlx::Error> for ApiError {
             "internal error",
             lock_unavailable.then_some(ApiErrorDetail::LockNotAvailable),
         )
+    }
+}
+
+impl From<crate::database::InternalError> for ApiError {
+    fn from(error: crate::database::InternalError) -> Self {
+        if let crate::database::InternalError::Db(error) = error {
+            return Self::from(error);
+        }
+        crate::report_internal_failure(&error);
+        Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
+    }
+}
+
+impl From<tokio::task::JoinError> for ApiError {
+    fn from(error: tokio::task::JoinError) -> Self {
+        crate::database::InternalError::from(error).into()
     }
 }
 
@@ -860,7 +879,7 @@ pub async fn deactivate_member(
     state: &AppState,
     organization: Uuid,
     account: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), crate::database::InternalError> {
     let state = state.clone();
     tokio::spawn(async move {
         let revision = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
@@ -875,7 +894,7 @@ pub async fn deactivate_member(
             state.session_changes.recheck_subscriptions(&state.pool, SubscriptionScope::Member(organization, member)).await;
         }
         Ok(())
-    }).await.map_err(|_|sqlx::Error::WorkerCrashed)?
+    }).await.map_err(crate::database::InternalError::from)?
 }
 
 // Cross-module trigger tests mutate Membership through its owning module.
@@ -992,9 +1011,7 @@ pub async fn sign_out(
     };
     #[cfg(test)]
     let revocation = crate::database::test_inherit_acquisitions(revocation);
-    tokio::spawn(revocation)
-        .await
-        .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    tokio::spawn(revocation).await??;
     let mut response = (
         StatusCode::NO_CONTENT,
         [

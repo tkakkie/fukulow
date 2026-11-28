@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::InternalError;
 
 // Armed inside the mutation transaction, consumed only after confirmed COMMIT.
 // Dropping uncertain/failed work leaves recovery to the shared O5 schedule.
@@ -46,7 +47,7 @@ impl Activity {
         organization: Uuid,
         changes: &[(Uuid, Uuid, bool)],
         fence: PublicationFence,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), InternalError> {
         let mut by_member = HashMap::<Uuid, Vec<(Uuid, bool)>>::new();
         for &(channel, member, gained) in changes {
             by_member.entry(member).or_default().push((channel, gained));

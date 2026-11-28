@@ -293,7 +293,7 @@ async fn timed_out_pass_latches_errors_and_releases_its_pool_connection(pool: Pg
             tokio::time::timeout(Duration::from_secs(1), watch.ended())
                 .await
                 .unwrap(),
-            Err(sqlx::Error::PoolTimedOut)
+            Err(InternalError::Unavailable)
         ));
         let status = watch.registration.changed.borrow();
         assert!(status.failed);
@@ -666,7 +666,7 @@ async fn deadline_includes_query_result_application(pool: PgPool) {
     pass.await;
     assert!(matches!(
         socket.ended().await,
-        Err(sqlx::Error::PoolTimedOut)
+        Err(InternalError::Unavailable)
     ));
     assert!(!socket.registration.changed.borrow().revoked);
     assert!(!socket.registration.changed.borrow().membership_revoked);

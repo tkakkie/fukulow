@@ -48,7 +48,9 @@ async fn baselines(
                 unread_count,
                 mention_unread_count,
                 ..
-            } = counts.remove(&d.id).ok_or(sqlx::Error::RowNotFound)?;
+            } = counts
+                .remove(&d.id)
+                .ok_or(crate::database::InternalError::Invariant)?;
             Ok(Dm {
                 history_generation,
                 id: d.id,
@@ -100,7 +102,7 @@ pub async fn open(
                 )
                 .await?
                 .pop()
-                .ok_or(sqlx::Error::RowNotFound)?;
+                .ok_or(crate::database::InternalError::Invariant)?;
                 Ok::<_, ApiError>((dm, created, notice))
             },
         )
@@ -112,9 +114,7 @@ pub async fn open(
     };
     #[cfg(test)]
     let work = crate::database::test_inherit_acquisitions(work);
-    let result = tokio::spawn(work)
-        .await
-        .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    let result = tokio::spawn(work).await??;
     Ok((
         if result.1 {
             StatusCode::CREATED

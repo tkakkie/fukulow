@@ -22,18 +22,14 @@ pub(crate) async fn organization_statement<T>(
 ) -> Result<T, sqlx::Error> {
     let sql = organization_statement_sql(sql);
     let mut guard = super::TransactionConnection {
-        connection: Some(crate::database::acquire(pool).await?),
+        connection: None,
         finished: false,
         discard: super::Discard::Detach,
     };
-    let result = body(
-        guard
-            .connection
-            .as_deref_mut()
-            .ok_or(sqlx::Error::WorkerCrashed)?,
-        &sql,
-    )
-    .await?;
+    let connection = guard
+        .connection
+        .insert(crate::database::acquire(pool).await?);
+    let result = body(connection, &sql).await?;
     guard.finished = true;
     Ok(result)
 }

@@ -97,7 +97,7 @@ async fn statement_context_errors_and_unconfirmed_completion_discard(pool: PgPoo
                 },
             )
             .await?;
-            Ok(())
+            Ok::<_, sqlx::Error>(())
         })
         .await;
     }

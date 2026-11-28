@@ -587,7 +587,7 @@ mod tests {
                     .clone()
                     .latest_seq(&pool, organization, Uuid::new_v4())
                     .await,
-                Err(sqlx::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+                Err(crate::database::InternalError::Saturated)
             ));
             if cancel {
                 waiting.abort();
@@ -596,7 +596,10 @@ mod tests {
                 tokio::time::pause();
                 tokio::time::advance(NOTIFICATION_TIMEOUT).await;
                 tokio::time::resume();
-                assert!(matches!(waiting.await.unwrap(), Err(sqlx::Error::Io(_))));
+                assert!(matches!(
+                    waiting.await.unwrap(),
+                    Err(crate::database::InternalError::Deadline)
+                ));
             }
             assert_eq!(delivery.admission(&pool).available_permits(), 2);
             drop((first, second, third));
@@ -612,7 +615,7 @@ mod tests {
         pool.close().await;
         assert!(matches!(
             delivery.latest_seq(&pool, organization, channel).await,
-            Err(sqlx::Error::PoolClosed)
+            Err(crate::database::InternalError::Db(sqlx::Error::PoolClosed))
         ));
         assert_eq!(delivery.admission(&pool).available_permits(), 2);
     }

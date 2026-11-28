@@ -5,6 +5,7 @@ use super::{
     authorize::{Authorization, directory_guests},
     buffer::{Epoch, Pending, enqueue},
 };
+use crate::database::InternalError;
 use crate::{auth::Role, lock_ignoring_poison, observability::notice_permits::NoticeCaller};
 use std::{
     collections::{HashMap, HashSet},
@@ -164,7 +165,7 @@ impl Activity {
         target: Option<Uuid>,
         senders: Option<&ActivityBatch>,
         fence: PublicationFence,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), InternalError> {
         let channel = notice.channel();
         self.publish_scoped(
             pool,
@@ -187,7 +188,7 @@ impl Activity {
         scoped: ScopedNotice,
         senders: Option<&ActivityBatch>,
         fence: PublicationFence,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), InternalError> {
         let ScopedNotice {
             notice,
             channel,
@@ -297,7 +298,7 @@ impl Activity {
                     continue;
                 };
                 event = Notice::ChannelActivity {
-                    channel_id: notice.channel().ok_or(sqlx::Error::RowNotFound)?,
+                    channel_id: notice.channel().ok_or(InternalError::Invariant)?,
                     seq,
                 };
             }

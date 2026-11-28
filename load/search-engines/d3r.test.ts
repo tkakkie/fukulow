@@ -208,8 +208,16 @@ test('v20 records the database context refactor with v19 conditions', () => {
     ['load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
 });
 
+function pinnedV21(): ReturnType<typeof loadManifest>['frozen'] {
+  const text = readFileSync(new URL('./manifest-v21.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), 'ae7f8cac55ee3efaa7ce8d8e2819d1056140a30016c5ebae00c4c60232ce42e1');
+  const v21 = JSON.parse(text);
+  assert.equal(v21.sha256, hash(JSON.stringify(v21.frozen)));
+  return v21.frozen;
+}
+
 test('v21 records typed API errors with v20 conditions', () => {
-  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version, sourceHashes, ...conditions} = pinnedV21();
   const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV20().frozen;
   assert.equal(version, previousVersion + 1);
   assert.deepEqual(conditions, previousConditions);
@@ -217,6 +225,17 @@ test('v21 records typed API errors with v20 conditions', () => {
   const before = new Map(previousSources.map(source => [source.path, source.sha256]));
   assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
     ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs']);
+});
+
+test('v24 records internal errors with v21 conditions', () => {
+  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV21();
+  assert.equal(version, previousVersion + 3);
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs', 'server/src/database/context.rs']);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {

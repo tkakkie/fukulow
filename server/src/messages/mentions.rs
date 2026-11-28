@@ -78,10 +78,13 @@ pub(super) async fn delivery_snapshot(
     organization: Uuid,
     members: &[(Uuid, i64)],
     messages: &[super::ChannelEvent],
-) -> Result<(Vec<(Uuid, i64, bool)>, Vec<super::ChannelEvent>), sqlx::Error> {
+) -> Result<(Vec<(Uuid, i64, bool)>, Vec<super::ChannelEvent>), crate::database::InternalError> {
     use super::log::Payload;
     let mut messages = messages.to_vec();
-    let channel = messages.first().ok_or(sqlx::Error::RowNotFound)?.channel_id;
+    let channel = messages
+        .first()
+        .ok_or(crate::database::InternalError::Invariant)?
+        .channel_id;
     if messages.iter().all(|event| match &event.payload {
         Payload::Create(m) => m.mentions.as_ref().is_none_or(Vec::is_empty),
         Payload::Move(_) => true,
@@ -118,7 +121,7 @@ pub(super) async fn delivery_snapshot(
                 for mention in message.mentions.iter_mut().flatten() {
                     mention.name = names
                         .get(&mention.member_id)
-                        .ok_or(sqlx::Error::RowNotFound)?
+                        .ok_or(crate::database::InternalError::Invariant)?
                         .clone();
                 }
             }

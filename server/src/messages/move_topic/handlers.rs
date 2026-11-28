@@ -61,7 +61,6 @@ pub async fn move_chain(
         let permit = waiter.acquire().await?;
         admission::within_work_deadline(persist(&state, &request, permit)).await
     })
-    .await
-    .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
+    .await??;
     Ok(no_store_json(outcome))
 }

@@ -24,7 +24,7 @@ fn poll<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-fn ready<'a>(result: Poll<Result<NoticePermit<'a>, sqlx::Error>>) -> NoticePermit<'a> {
+fn ready<'a>(result: Poll<Result<NoticePermit<'a>, InternalError>>) -> NoticePermit<'a> {
     match result {
         Poll::Ready(Ok(permit)) => permit,
         _ => panic!("permit was not granted"),
@@ -264,7 +264,7 @@ async fn closed_semaphore_wait_is_abandoned() {
     budget.get().unwrap().semaphore.close();
     assert!(matches!(
         notice_query_slot(&budget, &pool, NoticeCaller::Retry).await,
-        Err(sqlx::Error::PoolClosed)
+        Err(InternalError::Unavailable)
     ));
     let retry = gauges.caller(NoticeCaller::Retry);
     assert_eq!(retry.waiting.load(Relaxed), 0);
@@ -419,4 +419,63 @@ async fn callers_are_tagged(pool: sqlx::PgPool) {
         assert_eq!(totals(), expected);
     }
     drop(capture);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closed_notice_admission_preserves_publication_failure_and_revocation_retry() {
+    let pool = pool();
+    let (activity, entry, gauges) = activity_fixture();
+    let channel = uuid::Uuid::new_v4();
+    activity.notice_queries.get().unwrap().semaphore.close();
+
+    let result = activity
+        .publish(
+            &pool,
+            entry.organization,
+            Notice::ChannelMembersChanged {
+                channel_id: channel,
+            },
+            None,
+            None,
+            PublicationFence::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(InternalError::Unavailable)));
+
+    let capture = entry
+        .buffer
+        .lock()
+        .unwrap()
+        .revocations
+        .capture(ChangeScope::Channel(channel))
+        .notice(channel, false, Role::Member)
+        .unwrap();
+    let check = capture.check().unwrap();
+    let frame = activity::NoticeFrame {
+        entry,
+        epoch: activity::Epoch::Revocation(capture),
+        directory_epoch: None,
+        event: Notice::ChannelAccessRevoked {
+            channel_id: channel,
+        },
+        valid: Arc::new(activity::QueryToken::new()),
+        recovery: None,
+        retry: true,
+    };
+    assert!(matches!(
+        frame
+            .recheck_revocation(
+                &pool,
+                check,
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                None
+            )
+            .await,
+        Err(activity::handoff::RecheckFailure::Database)
+    ));
+    for caller in [NoticeCaller::Publish, NoticeCaller::Retry] {
+        let counters = gauges.caller(caller);
+        assert_eq!(counters.wait_abandoned.load(Relaxed), 1);
+        assert_eq!(counters.granted.load(Relaxed), 0);
+    }
 }

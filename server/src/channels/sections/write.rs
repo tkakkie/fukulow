@@ -100,8 +100,7 @@ pub(super) async fn write(
     // A disconnected request drops the join handle. The task still owns COMMIT
     // and the publication of its outcome.
     tokio::spawn(write_and_publish(state.pool.clone(), activity, owner, mutation).in_current_span())
-        .await
-        .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))?
+        .await?
 }
 
 async fn write_and_publish(

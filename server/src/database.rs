@@ -1,4 +1,5 @@
 mod context;
+mod error;
 pub(crate) mod generic_plan;
 mod owner;
 mod pool;
@@ -12,6 +13,7 @@ pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
 pub use context::{account, account_read_only, organization, organization_read_only};
 pub(crate) use context::{organization_statement, organization_statement_sql};
+pub use error::InternalError;
 pub use pool::PoolConfig;
 pub use stats::report_pool_periodically;
 pub(crate) use stats::{acquire, begin};

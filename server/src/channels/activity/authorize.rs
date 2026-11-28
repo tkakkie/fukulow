@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     auth::{self, Role},
+    database::InternalError,
     lock_ignoring_poison,
     observability::notice_permits::NoticeCaller,
 };
@@ -179,11 +180,11 @@ impl Activity {
         pool: &sqlx::PgPool,
         selected: &[(Arc<Entry>, Option<Uuid>)],
         caller: NoticeCaller,
-    ) -> Result<Vec<Option<Proof>>, sqlx::Error> {
+    ) -> Result<Vec<Option<Proof>>, InternalError> {
         if selected.is_empty() {
             return Ok(Vec::new());
         }
         let slot = notice_query_slot(&self.notice_queries, pool, caller).await?;
-        authorize_batch(pool, selected, Some(&slot)).await
+        Ok(authorize_batch(pool, selected, Some(&slot)).await?)
     }
 }

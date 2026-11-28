@@ -294,7 +294,7 @@ pub async fn create_channel(
     }).await?;
     state.session_changes.channel_changed(state.pool.clone(), organization_id, auth::activity::ChannelChange::Created { channel: channel.id, creator: auth.identity.member.id, public: matches!(channel.visibility, ChannelVisibility::Public) });
     Ok::<_, ApiError>(channel)
-    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    }).await??;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],

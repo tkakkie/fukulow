@@ -1,4 +1,5 @@
 //! Fair permit budget for notice queries that share the application pool.
+use crate::database::InternalError;
 use crate::observability::notice_permits::{
     AllPassGuard, CheckoutGuard, NoticeCaller, NoticePermitGauges, PermitHold, WaitGuard,
     notice_permit_gauges,
@@ -41,7 +42,7 @@ pub(super) async fn notice_query_slot<'a>(
     budget: &'a OnceLock<NoticeBudget>,
     pool: &sqlx::PgPool,
     caller: NoticeCaller,
-) -> Result<NoticePermit<'a>, sqlx::Error> {
+) -> Result<NoticePermit<'a>, InternalError> {
     // One Activity registry per app pool. Allow up to half the connections for
     // notice authorization, counting the single periodic pass separately so
     // socket retries cannot queue ahead of it. At the minimum pool size (3),
@@ -62,7 +63,7 @@ pub(super) async fn notice_query_slot<'a>(
         .semaphore
         .acquire()
         .await
-        .map_err(|_| sqlx::Error::PoolClosed)?;
+        .map_err(|_| InternalError::Unavailable)?;
     Ok(NoticePermit {
         _permit: permit,
         hold: wait.map(WaitGuard::grant),

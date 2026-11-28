@@ -36,6 +36,17 @@ use std::{
     time::Duration,
 };
 
+pub(crate) fn report_internal_failure(error: &database::InternalError) {
+    use database::InternalError;
+    match error {
+        InternalError::Db(error) => observability::database_failure(error),
+        InternalError::Saturated => {} // The admission site already counted the refusal.
+        InternalError::Deadline => observability::internal_failure("deadline", "deadline"),
+        InternalError::Invariant => observability::internal_failure("invariant", "invariant"),
+        InternalError::Unavailable => observability::internal_failure("other", "unavailable"),
+    }
+}
+
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[inline]

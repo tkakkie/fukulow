@@ -6,8 +6,8 @@ use axum::{
 use uuid::Uuid;
 
 use super::{
-    Message, MessageError, SendMessageRequest, commit, limiter, no_store_json,
-    reject_dm_topics_scoped, require_visible_scoped, topics,
+    Message, MessageError, SendMessageRequest, limiter, no_store_json, reject_dm_topics_scoped,
+    require_visible_scoped, topics,
 };
 use crate::{
     AppState,
@@ -134,14 +134,12 @@ pub async fn send_message(
             waiter,
         )
         .await;
-        // Only a database failure other than a definite rollback may have committed.
         let failure = result.as_ref().err();
-        let unknown = matches!(failure, Some(MessageError::Database(error)) if !commit::definitely_rolled_back(error));
+        let unknown = failure.is_some_and(MessageError::send_outcome_unknown);
         lead.settle(unknown, failure.map(MessageError::replay));
         result
     })
-    .await
-    .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
+    .await??;
     Ok(created(message))
 }
 

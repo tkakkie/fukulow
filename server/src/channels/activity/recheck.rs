@@ -179,7 +179,9 @@ impl Activity {
                 let proofs = if matches!(scope, auth::SubscriptionScope::All) {
                     // The Session worker runs this pass serially.
                     let _all_pass = NoticeBudget::all_pass(&self.notice_queries);
-                    authorize_batch(pool, &selected, None).await
+                    authorize_batch(pool, &selected, None)
+                        .await
+                        .map_err(Into::into)
                 } else {
                     self.authorize(pool, &selected, NoticeCaller::Scoped).await
                 };

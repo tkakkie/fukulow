@@ -201,7 +201,9 @@ async fn read(
     }
     admission::within_work_deadline(async {
         let (history_generation, rows) = snapshot.await?;
-        let first = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        let first = rows
+            .first()
+            .ok_or(crate::database::InternalError::Invariant)?;
         check_visibility(first.try_get::<Option<bool>, _>("visible")?)?;
         let w: i64 = first.try_get("as_of_seq")?;
         let mut items = Vec::new();

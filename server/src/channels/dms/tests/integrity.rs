@@ -23,7 +23,7 @@ async fn dm_send_locks_preserve_nonparticipant_and_stale_grant_error_bodies(pool
     f.deactivate(f.b).await;
     f.reactivate(f.b).await;
     let refreshed = extract_auth(f.state.clone(), &f.bt).await;
-    for (sender, error) in [
+    for (sender, expected_error) in [
         (
             (outsider, outsider_auth.membership_revision),
             "channel not found",
@@ -34,9 +34,12 @@ async fn dm_send_locks_preserve_nonparticipant_and_stale_grant_error_bodies(pool
         ),
         ((f.b, refreshed.membership_revision), "channel not found"),
     ] {
-        let response = lock(sender).await.unwrap_err().into_response();
+        let SendError::Denied(error) = lock(sender).await.unwrap_err() else {
+            panic!("expected a DM send denial");
+        };
+        let response = error.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(body(response).await, json!({"error": error}));
+        assert_eq!(body(response).await, json!({"error": expected_error}));
     }
     f.pools.app.close().await;
 }

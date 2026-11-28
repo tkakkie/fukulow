@@ -118,7 +118,7 @@ pub(crate) async fn authorized_generation(
         )
         .await?;
     check_visibility(visible)?;
-    let generation = generation.ok_or(sqlx::Error::RowNotFound)?;
+    let generation = generation.ok_or(crate::database::InternalError::Invariant)?;
     if expected.is_some_and(|old| old != generation) {
         return Err(MessageError::HistoryGenerationChanged);
     }

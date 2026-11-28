@@ -1,4 +1,5 @@
 use super::admission::Permit;
+use crate::database::InternalError;
 use sqlx::{Executor, PgConnection, PgPool, Postgres, pool::PoolConnection};
 use uuid::Uuid;
 
@@ -11,10 +12,16 @@ pub(crate) struct Transaction {
 }
 
 impl Transaction {
+    // The frozen Search index writer still takes a SQLx result.
     pub(crate) fn connection(&mut self) -> Result<&mut PgConnection, sqlx::Error> {
+        self.connection_mut()
+            .map_err(|_| sqlx::Error::WorkerCrashed)
+    }
+
+    pub(crate) fn connection_mut(&mut self) -> Result<&mut PgConnection, InternalError> {
         self.connection
             .as_deref_mut()
-            .ok_or(sqlx::Error::WorkerCrashed)
+            .ok_or(InternalError::Invariant)
     }
 
     pub(super) async fn begin(
@@ -22,26 +29,26 @@ impl Transaction {
         permit: Permit,
         sql: &str,
         organization: Option<Uuid>,
-    ) -> Result<Self, sqlx::Error> {
+    ) -> Result<Self, InternalError> {
         let mut tx = Self {
             connection: Some(crate::database::acquire(pool).await?),
             _permit: permit,
         };
-        tx.connection()?.execute(sql).await?;
+        tx.connection_mut()?.execute(sql).await?;
         if let Some(organization) = organization {
-            crate::database::set_organization(tx.connection()?, organization).await?;
+            crate::database::set_organization(tx.connection_mut()?, organization).await?;
         }
         Ok(tx)
     }
 
-    pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
-        self.connection()?.execute("COMMIT").await?;
+    pub(crate) async fn commit(mut self) -> Result<(), InternalError> {
+        self.connection_mut()?.execute("COMMIT").await?;
         drop(self.connection.take());
         Ok(())
     }
 
-    pub(crate) async fn rollback(mut self) -> Result<(), sqlx::Error> {
-        self.connection()?.execute("ROLLBACK").await?;
+    pub(crate) async fn rollback(mut self) -> Result<(), InternalError> {
+        self.connection_mut()?.execute("ROLLBACK").await?;
         drop(self.connection.take());
         Ok(())
     }
@@ -91,7 +98,7 @@ pub(super) async fn lock(
     Ok(())
 }
 
-pub(super) async fn finish(tx: Transaction, _key: Uuid) -> Result<(), sqlx::Error> {
+pub(super) async fn finish(tx: Transaction, _key: Uuid) -> Result<(), InternalError> {
     #[cfg(test)]
     COMMIT_GATES.pause(_key).await;
     #[cfg(test)]
@@ -100,13 +107,16 @@ pub(super) async fn finish(tx: Transaction, _key: Uuid) -> Result<(), sqlx::Erro
         if let Some(sender) = sender {
             // Model a lost COMMIT response while PostgreSQL still owns the transaction.
             assert!(sender.send(tx).is_ok());
-            return Err(sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()));
+            return Err(sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()).into());
         }
     }
     tx.commit().await
 }
 
-pub(super) fn definitely_rolled_back(error: &sqlx::Error) -> bool {
+pub(super) fn definitely_rolled_back(error: &InternalError) -> bool {
+    let InternalError::Db(error) = error else {
+        return false;
+    };
     error
         .as_database_error()
         .and_then(|error| error.code())

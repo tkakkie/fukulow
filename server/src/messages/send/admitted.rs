@@ -6,7 +6,7 @@ use super::receipt::{committed, receipt};
 use crate::{
     channels,
     messages::{
-        Delivery, Message, MessageError, SendMessageRequest, admission, commit, dm_error,
+        Delivery, Message, MessageError, SendMessageRequest, admission, commit,
         guards::check_visibility, history, log, mentions, message_from_row, replies,
         require_visible, row::MESSAGE_COLUMNS, search, topics,
     },
@@ -61,7 +61,7 @@ pub(in crate::messages) async fn persist(
     .await
     .map_err(|_| {
         tracing::warn!(target: "fukulow", event = "work_deadline_expired", operation = "send");
-        MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))
+        crate::database::InternalError::Deadline
     })?
 }
 
@@ -75,9 +75,9 @@ async fn persist_admitted(
     permit: admission::Permit,
 ) -> Result<Message, MessageError> {
     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", Some(organization_id)).await?;
-    require_visible(tx.connection()?, organization_id, sender, channel_id).await?;
+    require_visible(tx.connection_mut()?, organization_id, sender, channel_id).await?;
     let history_generation = history::validate(
-        tx.connection()?,
+        tx.connection_mut()?,
         organization_id,
         channel_id,
         input.history_generation,
@@ -87,7 +87,7 @@ async fn persist_admitted(
     let member = sender;
     let sender = sender.0;
     if existing(
-        tx.connection()?,
+        tx.connection_mut()?,
         organization_id,
         sender,
         input.client_message_id,
@@ -99,31 +99,29 @@ async fn persist_admitted(
         // Reauthorize and resolve names together in the canonical read snapshot.
         return committed(pool, organization_id, member, channel_id, &input)
             .await?
-            .ok_or(MessageError::Database(sqlx::Error::RowNotFound));
+            .ok_or_else(|| crate::database::InternalError::Invariant.into());
     }
     let targets = mentions::extract(&input.body);
     let accepted = if let Some((grants, accepted)) = channels::dms::send_locks(
-        tx.connection()?,
+        tx.connection_mut()?,
         organization_id,
         member,
         channel_id,
         &targets,
     )
-    .await
-    .map_err(dm_error)?
+    .await?
     {
         if input.topic_name.is_some() {
             return Err(MessageError::DmTopicsNotAllowed);
         }
-        channels::dms::eligible_peer(tx.connection()?, organization_id, sender, &grants)
-            .await
-            .map_err(dm_error)?;
-        channels::dms::discovery::bump(tx.connection()?, organization_id, channel_id, &grants)
+        channels::dms::eligible_peer(tx.connection_mut()?, organization_id, sender, &grants)
+            .await?;
+        channels::dms::discovery::bump(tx.connection_mut()?, organization_id, channel_id, &grants)
             .await?;
         accepted
     } else {
         let (visible, archived, accepted) = channels::authorize_send_targets(
-            tx.connection()?,
+            tx.connection_mut()?,
             organization_id,
             member,
             channel_id,
@@ -135,7 +133,7 @@ async fn persist_admitted(
             // Another send can commit before our Channel lock is granted.
             // Resolve its receipt in the locked state before refusing new work.
             let canonical = receipt(
-                tx.connection()?,
+                tx.connection_mut()?,
                 organization_id,
                 sender,
                 channel_id,
@@ -156,7 +154,7 @@ async fn persist_admitted(
     // Read before waiting for the Channel barrier: an uncommitted parent is absent,
     // never a foreign-key wait or an implicitly accepted optimistic client id.
     replies::parent_location(
-        tx.connection()?,
+        tx.connection_mut()?,
         organization_id,
         channel_id,
         input.reply_to,
@@ -165,21 +163,21 @@ async fn persist_admitted(
     #[cfg(test)]
     crate::messages::tests::history::pause(input.client_message_id, "reply_parent").await;
     // Bound every subsequent lock wait, including the counter and idempotency key.
-    commit::lock(tx.connection()?, organization_id, channel_id, false).await?;
+    commit::lock(tx.connection_mut()?, organization_id, channel_id, false).await?;
     // A committed parent may have moved while this Reply waited for the writer.
     let parent = replies::parent_location(
-        tx.connection()?,
+        tx.connection_mut()?,
         organization_id,
         channel_id,
         input.reply_to,
     )
     .await?;
-    let seq = log::allocate(tx.connection()?, organization_id, channel_id).await?;
+    let seq = log::allocate(tx.connection_mut()?, organization_id, channel_id).await?;
     let topic_id = if let Some((topic, _)) = parent {
         topic
     } else {
         topics::join(
-            tx.connection()?,
+            tx.connection_mut()?,
             organization_id,
             channel_id,
             Some(seq),
@@ -210,12 +208,18 @@ async fn persist_admitted(
         .bind(reply_root_id)
         .bind(history_generation)
         .try_map(|row| message_from_row(&row))
-        .fetch_optional(tx.connection()?)
+        .fetch_optional(tx.connection_mut()?)
         .await?;
     if let Some(mut message) = message {
         search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
-        mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
-        topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
+        mentions::store(
+            tx.connection_mut()?,
+            organization_id,
+            &mut message,
+            &accepted,
+        )
+        .await?;
+        topics::record(tx.connection_mut()?, organization_id, topic_id, seq).await?;
         let notification = delivery
             .commit_for_publication(
                 tx,
@@ -239,5 +243,5 @@ async fn persist_admitted(
     // The unique-key conflict implies a committed winner; absence is an invariant failure.
     committed(pool, organization_id, member, channel_id, &input)
         .await?
-        .ok_or(MessageError::Database(sqlx::Error::RowNotFound))
+        .ok_or_else(|| crate::database::InternalError::Invariant.into())
 }

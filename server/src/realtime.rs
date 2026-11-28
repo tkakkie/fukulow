@@ -147,7 +147,7 @@ async fn connected_with_lifecycle(
             return;
         }
         Err(error) => {
-            crate::observability::database_failure(&error);
+            crate::auth::report_session_check_failure(&error);
             close(&mut socket, 1011).await;
             return;
         }

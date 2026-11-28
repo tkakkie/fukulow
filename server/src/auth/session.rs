@@ -1,4 +1,5 @@
 use super::Auth;
+use crate::database::InternalError;
 use crate::{AppState, lock_ignoring_poison};
 use sqlx::PgPool;
 use std::{
@@ -222,7 +223,7 @@ impl Registration {
     fn check_status(
         self,
         membership_deadline: impl FnOnce() -> Option<Instant>,
-    ) -> ControlFlow<Result<Option<SessionWatch>, sqlx::Error>, Self> {
+    ) -> ControlFlow<Result<Option<SessionWatch>, InternalError>, Self> {
         let status = *self.changed.borrow();
         if status.revoked {
             return Break(Ok(None));
@@ -234,7 +235,7 @@ impl Registration {
             })));
         }
         if status.failed {
-            return Break(Err(sqlx::Error::PoolClosed));
+            return Break(Err(InternalError::Unavailable));
         }
         Continue(self)
     }
@@ -275,7 +276,7 @@ async fn deadline(
     key: &SessionKey,
     account: Uuid,
     revision: i64,
-) -> Result<(Option<Instant>, bool), sqlx::Error> {
+) -> Result<(Option<Instant>, bool), InternalError> {
     let checked_at = Instant::now();
     let row = tokio::time::timeout(
         CHECK_TIMEOUT,
@@ -287,7 +288,7 @@ async fn deadline(
          WHERE s.token_hash = $2 AND s.expires_at > clock_timestamp()"
     ).bind(key.0).bind(&key.1).bind(account).bind(revision).fetch_optional(tx).await
         }),
-    ).await.map_err(|_| sqlx::Error::PoolTimedOut)??;
+    ).await.map_err(|_| InternalError::Deadline)??;
     Ok(match row {
         Some((seconds, active)) if seconds.is_finite() && seconds > 0.0 => (
             Some(
@@ -305,7 +306,7 @@ impl Auth {
     pub(crate) async fn watch_session(
         &self,
         state: &AppState,
-    ) -> Result<Option<SessionWatch>, sqlx::Error> {
+    ) -> Result<Option<SessionWatch>, InternalError> {
         state.session_changes.start_rechecks(&state.pool);
         let registration = state.session_changes.register_member(
             (
@@ -355,8 +356,20 @@ impl Auth {
     }
 }
 
+pub(crate) fn report_session_check_failure(error: &InternalError) {
+    match error {
+        InternalError::Deadline => {
+            crate::observability::internal_failure("pool_timeout", "deadline")
+        }
+        InternalError::Unavailable => {
+            crate::observability::internal_failure("pool_closed", "unavailable")
+        }
+        error => crate::report_internal_failure(error),
+    }
+}
+
 impl SessionWatch {
-    pub(crate) async fn ended(&mut self) -> Result<u16, sqlx::Error> {
+    pub(crate) async fn ended(&mut self) -> Result<u16, InternalError> {
         tokio::select! {
             biased;
             _ = async {
@@ -369,7 +382,7 @@ impl SessionWatch {
                 match status {
                     Ok(status) if status.revoked => Ok(4001),
                     Ok(status) if status.membership_revoked => Ok(4003),
-                    _ => Err(sqlx::Error::PoolTimedOut),
+                    _ => Err(InternalError::Unavailable),
                 }
             }
         }

@@ -66,7 +66,10 @@ async fn dm_error_mapping_ignores_api_error_text() {
     }
 
     let untyped = ApiError(StatusCode::NOT_FOUND, "channel not found", None);
-    assert!(matches!(dm_error(untyped), MessageError::Database(_)));
+    assert!(matches!(
+        dm_error(untyped),
+        MessageError::Internal(crate::database::InternalError::Invariant)
+    ));
 }
 
 async fn request(app: &Router, method: &str, path: &str, token: &str, input: Value) -> Response {

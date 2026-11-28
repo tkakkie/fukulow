@@ -171,7 +171,7 @@ async fn pass(
         .collect();
     let result = check(pool, &keys, bound).await;
     if let Err(error) = &result {
-        crate::observability::database_failure(error);
+        report_session_check_failure(error);
     }
     #[cfg(test)]
     super::tests::pause_gate(gate, super::tests::Phase::Queried).await;
@@ -204,7 +204,7 @@ async fn check(
     pool: &PgPool,
     keys: &[CheckKey],
     bound: Instant,
-) -> Result<HashMap<SessionKey, u16>, sqlx::Error> {
+) -> Result<HashMap<SessionKey, u16>, InternalError> {
     tokio::time::timeout_at(bound, async {
         let mut ended = HashMap::new();
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
@@ -224,7 +224,7 @@ async fn check(
         Ok(ended)
     })
     .await
-    .map_err(|_| sqlx::Error::PoolTimedOut)?
+    .map_err(|_| InternalError::Deadline)?
 }
 
 async fn query(

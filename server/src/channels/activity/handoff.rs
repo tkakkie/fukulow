@@ -243,7 +243,9 @@ impl NoticeFrame {
             if let Some(capacity) = retry_measurement {
                 capacity.count_retry_attempt();
             }
-            authorize_batch(pool, &selected, Some(&slot)).await
+            Ok::<_, crate::database::InternalError>(
+                authorize_batch(pool, &selected, Some(&slot)).await?,
+            )
         })
         .await
         .map_err(|_| RecheckFailure::Deadline {

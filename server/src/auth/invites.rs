@@ -297,7 +297,7 @@ pub async fn accept_invite(
     if let Some(notice) = notice { notice.committed(state.pool.clone()); }
     else { state.session_changes.directory_changed(state.pool.clone(), org, id); }
     Ok::<_, ApiError>((id, name, role, organization_name))
-    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+    }).await??;
     let (id, name, role, organization_name) = result;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
