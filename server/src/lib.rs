@@ -36,13 +36,14 @@ use std::{
     time::Duration,
 };
 
+// In the crate root because it joins `database` and `observability`, which are leaves and may not depend on each other.
 pub(crate) fn report_internal_failure(error: &database::InternalError) {
     use database::InternalError;
     match error {
         InternalError::Db(error) => observability::database_failure(error),
         InternalError::Saturated => {} // The admission site already counted the refusal.
         InternalError::Deadline => observability::internal_failure("deadline", "deadline"),
-        InternalError::Invariant => observability::internal_failure("invariant", "invariant"),
+        InternalError::Invariant => observability::internal_failure("other", "invariant"),
         InternalError::Unavailable => observability::internal_failure("other", "unavailable"),
     }
 }

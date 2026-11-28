@@ -78,7 +78,7 @@ async fn internal_send_failures_keep_the_original_settlement_and_waiter_response
         [
             ("deadline", "deadline"),
             ("other", "send_replay"),
-            ("invariant", "invariant"),
+            ("other", "invariant"),
             ("other", "send_replay"),
             ("other", "unavailable"),
             ("other", "send_replay"),
@@ -114,6 +114,7 @@ async fn dm_database_failure_retains_cause_without_changing_send_retry_or_http_c
     let output = Capture::default();
     let response = tracing::subscriber::with_default(output.subscriber(), || dm.into_response());
     assert_internal_response(response).await;
+    assert_eq!(output.events().len(), 1, "the DM failure is logged once");
     assert_eq!(
         output.events()[0]["fields"],
         json!({"event": "database_failure", "kind": "database"})
