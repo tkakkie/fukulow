@@ -51,6 +51,25 @@ it('seeds authors only when the matching startup page is accepted', async () => 
   } finally { s.close() }
 })
 
+it('falls back when startup Channel list and Timeline generations differ', async () => {
+  const startupList = { ...list, history_generation: 'old-generation' }
+  const startupPage = { ...page, as_of_seq: 1 }
+  const s = start(async () => ({
+    ok: true,
+    data: { channel_list: startupList, timeline: { channel_id: channel, page: startupPage, authors: { identities } } },
+  }))
+  try {
+    const candidate = s.initialTimeline?.take(channel)
+    expect(await s.initialChannels).toEqual({ ok: true, data: list })
+    const result = await candidate?.result
+    expect(result).toEqual({ ok: true, data: page })
+    if (result?.ok) candidate?.accept?.(result.data)
+    expect(s.loadChannels).toHaveBeenCalledExactlyOnceWith('o', expect.any(AbortSignal))
+    expect(s.load).toHaveBeenCalledExactlyOnceWith('o', channel, { history_generation: undefined }, undefined, expect.any(AbortSignal))
+    expect(s.onAuthors).not.toHaveBeenCalled()
+  } finally { s.close() }
+})
+
 it('discards the startup page and authors across Channel selection', async () => {
   const held = deferred<Result<StartupResponse>>()
   const s = start(() => held.promise)

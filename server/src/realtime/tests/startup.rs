@@ -149,6 +149,53 @@ async fn startup_denies_private_nonmember(pool: PgPool) {
 }
 
 #[fukulow_test::test]
+async fn startup_denies_revoked_private_grant(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (viewer, token) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, viewer, true).await;
+    assert_eq!(
+        startup(&f, &token, Some(private)).await.status(),
+        StatusCode::OK
+    );
+    let removed = sqlx::query(
+        "DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3",
+    )
+    .bind(f.organization)
+    .bind(private)
+    .bind(viewer)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(removed.rows_affected(), 1);
+    assert_channel_denial(&f, &token, private).await;
+}
+
+#[fukulow_test::test]
+async fn startup_denies_stale_private_grant_after_reactivation(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (viewer, token) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, viewer, true).await;
+    assert_eq!(
+        startup(&f, &token, Some(private)).await.status(),
+        StatusCode::OK
+    );
+    for deactivate in [true, false] {
+        sqlx::query("UPDATE users SET deactivated_at=CASE WHEN $3 THEN now() END WHERE organization_id=$1 AND id=$2")
+            .bind(f.organization)
+            .bind(viewer)
+            .bind(deactivate)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_channel_denial(&f, &token, private).await;
+    assert_eq!(
+        startup(&f, &token, Some(f.channel)).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[fukulow_test::test]
 async fn startup_denies_ungranted_guest(pool: PgPool) {
     let f = fixture(&pool).await;
     let (guest, token) = member(&pool, f.organization).await;
