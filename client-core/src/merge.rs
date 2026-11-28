@@ -111,6 +111,20 @@ impl Step<'_> {
         source: Source,
         event_seq: Option<i64>,
     ) {
+        let Some((accepted, positions)) = self.admit(id, records, source, event_seq) else {
+            return;
+        };
+        self.emit_records(id, source, accepted);
+        self.advance_cursor(id, source, &positions);
+    }
+
+    fn admit(
+        &mut self,
+        id: Uuid,
+        records: Vec<Message>,
+        source: Source,
+        event_seq: Option<i64>,
+    ) -> Option<(Vec<Message>, Vec<i64>)> {
         let valid: Vec<_> = records
             .into_iter()
             .filter(|m| m.channel_id == id)
@@ -138,7 +152,7 @@ impl Step<'_> {
             })
         {
             self.settle(id, &valid);
-            return;
+            return None;
         }
         let mut positions: Vec<_> = if source == Source::Ack {
             valid.iter().map(|m| m.created_seq).collect()
@@ -275,6 +289,10 @@ impl Step<'_> {
             self.history(id, Page::Latest, None);
         }
         self.settle(id, &valid);
+        Some((accepted, positions))
+    }
+
+    fn emit_records(&mut self, id: Uuid, source: Source, mut accepted: Vec<Message>) {
         if source == Source::Projection {
             accepted.retain(|m| m.deleted || m.version > m.created_seq);
         }
@@ -296,6 +314,9 @@ impl Step<'_> {
                 self.out.records.push((id, accepted));
             }
         }
+    }
+
+    fn advance_cursor(&mut self, id: Uuid, source: Source, positions: &[i64]) {
         if source == Source::Window || source == Source::Projection {
             return;
         }
