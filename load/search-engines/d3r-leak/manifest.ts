@@ -3,7 +3,7 @@ import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { command } from '../bench.ts';
 import { hash } from '../manifest.ts';
-import { manifestFile as d3rManifest, removedSettings } from '../d3r/manifest.ts';
+import { removedSettings } from '../d3r/manifest.ts';
 import { productionPath, readSource, sources } from '../d3r/path.ts';
 import { reviewedAssignments } from './arms.ts';
 import { formal, rehearsal, smoke } from './design.ts';
@@ -11,7 +11,8 @@ import { bootstrap } from './samples.ts';
 
 export const root = fileURLToPath(new URL('../../../', import.meta.url));
 export const schemaCommit = '66e6e266477b1a860358b1d735ad271e7d4f6489';
-export const manifestFile = 'load/search-engines/manifest-d3r-leak-v20.json';
+export const manifestFile = 'load/search-engines/manifest-d3r-leak-v21.json';
+const d3rManifest = 'load/search-engines/manifest-v18.json';
 const harness = 'load/search-engines/d3r-leak';
 const smokeCandidates = [32, 128, 512];
 export const initialSeed = 689_202_610;
@@ -27,7 +28,7 @@ export const freeze = {formal, smoke, rehearsal, bootstrap, smokeCandidates, ini
 
 export function snapshot(positiveK: number | null) {
   const inputs = [...base.sourceHashes.map(s => s.path), ...Object.values(sources),
-    'load/search-engines/manifest-v18.json', 'load/search-engines/d3r/manifest.ts',
+    d3rManifest, 'load/search-engines/d3r/manifest.ts',
     'load/launcher/launcher.ts', 'load/launcher/host-busy.ts', 'load/harness-core/frequency-container-args.ts',
     'load/harness-core/frequency-layout.ts', 'load/harness-core/cpusets.ts',
     'load/sql-probes/519-unread-counts/frequency-containers.ts',
@@ -35,7 +36,7 @@ export function snapshot(positiveK: number | null) {
     ...readdirSync(new URL('.', import.meta.url)).filter(file => file.endsWith('.ts') && !file.endsWith('.test.ts'))
       .map(file => `${harness}/${file}`),
   ];
-  return {version: 20, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze,
+  return {version: 21, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze,
     reviewedAssignments, positiveK,
     migrations: base.migrations, node: base.node,
     sourceHashes: [...new Set(inputs)].sort().map(path => ({path, sha256: hash(readSource(path))}))};

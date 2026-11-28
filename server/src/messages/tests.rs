@@ -22,6 +22,7 @@ mod move_topic;
 mod page_mentions;
 mod receipts;
 mod replay_plans;
+mod retention;
 mod search;
 mod text_input;
 pub(super) mod unread;
