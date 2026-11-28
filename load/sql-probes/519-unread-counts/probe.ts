@@ -123,10 +123,8 @@ export function pgbenchEvidence<T>(output: string, measuredWindow: ReturnType<ty
   return { output, measuredWindow, after, latencies, pgbenchWindow, errors };
 }
 
-// §10 step 1 stop rule, fixed before the run: per pair, a3-final against current;
-// the rule fires when the median pair ratio exceeds a limit. Every pair is reported.
 export type PairSend = { pair: number; walBytesPerSend: number; tps: number };
-export function stopRule(current: PairSend[], final: PairSend[]) {
+export function sendRatios(current: PairSend[], final: PairSend[]) {
   if (current.length === 0 || current.length !== final.length) throw new Error('unpaired send blocks');
   // A zero, negative or non-finite input, ratio or median is invalid: NaN reads as "no stop" and
   // the others give a meaningless verdict, so the run fails instead (#803).
@@ -147,8 +145,17 @@ export function stopRule(current: PairSend[], final: PairSend[]) {
   const median = (xs: number[]) => quantile(xs, 0.5);
   const walPerSend = positive('median WAL/send ratio', median(ratios.map(r => r.walPerSend)));
   const tps = positive('median tps ratio', median(ratios.map(r => r.tps)));
-  return { ratios, medianWalPerSend: walPerSend, medianTps: tps,
-    stop: walPerSend > 1.2 || tps < 0.9, limits: 'stop if median WAL/send ratio > 1.20 or median tps ratio < 0.90' };
+  return { ratios, medianWalPerSend: walPerSend, medianTps: tps };
+}
+
+export const exceedsSendLimits = (walPerSend: number, tps: number) => walPerSend > 1.2 || tps < 0.9;
+
+// §10 step 1 stop rule, fixed before the run: per pair, a3-final against current;
+// the rule fires when the median pair ratio exceeds a limit. Every pair is reported.
+export function stopRule(current: PairSend[], final: PairSend[]) {
+  const comparison = sendRatios(current, final);
+  return { ...comparison, stop: exceedsSendLimits(comparison.medianWalPerSend, comparison.medianTps),
+    limits: 'stop if median WAL/send ratio > 1.20 or median tps ratio < 0.90' };
 }
 
 // message_counts_check result as `SELECT count(*)` under a statement_timeout. Anything but

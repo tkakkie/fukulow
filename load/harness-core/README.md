@@ -61,7 +61,19 @@ A STOP or a failed job ends the queue. Nothing reruns: a `setup-failure` rerun u
 
 ## #796 frequency validity v3
 
-Build on x86-64 Linux with `cargo build --release --locked --manifest-path load/harness-core/perf-helper/Cargo.toml`. For an authorized installation, install the resulting `fukulow-perf-helper` as root-owned and executable only by root and the measurement user's group, under a root-owned directory. Apply only `sudo setcap cap_perfmon=ep <installed-binary>` and verify with `getcap`. Keep `perf_event_paranoid=4`. The launcher and pgbench run without that capability. After the separate permission-check go, run the installed binary with `--check` as the launcher user. It applies F1 to a one-second sample on each CPU. Retain its output and exit status. STOP on a nonzero exit.
+The helper accepts block orders 1–16 in both `block` and `control` mode. Before setup, the send harness runs `--check-order ORDER` with the largest planned order against the installed helper. This checks the range without opening perf counters. Replace binaries installed before this check was added.
+
+For an authorized installation, build and install from the checkout root on x86-64 Ubuntu. Set `MEASUREMENT_GROUP` to the measurement user's group.
+
+```bash
+cargo build --release --locked --manifest-path load/harness-core/perf-helper/Cargo.toml
+sudo install -d -o root -g "$MEASUREMENT_GROUP" -m 0750 /opt/fukulow-perf
+sudo install -o root -g "$MEASUREMENT_GROUP" -m 0750 load/harness-core/perf-helper/target/release/fukulow-perf-helper /opt/fukulow-perf/fukulow-perf-helper
+sudo setcap cap_perfmon=ep /opt/fukulow-perf/fukulow-perf-helper
+getcap /opt/fukulow-perf/fukulow-perf-helper
+```
+
+Keep `perf_event_paranoid=4`. The launcher and pgbench run without that capability. After the separate permission-check go, run the installed binary with `--check` as the launcher user. It applies F1 to a one-second sample on each CPU. Retain its output and exit status. STOP on a nonzero exit.
 
 Reserve both SMT siblings of core 0 (boot CPU and observed background activity) and core 7 (observed GPU and NVMe IRQs). Each workload gives up one core to make room for background work while keeping equal sets, whole cores and the original even/odd placement. CPU 6 stays measured to check whether moving background work resolves the first-reference STOP on that CPU. Wi-Fi stays up and its IRQ moves when the kernel permits it.
 

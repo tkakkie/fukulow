@@ -16,7 +16,7 @@ use uuid::Uuid;
 // does not recognise COALESCE as leakproof, so it stays out of RLS index quals.
 pub(in crate::messages) const LIST_COUNTS_SQL: &str = r#"
 WITH unread_topics AS MATERIALIZED (
-    SELECT t.organization_id, t.channel_id, t.id, t.last_seq,
+    SELECT t.organization_id, t.channel_id, t.id, t.last_seq, t.scope_appended,
         COALESCE(tr.read_seq, p.initial_seq) AS read_seq,
         COALESCE(tr.read_ordinal, 0) AS read_ordinal,
         COALESCE(tr.read_own_ordinal, 0) AS read_own_ordinal
@@ -42,7 +42,8 @@ LEFT JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $
 LEFT JOIN channel_message_sequences s ON s.organization_id = $1 AND s.channel_id = c.channel_id
 CROSS JOIN LATERAL (
     SELECT CASE WHEN p.channel_id IS NULL OR COALESCE(s.seq, 0) <= p.read_seq THEN 0 ELSE
-        (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
+        COALESCE(s.main_appended, 0)
+        + (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
               - COALESCE(sum(k.appended) FILTER (WHERE k.member_id = $2), 0))::bigint
          FROM message_append_counts k WHERE k.organization_id = $1 AND k.channel_id = c.channel_id
             AND k.scope_id = '00000000-0000-0000-0000-000000000000'
@@ -67,7 +68,8 @@ CROSS JOIN LATERAL (
     FROM unread_topics t
     CROSS JOIN LATERAL (
         SELECT
-            (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
+            t.scope_appended
+            + (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
                   - COALESCE(sum(k.appended) FILTER (WHERE k.member_id = $2), 0))::bigint
              FROM message_append_counts k WHERE k.organization_id = $1 AND k.channel_id = c.channel_id
                 AND k.scope_id = t.id AND k.member_id IN ('00000000-0000-0000-0000-000000000000', $2))

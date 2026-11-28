@@ -8,6 +8,7 @@ use sqlx::Row;
 use std::time::Duration;
 
 mod projection;
+mod scope_totals;
 
 const SEEDS: [u64; 3] = [0x0051_9519, 0xa3a3_a3a3, 0x0dd5_eed5];
 const STEPS: usize = 160;
@@ -550,12 +551,32 @@ async fn a3_migration_backfill_keeps_counts_of_a_populated_database(pool: PgPool
         .retain(|migration| migration.version < 202611221100);
     previous.run(&pool).await.unwrap();
     let world = World::new(&pool).await;
-    let mut rng = Rng(0xb4c7_f111);
-    let mut keys = Vec::new();
-    // Before the migration only pre-A3 statements and the pre-A3 query exist.
-    for _ in 0..60 {
-        step(&world, &pool, &mut rng, &mut keys).await;
+    // Use historical send SQL before F2's columns exist.
+    let (sender, _) = world.members[0];
+    let (viewer, _) = world.members[1];
+    let channel = world.channels[0];
+    historical_post(&pool, world.org, sender, channel, None).await;
+    historical_post(&pool, world.org, sender, channel, Some("Before A3")).await;
+    for n in 2..60 {
+        let source = world.channels[n % 2];
+        let author = world.members[n % world.members.len()].0;
+        let topic = [None, Some("Before A3"), Some("Other")][n % 3];
+        historical_post(&pool, world.org, author, source, topic).await;
     }
+    sqlx::query(
+        "UPDATE messages SET deleted=true WHERE organization_id=$1 AND channel_id=$2 AND seq=4",
+    )
+    .bind(world.org)
+    .bind(channel)
+    .execute(&pool)
+    .await
+    .unwrap();
+    resync_topics(&pool, world.org, channel).await;
+    sqlx::query("INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id)
+        SELECT organization_id,channel_id,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
+        .bind(world.org).bind(channel).bind(viewer).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE channel_read_positions SET read_seq=1 WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+        .bind(world.org).bind(channel).bind(viewer).execute(&pool).await.unwrap();
     let before = world.all_counts(&pool, PRE_A3).await;
     assert!(
         before
@@ -574,6 +595,8 @@ async fn a3_migration_backfill_keeps_counts_of_a_populated_database(pool: PgPool
         before
     );
     world.assert_oracle(&pool, "after backfill").await;
+    let mut rng = Rng(0xb4c7_f111);
+    let mut keys = Vec::new();
     for n in 0..30 {
         let what = step(&world, &pool, &mut rng, &mut keys).await;
         world

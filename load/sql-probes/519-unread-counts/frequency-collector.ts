@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
 import { hrtime } from 'node:process';
@@ -9,6 +9,15 @@ import type { housekeepingSampler } from './frequency-housekeeping.ts';
 import { helperResponseMs } from './frequency-timing.ts';
 
 const exec = promisify(execFile);
+
+export function assertHelperOrder(helper: string, order: number) {
+  try {
+    execFileSync(helper, ['--check-order', String(order)], { timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (cause) {
+    throw new Error(`STOP: perf helper could not validate planned block ${order}; check or reinstall ${helper}`, { cause });
+  }
+}
+
 export async function calibrate(helper: string, signal: AbortSignal): Promise<Calibration> {
   return JSON.parse((await exec(helper, ['calibrate'], { timeout: 5000, signal })).stdout);
 }

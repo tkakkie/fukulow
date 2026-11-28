@@ -13,10 +13,16 @@ export const cpus = () => cpus796;
 export const tmpdir = () => scratch;
 export const hostRecord = () => ({});
 export const linuxViolations = () => [];
-export const frequencyRequest = () => ({ stage: 'control', session, launchPolicy: policy });
+export const frequencyRequest = () => ({ stage: 'control', helper: '/mock-perf-helper', session, launchPolicy: policy });
 export const frequencyRun = () => ({ start: async () => {}, finish: () => {} });
+export const assertHelperOrder = (helper: string, order: number) => {
+  assert.equal(helper, '/mock-perf-helper');
+  assert.equal(order, 3);
+  checkedOrder = true;
+};
 
 let scratch: string;
+let checkedOrder = false;
 const launched: string[] = [], removed: string[] = [];
 const stopped = 'fixture stop after container launch';
 const result = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -47,8 +53,13 @@ export function spawnSync(command: string, args: string[]) {
     if (operation === 'show') return result('pub(super) const LIST_COUNTS_SQL: &str = r#"SELECT 1"#;');
   }
   if (command === 'docker') {
+    assert.ok(checkedOrder, 'helper order must be checked before Docker commands');
     if (operation === 'ps' || operation === 'exec') return result();
     if (operation === 'inspect') return { status: 1, stdout: '', stderr: stopped };
+    if (operation === 'logs') {
+      assert.equal(removed.length, 0);
+      return result('fixture checkpoint log');
+    }
     if (operation === 'run') {
       if (args.includes('--name')) launched.push(args[args.indexOf('--name') + 1]);
       return result();
@@ -74,7 +85,8 @@ test('a final frequency run writes a fresh finish affinity file after cleaning u
   t.mock.method(process, 'chdir', () => {});
   t.mock.method(process, 'exit', (status: number) => { throw new Error(`exit ${status}`); });
   const error = t.mock.method(console, 'error', () => {});
-  const mocked = new Set(['node:child_process', 'node:os', '../../harness-core/host-record.ts', './frequency-run.ts', './frequency-host-affinity.ts']);
+  const mocked = new Set(['node:child_process', 'node:os', '../../harness-core/host-record.ts', './frequency-run.ts',
+    './frequency-collector.ts', './frequency-host-affinity.ts']);
   const hooks = registerHooks({
     resolve(specifier, context, nextResolve) {
       return context.parentURL === entry.href && mocked.has(specifier)
@@ -91,5 +103,6 @@ test('a final frequency run writes a fresh finish affinity file after cleaning u
   const read = (name: string) => JSON.parse(readFileSync(join(out, name), 'utf8'));
   assert.deepEqual(read('frequency-host-affinity.json'), hostAffinity());
   assert.deepEqual(read('frequency-host-affinity-after.json'), readHostAffinity(session));
+  assert.match(readFileSync(join(out, 'postgres.log'), 'utf8'), /fixture checkpoint log/);
   assert.equal(read('status.json').complete, false);
 });

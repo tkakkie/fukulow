@@ -60,6 +60,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   - Every pair and every individual breach is reported.
   - A zero, negative or non-finite WAL/send, tps, ratio or median fails the run instead of counting as no breach (#803).
 - **Run conditions:** `--diagnostic` requires the held host-busy marker and records its line in `metadata.json`. Smoke uses 5 s blocks and one cut, and only validates the harness.
+- **Disk-wait diagnostics:** use the report-only tables in `summary.md` with `disk-wait/` and `postgres.log`. A diagnostic run stops at setup if Docker's data and WAL mounts cannot be tied to host block devices or if the sampler cannot be placed outside the workload CPU sets. Smoke records a skip on macOS. Disk rows include stacked devices separately, so do not sum them. To reconstruct the legacy log order from the archived pgbench thread files, sort by the original names without the `.gz` suffix.
 - **Limits:**
   - WAL statistics are cluster-wide, so idle clones can add background WAL.
   - The send databases are reused across pairs, so the faster arm accumulates more rows.
@@ -88,6 +89,38 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
 - **Reported:** per block in run order: tps, p95/p99, WAL bytes/send, images per WAL record and per send, start and end times, host state. Per pair: both ratios and each breach. Every check with its duration.
 - **No exclusion or rerun after results.** A failed run (setup, check, timeout or crossing checkpoint) is reported as failed. At most one rerun for a known setup failure, as #769 allows.
 - **Time:** about 25 min of blocks, plus setup and three final-block checks (each expected well under the 45 min limit).
+
+### F2 send comparison (`--f2`)
+
+The Mac smoke runs one pre-F2 block followed by one F2 block, with 300 seeded Messages per Channel and 5 s warm/5 s measured per block. It verifies both migration chains, fresh main and Topic sends with Mentions under `fukulow_app` with RLS, and zero count discrepancies before and after sends. Smoke is labeled SMOKE / NOT EVIDENCE.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --f2 --out /absolute/new/f2-smoke
+```
+
+After a separate measurement go, use one job on the qualified Ubuntu host with the [formal v3 launcher conditions](../../harness-core/README.md#796-frequency-validity-v3). Keep the pinned image, disk and host preflights, cool-down, airflow confirmation, 5 s thermal sampling, frozen frequency floors and workload label `io.fukulow.probe=519-final`. Use `issue: 796` for launcher routing, the go for this #519 comparison, and the same full F2 source SHA in the queue's `commit` and the command. Use a clean checkout. Run `node load/launch.ts --queue /absolute/519-f2-queue.json` with this command in the job's argv.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --f2 --f2-source F2_FULL_SHA \
+  --cpu-sets 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15' \
+  --frequency-v3 formal --perf-helper /absolute/fukulow-perf-helper --out /absolute/new/f2
+node load/sql-probes/519-unread-counts/stability.ts --stage formal --f2 \
+  --queue /absolute/519-f2-queue.json --out /absolute/new/f2-placement.json
+```
+
+The installed helper must accept all 16 planned block orders. The harness checks order 16 before setup. See the [helper installation instructions](../../harness-core/README.md#796-frequency-validity-v3) to replace the older six-block helper.
+
+- Current stays at `5ef561e5` and final applies only A3 from `fd6a5949` and UPDATE-first from `c672b0a4`. Both use `sql/send-current.sql`. Pre-F2 (`pref2`) applies the exact migration chain at `6e2d1d4d`, and F2 adds only the F2 migration. Both use the same seed with a reconstructed Create log for #620's bijection guard.
+- `sql/send-pref2.sql` and `sql/send-f2.sql` mirror the Rust sequence UPSERT, Topic join and update, Message INSERT and Mention writes. Their only SQL differences are `main_appended`, `scope_appended` and `scope_append_recorded`. Both arms include #620's removal of the Create-log write and the Topic paging index. The probe measures the database writes in one routine call per send and skips application authorization, search indexing, HTTP and delivery.
+- Every block uses a fresh clone, the same settings and RLS role, 8 clients/4 threads, a forced checkpoint, 60 s warm and 120 s measured. `message_counts_check` runs on the final, pre-F2 and F2 templates and after each of their blocks with the 45 min statement timeout. Migration drift outside the pinned chain fails setup. `metadata.json` records the source pins and hashes of the SQL and Rust send files for pre-F2 and F2.
+- The four Williams square rows are the four pairs, in order. Each arm occupies every position once and follows each other arm once within a row.
+  1. current, final, F2, pre-F2
+  2. final, pre-F2, current, F2
+  3. pre-F2, F2, final, current
+  4. F2, current, pre-F2, final
+- The 16 blocks take 48 min of pgbench work, up from 27 min, plus the first-block 150 s settle/reference, setup, checkpoints, cloning, 15 explicit consistency checks and up to 20 min of prelaunch cool-down. The launcher has no whole-job timeout. Allow for a session beyond one hour, including the extra checks. Per-block time, thermal cadence and all existing timeouts still apply.
+- Use the placement report to verify the host evidence before interpreting results. `stop-rule.json` compares final with current and `stop-rule-f2.json` compares F2 with current with the existing median limits (WAL/send ≤ 1.20, tps ≥ 0.90). The summary also shows F2 vs final. Ratios use paired blocks and the probe's existing nearest-rank median (lower middle of four).
+- The report-only **F2 vs pre-F2** and **pre-F2 vs current** sections show each pair and the medians. F2/pre-F2 isolates the counter change. Pre-F2/current includes the #620 and Topic paging changes together. The summary and `stop-rule-f2.json` always display the F2-only flag for a completed comparison. Median F2/pre-F2 WAL/send > 1.20 or tps < 0.90 gives `F2-ONLY REGRESSION`. Otherwise, WAL/send > 1.00 in all four pairs or tps < 1.00 in all four gives `F2-only worsening below limits`. All other results give `no F2-only regression observed`. The flag is informational.
 
 ### Send-cost attribution (`--attribution`)
 

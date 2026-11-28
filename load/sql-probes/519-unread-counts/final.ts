@@ -2,7 +2,7 @@ import { execFile, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
@@ -12,30 +12,45 @@ import { hostRecord, linuxViolations } from '../../harness-core/host-record.ts';
 import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, finishBlock, listCountsAtCommit, measuredPgbench, member, migrationOutcome, organization, pgbench, pgbenchEvidence, planSummary,
   quantile, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
+import { assertHelperOrder } from './frequency-collector.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
 import { frequencyClientArgs, frequencyContainerReadbacks, frequencyServerArgs, probeImage as image,
   serverImageArgs } from './frequency-containers.ts';
 import { hostAffinityProblems, readHostAffinity } from './frequency-host-affinity.ts';
 import type { CounterBlock, ReferenceWindow } from './frequency-evidence.ts';
 import { frequencyWorkSeconds, pgbenchTimeoutGraceSeconds } from './frequency-timing.ts';
-import { makeTraversable, stageSql } from './stage-sql.ts';
+import { makeTraversable, stageSql, stagedSql } from './stage-sql.ts';
 import { attributionSettings, boundaryCommandArgs, postgresSettingsArgs, sendPgbenchArgs, validateAttribution, walKeepGiB } from './final-commands.ts';
 import { attributionMetadata, diffSnapshots, walWindowBytes, type AttributionBlock, type Snapshot } from './attribution.ts';
 import { inspectWal, installAttributionSql, parseBoundary, snapshotSql, walDiskPreflight } from './attribution-sql.ts';
 import { attributionMarkdown, summarizeAttribution } from './attribution-summary.ts';
+import { createCutover, f2Base, f2BlockOrder, f2Migration, f2SeedSql, f2Send, f2SmokeMessagesPerChannel, f2SmokeSeed,
+  f2Sources, hashFile, pref2Send, seedCreateLog, topicPageMigration, validateF2 } from './f2-arm.ts';
+import { f2ReferenceMarkdown, f2ReferenceReport } from './f2-report.ts';
+import { finalBenchOrder, finalSendPlan } from './final-plan.ts';
+import { postgresDevices } from './disk-device.ts';
+import { startDiskSampler } from './disk-sampling.ts';
+import { diskWaitMarkdown, type DiagnosticBlock } from './disk-wait-summary.ts';
+import { readThreadLogs } from './pgbench-logs.ts';
+import { sendDiagnostics } from './send-diagnostics.ts';
+import { walIoQuery } from './wal-io.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
-const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) [--sends-only] [--attribution] [--cpu-sets "server=LIST;client=LIST[;housekeeping=LIST]"] [--frequency-v3 control|rehearsal2|formal --perf-helper BINARY] --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
+const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) [--sends-only] [--attribution | --f2 [--f2-source FULL_SHA]] [--cpu-sets "server=LIST;client=LIST[;housekeeping=LIST]"] [--frequency-v3 control|rehearsal2|formal --perf-helper BINARY] --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
 const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type: 'boolean' }, diagnostic: { type: 'boolean' },
-  'sends-only': { type: 'boolean' }, attribution: { type: 'boolean' }, 'frequency-v3': { type: 'string' }, 'perf-helper': { type: 'string' }, 'control-review': { type: 'string' }, 'permission-check': { type: 'string' }, 'cpu-sets': { type: 'string' }, help: { type: 'boolean' } } });
+  'sends-only': { type: 'boolean' }, attribution: { type: 'boolean' }, f2: { type: 'boolean' }, 'f2-source': { type: 'string' },
+  'frequency-v3': { type: 'string' }, 'perf-helper': { type: 'string' }, 'control-review': { type: 'string' }, 'permission-check': { type: 'string' }, 'cpu-sets': { type: 'string' }, help: { type: 'boolean' } } });
 if (values.help) { console.log(usage); process.exit(0); }
 if (!values.out || values.smoke === values.diagnostic) throw new Error(usage);
 const smoke = values.smoke === true;
 // Send re-measure (#519, approved 2026-11-23): sends only, one fresh database per block.
 const sendsOnly = values['sends-only'] === true;
 const attribution = values.attribution === true;
+const f2 = values.f2 === true;
 const frequencyStage = values['frequency-v3'];
+if (f2) validateF2(smoke, sendsOnly, attribution, frequencyStage, values['f2-source']);
+else if (values['f2-source'] !== undefined) throw new Error('--f2-source requires --f2');
 if (attribution) validateAttribution(values.diagnostic === true, smoke, sendsOnly, frequencyStage, platform() === 'linux');
 // Fixed before the run: the last unbounded check took about 33 min on three blocks' rows.
 const checkTimeout = '45min';
@@ -54,6 +69,8 @@ if (frequencyStage !== undefined && (smoke || !sendsOnly)) throw new Error('#796
 const request = frequencyStage === undefined ? null : frequencyRequest(frequencyStage, values['perf-helper'], values['control-review'], values['permission-check'], launchSession, cpuSets, marker);
 const control = request?.stage === 'control';
 type FinalArm = 'current' | 'final';
+type F2Arm = 'pref2' | 'f2';
+type SendArm = FinalArm | F2Arm;
 const pins: Record<FinalArm, string> = { current: '5ef561e5', final: 'fd6a5949' };
 const a3Migration = '202611221100_unread_counts.sql';
 // Re-measure after #814 (#820, approved 2026-11-23): the final arm also applies the UPDATE-first
@@ -64,15 +81,17 @@ const cuts = smoke ? [75] : [75, 150, 575, 2150];
 const samples = smoke ? 5 : 30;
 const warmSeconds = smoke ? 5 : 60;
 const measuredSeconds = smoke ? 5 : frequencyWorkSeconds;
-const benchOrder: FinalArm[][] = smoke ? [['current', 'final']] : [['current', 'final'], ['final', 'current'], ['current', 'final']];
+const benchOrder = finalBenchOrder(smoke);
+const sendPlan = finalSendPlan(smoke, f2, control);
+if (request) assertHelperOrder(request.helper, Math.max(...sendPlan.map(block => block.order)));
 const attributionBlocks: AttributionBlock[] = [];
+const diagnosticBlocks: DiagnosticBlock[] = [];
+let diskSampler: Awaited<ReturnType<typeof startDiskSampler>> | undefined;
+let diskSetupReason: string | undefined = 'setup did not reach device resolution';
 
 const root = realpathSync(fileURLToPath(new URL('../../../', import.meta.url)));
 process.chdir(root);
 const out = outsideCheckout(values.out);
-mkdirSync(out, { mode: 0o700 });
-mkdirSync(join(out, 'plans'));
-mkdirSync(join(out, 'latency'));
 const save = (path: string, value: unknown) => writeFileSync(join(out, path), JSON.stringify(value, null, 2) + '\n');
 let frequency: ReturnType<typeof frequencyRun> | null = null;
 const exec = promisify(execFile);
@@ -85,6 +104,10 @@ const run = (cmd: string, args: string[], input?: string) => {
 const git = (...args: string[]) => run('git', args).trim();
 const commits = { current: git('rev-parse', pins.current + '^{commit}'), final: git('rev-parse', pins.final + '^{commit}') };
 if (git('rev-parse', commits.final + '^') !== commits.current) throw new Error('final pin must be the direct child of current');
+const f2Source = f2 ? f2Sources(root, (...args) => run('git', args), smoke, values['f2-source']) : null;
+mkdirSync(out, { mode: 0o700 });
+mkdirSync(join(out, 'plans'));
+mkdirSync(join(out, 'latency'));
 const work = mkdtempSync(join(realpathSync(tmpdir()), 'fk519f-'));
 // mkdtemp gives 0700; the v3 sends run as the container's postgres user, which must read the bind-mounted
 // files (repository SQL only, nothing secret).
@@ -107,7 +130,26 @@ if (git('diff', '--name-status', commits.final, update, '--', `server/migrations
 writeFileSync(join(work, a3Update), git('show', `${update}:server/migrations/${a3Update}`) + '\n');
 // Only the SQL this probe opens, readable by the container postgres user whatever the umask; a
 // symlinked input throws (stage-sql.ts).
-stageSql(join(root, 'load/sql-probes/519-unread-counts/sql'), work);
+stageSql(join(root, 'load/sql-probes/519-unread-counts/sql'), work, f2Source ? [...stagedSql, f2Send, pref2Send] : stagedSql);
+const pref2Migrations = [a3Migration, topicPageMigration, a3Update, createCutover];
+const f2Migrations = [...pref2Migrations, f2Migration];
+const seed = f2Source ? f2SeedSql(smoke) : 'sql/seed.sql';
+if (f2Source) {
+  const delta = git('diff', '--name-status', commits.current, f2Base, '--', 'server/migrations');
+  const expected = pref2Migrations.map(name => `A\tserver/migrations/${name}`).join('\n');
+  if (delta !== expected) throw new Error(`unexpected pre-F2 migration diff: ${delta}`);
+  for (const name of pref2Migrations) {
+    const path = join(work, name);
+    const pinned = run('git', ['show', `${f2Base}:server/migrations/${name}`]);
+    if (name === a3Migration || name === a3Update) {
+      if (readFileSync(path, 'utf8') !== pinned) throw new Error(`F2 base changed ${name}`);
+    } else {
+      writeFileSync(path, pinned);
+    }
+  }
+  writeFileSync(join(work, f2Migration), f2Source.migration);
+  if (smoke) writeFileSync(join(work, seed), f2SmokeSeed(readFileSync(join(work, 'sql/seed.sql'), 'utf8')));
+}
 for (const arm of ['current', 'final'] as FinalArm[]) {
   writeFileSync(join(work, `sql/list-${arm}.sql`), listCountsAtCommit(git, commits[arm]) + '\n');
 }
@@ -132,6 +174,12 @@ const countsCheck = (db: string, label: string) => bounded(db, `message_counts_c
   `SELECT count(*) FROM message_counts_check('${organization}');\n`, c => countsCheckOutcome(c.status, c.stdout ?? '', c.stderr ?? ''));
 const migrateA3 = (db: string) => bounded(db, `A3 migration on ${db} (backfill guard runs message_counts_check)`,
   `BEGIN;\n\\i /work/${a3Migration}\nCOMMIT;\nBEGIN;\n\\i /work/${a3Update}\nCOMMIT;\n`, c => migrationOutcome(c.status, c.stderr ?? ''));
+const migrateF2Arm = (db: string, arm: F2Arm) => {
+  psql(db, seedCreateLog);
+  const chain = arm === 'pref2' ? pref2Migrations : f2Migrations;
+  bounded(db, `${arm === 'pref2' ? 'pre-F2' : 'F2'} migration chain on ${db} (backfill guards run message_counts_check)`,
+    chain.map(name => `BEGIN;\n\\i /work/${name}\nCOMMIT;\n`).join(''), c => migrationOutcome(c.status, c.stderr ?? ''));
+};
 // Host state around each block. A diagnostic block refuses to start next to any other running
 // container; after the block, any container still running or started during it fails the block.
 // sinceSeconds is taken before the pre-block `docker ps` (eventsSince), so the windows overlap.
@@ -196,11 +244,31 @@ const boundaryQueries = attribution ? [walQuery, snapshotSql] : [walQuery];
 const parseBoundaryOutput = (output: string): WalBoundary =>
   attribution ? parseBoundary<WalBoundary>(output) : JSON.parse(output);
 const boundary = (db: string) => attribution ? parseBoundaryOutput(psql(db, boundarySql)) : walStats(db);
-const serverLog = () => {
-  const child = spawnSync('docker', ['logs', container], { encoding: 'utf8', maxBuffer });
-  if (child.status !== 0) throw new Error(`server log read failed: ${(child.stderr ?? '').slice(-500) || `exit ${child.status}`}`);
+const serverLog = (timeout?: number) => {
+  const child = spawnSync('docker', ['logs', container], { encoding: 'utf8', maxBuffer, timeout });
+  if (child.status !== 0) throw new Error(`server log read failed: ${child.error?.message ?? ((child.stderr ?? '').slice(-500) || `exit ${child.status}`)}`);
   return `${child.stdout}\n${child.stderr}`;
 };
+
+async function setupDiskDiagnostics() {
+  let resolution: ReturnType<typeof postgresDevices> | undefined;
+  try {
+    if (platform() !== 'linux') throw new Error(`/proc/diskstats is unavailable on the ${platform()} Docker client host`);
+    if (!cpuSets) throw new Error('no workload CPU sets supplied for diskstats sampler placement');
+    resolution = postgresDevices(container, psql('postgres', 'SHOW data_directory;').trim(), args => run('docker', args));
+    diskSampler = await startDiskSampler(cpuSets, resolution.devices);
+    diskSetupReason = undefined;
+  } catch (error) {
+    diskSetupReason = `${smoke ? 'skipped in smoke' : 'setup failed'}: ${String(error)}`;
+  }
+  try {
+    mkdirSync(join(out, 'disk-wait'));
+    save('disk-wait/setup.json', { resolution, sampler: diskSampler?.placement, reason: diskSetupReason });
+  } catch (error) {
+    diskSetupReason = [diskSetupReason, `could not save disk-wait/setup.json: ${String(error)}`].filter(Boolean).join('. ');
+  }
+  if (!smoke && !diskSampler) throw new Error(diskSetupReason);
+}
 // Forces a checkpoint and returns its request time on the server clock (the clock of the log's %m).
 function forcedCheckpoint(db: string) {
   const requestMs = Number(psql(db, 'SELECT extract(epoch FROM clock_timestamp()) * 1000;\nCHECKPOINT;\n').trim());
@@ -220,23 +288,33 @@ function sendRole(db: string) {
 // soon as pgbench completes; closeCheckpoint() then forces the closing CHECKPOINT and judges the
 // block from server-log timestamps (see checkpointWindow). The counters and the control file's redo
 // LSN up to the end of the measured block are kept as a second, completed-checkpoint signal.
-function sendBlock(db: string, label: string, order: number, arm: FinalArm, reference?: ReferenceWindow) {
+function sendBlock(db: string, label: string, order: number, arm: SendArm, reference?: ReferenceWindow) {
   let openRequestMs = NaN;
   let blockEndMs = NaN;
+  const prefix = `/tmp/pgb-${label}`;
+  const diagnostics = sendDiagnostics(out, label, diskSampler, diagnosticBlocks);
+  const readLogs = () => diagnostics.log(basename(prefix),
+    () => run('docker', ['exec', clientContainer, 'sh', '-c', readThreadLogs, 'pgbench-logs', prefix]));
+  // Give the report-only query its own timeout so the required LSN query keeps its original failure path.
+  const walIoArgv = [...psqlArgs(db, 'postgres', false), '-c', walIoQuery];
+  const walIo = (phase: 'before' | 'after') => diagnostics.wal(phase, () => {
+    const result = spawnSync('docker', walIoArgv, { encoding: 'utf8', timeout: 5000, maxBuffer });
+    if (result.status !== 0) throw new Error(result.error?.message ?? result.stderr.slice(-2000));
+    return result.stdout;
+  });
   return {
     async measure() {
       openRequestMs = forcedCheckpoint(db);
       const start = walStats(db);
       const warmArgv = sendPgbenchArgs(clientContainer, cpuSets?.client, !!request, warmSeconds, db);
-      const prefix = `/tmp/pgb-${label}`;
       // #796: measuredWindow is the wrapper around the measured pgbench run (wall and monotonic, to
       // expose a clock step); pgbenchWindow is pgbench's own interval from its log, the one the
       // thermal judge reads the launcher's samples inside.
       const argv = sendPgbenchArgs(clientContainer, cpuSets?.client, !!request, measuredSeconds, db, prefix);
       const steps = {
         run: () => run('docker', argv),
-        after: () => boundary(db),
-        log: () => run('docker', ['exec', clientContainer, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]),
+        after: () => { const after = boundary(db); walIo('after'); return after; },
+        log: readLogs,
       };
       let counters: CounterBlock | undefined;
       let affinity: Affinity | undefined;
@@ -251,16 +329,23 @@ function sendBlock(db: string, label: string, order: number, arm: FinalArm, refe
           const prepare = async () => {
             pgbench((await exec('docker', warmArgv, { signal, timeout: (warmSeconds + 10) * 1000, maxBuffer })).stdout);
             const { stdout } = await exec('docker', [...psqlArgs(db, 'postgres', false), ...boundaryCommandArgs(boundaryQueries)], { signal, timeout: 5000, maxBuffer });
-            return parseBoundaryOutput(stdout);
+            const before = parseBoundaryOutput(stdout);
+            try {
+              const { stdout: counts } = await exec('docker', walIoArgv, { signal, timeout: 5000, maxBuffer });
+              diagnostics.wal('before', () => counts);
+            } catch (error) { diagnostics.error('WAL I/O before', error); }
+            return before;
           };
-          const captured = await frequency.measure(order, reference, prepare, () => {
+          const captured = await frequency.measure(order, reference, prepare, async () => {
+            diagnostics.start();
             const workload = exec('docker', argv, {
               signal, timeout: (measuredSeconds + pgbenchTimeoutGraceSeconds) * 1000, killSignal: 'SIGKILL', maxBuffer,
             });
             if (request?.stage === 'rehearsal2') {
               observed = readAffinity(container, clientContainer, prefix, db, affinitySignal).catch(error => new Error(String(error)));
             }
-            return workload.then(result => result.stdout);
+            try { return (await workload).stdout; }
+            finally { diagnostics.stop(); }
           });
           before = captured.preparation;
           counters = captured.counters;
@@ -275,9 +360,12 @@ function sendBlock(db: string, label: string, order: number, arm: FinalArm, refe
       } else {
         pgbench(run('docker', warmArgv));
         before = boundary(db);
-        m = measuredPgbench(steps);
+        walIo('before');
+        diagnostics.start();
+        m = measuredPgbench({ ...steps, after: () => { diagnostics.stop(); return steps.after(); } });
       }
       const { output, measuredWindow, pgbenchWindow, after, latencies, errors } = m;
+      diagnostics.windows(measuredWindow, pgbenchWindow);
       blockEndMs = after.atMs;
       const ended = new Date().toISOString();
       const result = pgbench(output);
@@ -287,6 +375,7 @@ function sendBlock(db: string, label: string, order: number, arm: FinalArm, refe
       if (latencies.length !== result.transactions) errors.push(`${latencies.length} log lines for ${result.transactions} transactions`);
       const walBytes = attribution ? walWindowBytes(before.lsn, after.lsn) : Number(after.lsnBytes) - Number(before.lsnBytes);
       if (attribution) {
+        if (arm === 'f2' || arm === 'pref2') throw new Error('F2 attribution is unsupported');
         if (!before.snapshot || !after.snapshot) throw new Error('Missing attribution snapshots');
         const stats = diffSnapshots(before.snapshot, after.snapshot, result.transactions);
         const wal = inspectWal(sql => psql(db, sql), before.lsn, after.lsn, result.transactions);
@@ -309,6 +398,7 @@ function sendBlock(db: string, label: string, order: number, arm: FinalArm, refe
       const closeRequestMs = forcedCheckpoint(db);
       return waitForCheckpointWindow(serverLog, openRequestMs, closeRequestMs, blockEndMs, 120, () => spawnSync('sleep', ['0.5']));
     },
+    saveDiagnostics: () => diagnostics.save(readLogs).catch(error => { diagnostics.error('disk-wait artifacts', error); }),
   };
 }
 
@@ -320,18 +410,26 @@ const keepBlock = (extra: Record<string, unknown> = {}) => (row: SendRow) => {
   sends.push(row);
   save('sends.json', { ...extra, sends });
 };
+
+async function withDiagnostics<T>(steps: ReturnType<typeof sendBlock>, finish: () => Promise<T>) {
+  try { return await finish(); }
+  finally { await steps.saveDiagnostics(); }
+}
 // Send re-measure: each block gets a fresh clone of its arm's template, which was vacuumed and
-// analyzed before any block, and is dropped after the block (and its check, for the final arm).
+// analyzed before any block, and is dropped after the block and any consistency check.
 async function freshSends() {
-  for (const arm of (control ? ['current'] : ['current', 'final']) as FinalArm[]) {
-    psql('postgres', `CREATE DATABASE t_${arm} TEMPLATE p519;`);
-    if (arm === 'final') migrateA3('t_final');
-    file(`t_${arm}`, 'sql/send-current.sql');
-    psql(`t_${arm}`, 'VACUUM (ANALYZE);');
+  const arms: SendArm[] = f2 ? [...new Set(f2BlockOrder(smoke).flat())] : control ? ['current'] : ['current', 'final'];
+  const sendSql: Record<SendArm, string> = { current: 'send-current.sql', final: 'send-current.sql', pref2: pref2Send, f2: f2Send };
+  for (const arm of arms) {
+    const db = `t_${arm}`;
+    psql('postgres', `CREATE DATABASE ${db} TEMPLATE p519;`);
+    if (arm === 'final') migrateA3(db);
+    if (arm === 'f2' || arm === 'pref2') migrateF2Arm(db, arm);
+    file(db, `sql/${sendSql[arm]}`);
+    psql(db, 'VACUUM (ANALYZE);');
+    if (arm !== 'current') countsCheck(db, `${arm} template, before the sends`);
   }
-  if (!control) countsCheck('t_final', 'final template, before the sends');
-  const plan = control ? [1, 2, 3].map(order => ({ order, pair: 1, arm: 'current' as const, db: `s${order}_current` })) : sendBlocks(benchOrder);
-  for (const b of plan) {
+  for (const b of sendPlan) {
     const template = `t_${b.arm}`;
     const clone = () => {
       psql('postgres', `CREATE DATABASE ${b.db} TEMPLATE ${template};`);
@@ -341,18 +439,33 @@ async function freshSends() {
     };
     const block = async ({ role, since, host }: ReturnType<typeof clone>, reference?: ReferenceWindow) => {
       const steps = sendBlock(b.db, `block${b.order}-${b.arm}`, b.order, b.arm, reference);
-      return finishBlock({ ...b, role, host, ...await steps.measure() }, { label: `block ${b.order}`, closeCheckpoint: steps.closeCheckpoint,
-        hostAfter: () => hostState(since), keep: keepBlock() });
+      return withDiagnostics(steps, async () =>
+        finishBlock({ ...b, role, host, ...await steps.measure() }, { label: `block ${b.order}`, closeCheckpoint: steps.closeCheckpoint,
+          hostAfter: () => hostState(since), keep: keepBlock() }));
     };
     if (frequency) await frequency.runBlock(b.order, () => psql(template, 'CHECKPOINT;'), clone, block);
     else await block(clone());
-    if (b.arm === 'final') countsCheck(b.db, `after block ${b.order}`);
+    if (b.arm !== 'current') countsCheck(b.db, `after block ${b.order}`);
+    if (smoke && (b.arm === 'f2' || b.arm === 'pref2')) {
+      const fresh = b.arm === 'f2' ? 'm.scope_append_recorded' : `m.seq > ${f2SmokeMessagesPerChannel}`;
+      const exercised = JSON.parse(psql(b.db, `SELECT json_build_object(
+        'main', count(*) FILTER (WHERE m.topic_id IS NULL),
+        'topic', count(*) FILTER (WHERE m.topic_id IS NOT NULL),
+        'mention', count(*) FILTER (WHERE mm.message_id IS NOT NULL))
+        FROM messages m LEFT JOIN message_mentions mm
+          ON (mm.organization_id, mm.message_id) = (m.organization_id, m.id)
+        WHERE ${fresh};`));
+      if (!(exercised.main > 0 && exercised.topic > 0 && exercised.mention > 0)) throw new Error(`${b.arm} smoke must exercise fresh main, Topic and Mention sends`);
+      save(`${b.arm}-smoke-paths.json`, exercised);
+    }
     psql('postgres', `DROP DATABASE ${b.db} WITH (FORCE);`);
   }
 }
 
 const started = new Date().toISOString();
 let failed = false;
+let serverStarted = false;
+let wroteSummary = false;
 function checkHostAffinity(stage: 'preflight' | 'finish') {
   if (!request) return;
   const readback = readHostAffinity(request.session);
@@ -377,6 +490,7 @@ try {
   // With CPU sets, taskset wraps the image's entrypoint, so the postmaster and every backend inherit the server set.
   run('docker', ['run', '-d', '--rm', '--name', container, '--label', workloadLabel, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
     '-v', `${work}:/work:ro`, ...(request ? frequencyServerArgs() : serverImageArgs(cpuSets?.server)), ...postgresSettingsArgs(attribution)]);
+  serverStarted = true;
   for (let i = 0; spawnSync('docker', ['exec', container, 'pg_isready', '-U', 'postgres', '-h', '127.0.0.1']).status !== 0; i++) {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
@@ -399,25 +513,39 @@ try {
   if (cpuPins && (cpuList(cpuPins.postmasterAllowed) !== cpuList(cpuPins.server) || cpuList(cpuPins.clientAllowed) !== cpuList(cpuPins.client))) {
     throw new Error(`CPU sets did not take effect: postmaster ${cpuList(cpuPins.postmasterAllowed)}, client ${cpuList(cpuPins.clientAllowed)}`);
   }
+  await setupDiskDiagnostics();
   psql('postgres', 'CREATE DATABASE p519;');
   psql('p519', migrations.map(m => `BEGIN;\n\\i /work/server/migrations/${m}\nCOMMIT;`).join('\n') + '\n');
   psql('p519', "BEGIN;\nSELECT set_config('fukulow.app_password', 'probe', true) \\g /dev/null\n\\i /work/deploy/db-roles.sql\nCOMMIT;\n");
   file('p519', 'deploy/db-grants.sql');
   if (attribution) psql('p519', installAttributionSql);
-  file('p519', 'sql/seed.sql');
+  file('p519', seed);
   const metadata = {
-    status: attribution ? attributionMetadata.status : 'DIAGNOSTIC / NOT EVALUATED (stop rule only)', mode: smoke ? 'smoke' : 'diagnostic', sendsOnly, started, commits: { ...commits, update }, a3Migration, a3Update,
+    status: f2 && smoke ? 'SMOKE / NOT EVIDENCE' : attribution ? attributionMetadata.status : 'DIAGNOSTIC / NOT EVALUATED (stop rule only)',
+    mode: smoke ? 'smoke' : 'diagnostic', sendsOnly, started,
+    commits: { ...commits, update, ...(f2Source ? { f2: f2Source.commit, pref2: f2Source.base } : {}) }, a3Migration, a3Update,
     harnessCommit: git('rev-parse', 'HEAD'), harnessDirty: git('status', '--porcelain', '--', 'load/sql-probes/519-unread-counts') !== '',
     image, imageId: run('docker', ['image', 'inspect', '--format', '{{.Id}}', image]).trim(),
     settings: JSON.parse(psql('p519', `SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN
       ('server_version','shared_buffers','work_mem','jit','plan_cache_mode','synchronous_commit','fsync','autovacuum','default_transaction_isolation','max_wal_size','checkpoint_timeout','log_checkpoints',
       'log_line_prefix','log_timezone');`)),
     host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() }, preflight, cpuSets: cpuPins,
-    hostBusyMarker: marker, launchSession, frequencyStage: request?.stage, frequencyApproval: request?.approval?.sha256, frequencyGo: request?.go, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts: sendsOnly ? [] : cuts,
+    hostBusyMarker: marker, launchSession, frequencyStage: request?.stage, frequencyApproval: request?.approval?.sha256, frequencyGo: request?.go,
+    cache: f2 ? 'forced CHECKPOINT and warm sends on each fresh clone' : 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell',
+    samplesPerCell: samples, cuts: sendsOnly ? [] : cuts,
     walNotes: 'WAL bytes = cluster insert-LSN delta (and pg_stat_wal.wal_bytes); cluster-wide, so idle databases can add background WAL; ' +
       (sendsOnly ? 'one fresh send database per block, cloned from a vacuumed per-arm template and dropped after the block' : 'send DBs are reused across pairs'),
-    sends: { clients: 8, threads: 4, warmSeconds, measuredSeconds, benchOrder: control ? [['current'], ['current'], ['current']] : benchOrder, freshDatabasePerBlock: sendsOnly },
-    countsCheck: { timeout: checkTimeout, when: sendsOnly ? 'final template, then after every final block' : 'after the read cuts and after the sends' },
+    sends: { clients: 8, threads: 4, warmSeconds, measuredSeconds, benchOrder: f2 ? f2BlockOrder(smoke) : control ? [['current'], ['current'], ['current']] : benchOrder, freshDatabasePerBlock: sendsOnly },
+    ...(f2Source ? { f2: { base: f2Source.base, migrations: f2Migrations, seed,
+      protocol: 'pgbench simple protocol, no named prepared statements', sourceHashes: {
+      ...f2Source.hashes, ...Object.fromEntries([...f2Migrations, seed, `sql/${f2Send}`, 'sql/send-current.sql', 'sql/bench.pgb']
+        .map(path => [path, hashFile(join(work, path))])),
+    } }, pref2: { base: f2Source.base, migrations: pref2Migrations, seed, sourceHashes: {
+      ...f2Source.baseHashes, ...Object.fromEntries([...pref2Migrations, seed, `sql/${pref2Send}`, 'sql/bench.pgb']
+        .map(path => [path, hashFile(join(work, path))])),
+    } } } : {}),
+    countsCheck: { timeout: checkTimeout, when: f2 ? (smoke ? 'pre-F2 and F2 templates and blocks' : 'final, pre-F2 and F2 templates and blocks')
+      : sendsOnly ? 'final template, then after every final block' : 'after the read cuts and after the sends' },
     ...(attribution ? { attribution: { ...attributionMetadata, settings: attributionSettings, walKeepGiB, walDisk } }
       : { stopRule: stopRule([{ pair: 1, walBytesPerSend: 1, tps: 1 }], [{ pair: 1, walBytesPerSend: 1, tps: 1 }]).limits }),
   };
@@ -455,32 +583,54 @@ try {
     const sendRoles = { current: sendRole('s_current'), final: sendRole('s_final') };
     for (const b of sendBlocks(benchOrder)) {
       const steps = sendBlock(`s_${b.arm}`, `pair${b.pair}-${b.arm}`, b.order, b.arm);
-      finishBlock<SendRow, HostState>({ ...b, db: `s_${b.arm}`, ...await steps.measure(), checkpointLog: null, hostAfter: null }, { label: `block ${b.order}`,
-        closeCheckpoint: steps.closeCheckpoint, keep: keepBlock({ sendRoles }) });
+      await withDiagnostics(steps, async () =>
+        finishBlock<SendRow, HostState>({ ...b, db: `s_${b.arm}`, ...await steps.measure(), checkpointLog: null, hostAfter: null }, { label: `block ${b.order}`,
+          closeCheckpoint: steps.closeCheckpoint, keep: keepBlock({ sendRoles }) }));
     }
     countsCheck('s_final', 'after the sends');
   }
-  if (!control && !attribution) {
-    const verdict = stopRule(sends.filter(s => s.arm === 'current'), sends.filter(s => s.arm === 'final'));
+  if (f2 && smoke) {
+    console.log('SMOKE / NOT EVIDENCE: pre-F2 and F2 completed.');
+  } else if (!control && !attribution) {
+    const currentSends = sends.filter(s => s.arm === 'current');
+    const f2Sends = sends.filter(s => s.arm === 'f2');
+    const verdict = stopRule(currentSends, sends.filter(s => s.arm === 'final'));
     save('stop-rule.json', verdict);
+    const f2Verdict = f2 ? stopRule(currentSends, f2Sends) : null;
+    const f2Reference = f2 ? f2ReferenceReport(currentSends, sends.filter(s => s.arm === 'pref2'), f2Sends) : null;
+    if (f2Verdict) save('stop-rule-f2.json', { ...f2Verdict, ...f2Reference });
     const lines = [
       ...(reads.length === 0 ? [] : ['| cut | arm | p50 ms | p95 ms | EXPLAIN ms | blocks | checksum |', '|---:|---|---:|---:|---:|---:|---|',
         ...reads.map(r => `| ${r.cut} | ${r.arm} | ${r.p50Ms} | ${r.p95Ms} | ${r.executionMs} | ${r.sharedBlocks} | ${r.checksum} |`), '']),
       '| order | pair | arm | tps | p95 ms | p99 ms | WAL bytes/send | images per WAL record | images per send |', '|---:|---:|---|---:|---:|---:|---:|---:|---:|',
       ...sends.map(s => `| ${s.order} | ${s.pair} | ${s.arm} | ${s.tps.toFixed(0)} | ${s.p95Ms.toFixed(3)} | ${s.p99Ms.toFixed(3)} | ${s.walBytesPerSend.toFixed(0)} | ${s.imagesPerWalRecord.toFixed(6)} | ${(s.fpiRecords / s.transactions).toFixed(6)} |`),
-      '', '| pair | WAL/send ratio | tps ratio | breach |', '|---:|---:|---:|---|',
+      '', ...(f2 ? ['### Final vs current', ''] : []),
+      '| pair | WAL/send ratio | tps ratio | breach |', '|---:|---:|---:|---|',
       ...verdict.ratios.map(r => `| ${r.pair} | ${r.walPerSend.toFixed(3)} | ${r.tps.toFixed(3)} | ${[r.walPerSend > 1.2 ? 'WAL' : '', r.tps < 0.9 ? 'tps' : ''].filter(Boolean).join(', ') || '-'} |`),
       '', '| message_counts_check | rows | seconds |', '|---|---:|---:|', ...checks.map(c => `| ${c.label} | ${c.rows ?? '-'} | ${Number(c.seconds).toFixed(0)} |`),
       '', `HOST-BUSY marker: ${marker ?? '(none)'}`,
-      '', `Stop rule (${verdict.limits}): median WAL/send ratio ${verdict.medianWalPerSend.toFixed(3)}, median tps ratio ${verdict.medianTps.toFixed(3)} -> ${verdict.stop ? 'STOP' : 'no stop'}`];
+      '', `Stop rule (${verdict.limits}): median WAL/send ratio ${verdict.medianWalPerSend.toFixed(3)}, median tps ratio ${verdict.medianTps.toFixed(3)} -> ${verdict.stop ? 'STOP' : 'no stop'}`,
+      ...(f2Verdict ? ['', '### F2 vs current', '',
+        ...f2Verdict.ratios.map(r => `- Pair ${r.pair}: WAL/send ${r.walPerSend.toFixed(3)}, tps ${r.tps.toFixed(3)}`),
+        '', `Median WAL/send ratio ${f2Verdict.medianWalPerSend.toFixed(3)}, median tps ratio ${f2Verdict.medianTps.toFixed(3)} -> ${f2Verdict.stop ? 'STOP' : 'no stop'}`,
+        '', '### F2 vs final', '',
+        ...f2Verdict.ratios.map((r, i) => `- Pair ${r.pair}: WAL/send ${(r.walPerSend / verdict.ratios[i].walPerSend).toFixed(3)}, tps ${(r.tps / verdict.ratios[i].tps).toFixed(3)}`)] : []),
+      ...(f2Reference ? f2ReferenceMarkdown(f2Reference) : [])];
     const title = sendsOnly ? '#519 §10 step 1 send re-measure' : '#519 §10 step 1 final-design probe';
     writeFileSync(join(out, 'summary.md'), `# ${title} (${metadata.status})\n\n${lines.join('\n')}\n`);
+    wroteSummary = true;
     console.log(lines.join('\n'));
   }
 } catch (error) {
   failed = true;
   console.error(error);
 } finally {
+  diskSampler?.close();
+  let serverLogError: string | undefined;
+  try {
+    if (!serverStarted) throw new Error('server container never started');
+    writeFileSync(join(out, 'postgres.log'), serverLog(5000));
+  } catch (error) { serverLogError = String(error); }
   if (request) spawnSync('docker', ['rm', '-f', clientContainer]);
   spawnSync('docker', ['rm', '-f', container]);
   try { rmSync(work, { recursive: true, force: true }); } catch (e) { failed = true; console.error('work directory cleanup:', e); }
@@ -496,6 +646,10 @@ try {
       writeFileSync(join(out, 'attribution-summary.md'), attributionMarkdown(summary));
     } catch (e) { failed = true; console.error('attribution summary:', e); }
   }
+  try {
+    const title = wroteSummary ? '\n' : '# #519 send probe\n\n';
+    writeFileSync(join(out, 'summary.md'), title + diskWaitMarkdown(diagnosticBlocks, { smoke, setup: diskSetupReason, serverLogError }), { flag: 'a' });
+  } catch (error) { console.error('disk-wait summary:', error); }
   save('status.json', { complete: !failed, launchSession, finished: new Date().toISOString() });
 }
 process.exit(failed ? 1 : 0);

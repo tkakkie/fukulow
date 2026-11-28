@@ -131,9 +131,10 @@ pub(super) async fn join(
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let Some(name) = name else { return Ok(None) };
     sqlx::query(
-        "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) \
-         VALUES ($1, $2, $3, $4, $5, $5, CASE WHEN $5::bigint IS NULL THEN 0 ELSE 1 END) ON CONFLICT (organization_id, channel_id, name_key) DO NOTHING",
-    ).bind(organization).bind(channel).bind(Uuid::new_v4()).bind(name).bind(seq)
+        "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count, scope_appended) \
+         VALUES ($1, $2, $3, $4, $5, $5, $6, $6) \
+         ON CONFLICT (organization_id, channel_id, name_key) DO NOTHING",
+    ).bind(organization).bind(channel).bind(Uuid::new_v4()).bind(name).bind(seq).bind(i64::from(seq.is_some()))
         .execute(&mut *connection).await?;
     sqlx::query_scalar("SELECT id FROM topics WHERE organization_id = $1 AND channel_id = $2 AND name_key = lower($3 COLLATE \"C\")")
         .bind(organization).bind(channel).bind(name).fetch_one(connection).await.map(Some)
@@ -149,7 +150,8 @@ pub(super) async fn record(
         // A new Topic already includes its first Message; the Channel counter lock
         // serializes subsequent updates, and failed/duplicate sends roll back both.
         sqlx::query(
-            "UPDATE topics SET first_seq = COALESCE(first_seq, $3), last_seq = $3, message_count = message_count + 1 \
+            "UPDATE topics SET first_seq = COALESCE(first_seq, $3), last_seq = $3, \
+                     message_count = message_count + 1, scope_appended = scope_appended + 1 \
                      WHERE organization_id = $1 AND id = $2 AND last_seq IS DISTINCT FROM $3",
         )
         .bind(organization)

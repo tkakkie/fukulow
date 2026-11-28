@@ -9,22 +9,27 @@ import { controlFloors, frozenFloors } from './frequency-approval.ts';
 import { clientCpuEquivalents } from './frequency-report.ts';
 import { controlSpotCheck } from './frequency-turbostat.ts';
 import { legacyDisagreements } from './frequency-legacy-report.ts';
+import { f2Blocks, f2Order } from './f2-arm.ts';
 
-const usage = 'node load/sql-probes/519-unread-counts/stability.ts --stage control|rehearsal2|formal --queue QUEUE_FILE --out NEW_REPORT [--control-review FILE]';
+const usage = 'node load/sql-probes/519-unread-counts/stability.ts --stage control|rehearsal2|formal --queue QUEUE_FILE --out NEW_REPORT [--control-review FILE] [--f2]';
 const { values } = parseArgs({ options: { stage: { type: 'string' }, queue: { type: 'string' }, out: { type: 'string' },
-  'control-review': { type: 'string' }, help: { type: 'boolean' } } });
+  'control-review': { type: 'string' }, f2: { type: 'boolean' }, help: { type: 'boolean' } } });
 if (values.help) { console.log(usage); process.exit(0); }
 const stage = values.stage;
 if (!values.queue || !values.out || (stage !== 'control' && stage !== 'rehearsal2' && stage !== 'formal')) throw new Error(usage);
 if (existsSync(values.out)) throw new Error(`refusing to overwrite ${values.out}`);
 const approval = stage === 'formal' ? frozenFloors() : stage === 'rehearsal2' ? controlFloors(values['control-review']) : null;
 const q = parseQueue(readFileSync(values.queue, 'utf8'));
+if (values.f2 && (stage !== 'formal' || q.jobs.length !== 1 || q.jobs[0].issue !== 796 || !q.jobs[0].command.includes('--f2'))) {
+  throw new Error('F2 placement report requires one formal #796 launcher job with --f2');
+}
 const text = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8') : null);
 const json = (path: string) => { const t = text(path); return t === null ? null : JSON.parse(t); };
 
 const runs: RunInput[] = q.jobs.map(job => {
   const metadata = json(join(job.out, 'metadata.json'));
   if (metadata?.attribution || job.command.includes('--attribution')) throw new Error('Attribution output is diagnostic and cannot qualify the #796 host');
+  if (!values.f2 && (metadata?.f2 || job.command.includes('--f2'))) throw new Error('Use --f2 for the F2 placement report');
   if (metadata && metadata.frequencyStage !== stage) throw new Error('STOP: report is only for newly collected #796 v3 evidence of the selected stage');
   const frequencyStart = json(join(job.out, 'frequency-start.json'));
   const frequencyEnd = json(join(job.out, 'frequency-end.json'));
@@ -46,6 +51,28 @@ const runs: RunInput[] = q.jobs.map(job => {
   };
 });
 const session = json(join(q.chainDir, 'session.json'));
+if (values.f2) {
+  const [run] = runs;
+  const [job] = q.jobs;
+  const meta = json(join(run.out, 'metadata.json'));
+  const checks = json(join(run.out, 'checks.json')) ?? [];
+  const binding = { id: session?.id ?? null, thermalSampleSeconds: session?.jobs?.[0]?.thermalSampleSeconds, go: session?.jobs?.[0]?.frequencyGo };
+  const judged = judgeRun(run, binding, approval!.floors, 'formal', approval!.sha256, f2Order.flat());
+  const reasons = [...sessionProblems(session, q.name, runs), ...judged.invalid];
+  if (!meta?.f2 || meta.commits?.f2 !== job.commit || meta.harnessCommit !== job.commit || meta.harnessDirty !== false) {
+    reasons.push('F2 source commit or harness does not match the launcher pin');
+  }
+  const expectedChecks = ['t_final', 't_f2', 't_pref2', ...f2Blocks(false).filter(b => b.arm !== 'current').map(b => b.db)];
+  for (const db of expectedChecks) {
+    if (checks.filter((c: { db: string; rows: number; status: string; timeout: string }) =>
+      c.db === db && c.rows === 0 && c.status === 'ok' && c.timeout === '45min').length !== 1) {
+      reasons.push(`missing passed message_counts_check for ${db}`);
+    }
+  }
+  writeFileSync(values.out, JSON.stringify({ valid: reasons.length === 0, reasons, judged }, null, 2) + '\n', { flag: 'wx' });
+  console.log(reasons.length === 0 ? 'F2 PLACEMENT VALID' : 'F2 PLACEMENT INVALID', ...reasons);
+  process.exit(reasons.length === 0 ? 0 : 3);
+}
 if (stage === 'formal') {
   const verdict = judgeChain(runs, session, q.name, (run, binding) => judgeRun(run, binding, approval!.floors, stage, approval!.sha256));
   writeFileSync(values.out, JSON.stringify(verdict, null, 2) + '\n', { flag: 'wx' });

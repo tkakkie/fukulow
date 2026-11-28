@@ -74,12 +74,15 @@ pub(super) async fn allocate(
     tx: &mut PgConnection,
     organization: Uuid,
     channel: Uuid,
+    main: bool,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
-        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $2, 1) \
-         ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = channel_message_sequences.seq + 1 \
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq, main_appended) \
+         VALUES ($1, $2, 1, $3::boolean::integer) \
+         ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = channel_message_sequences.seq + 1, \
+             main_appended = channel_message_sequences.main_appended + EXCLUDED.main_appended \
          RETURNING seq",
-    ).bind(organization).bind(channel).fetch_one(tx).await
+    ).bind(organization).bind(channel).bind(main).fetch_one(tx).await
 }
 
 // The exclusive Channel barrier makes this candidate stable until the Move

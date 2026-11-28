@@ -278,3 +278,59 @@ async fn append_counts_preserve_matching_keys_in_another_organization(pool: PgPo
     assert_counts(&mut tx, org, channel, &[(nil, nil, 3), (nil, sender, 3)]).await;
     tx.rollback().await.unwrap();
 }
+
+#[fukulow_test::test]
+async fn scope_totals_current_sends_write_only_sender_counter_keys(pool: PgPool) {
+    let (app, org, sender, channel, token) = fixture(&pool).await;
+    // Fail even on a same-value UPDATE or an INSERT suppressed by ON CONFLICT.
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_nil_append_write() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'unexpected counter write'; END $$;
+         CREATE TRIGGER reject_nil_append_write BEFORE INSERT OR UPDATE ON message_append_counts
+         FOR EACH ROW WHEN (NEW.member_id = '00000000-0000-0000-0000-000000000000')
+         EXECUTE FUNCTION reject_nil_append_write();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let main = post(&app, &token, channel, None).await;
+    let topic = post(&app, &token, channel, Some("Topic")).await;
+    sqlx::raw_sql(
+        "CREATE TRIGGER reject_new_counter_key BEFORE INSERT ON message_append_counts
+         FOR EACH ROW EXECUTE FUNCTION reject_nil_append_write();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for parent in [&main, &topic] {
+        // A Reply inherits its parent's scope.
+        let request = json!({"client_message_id": Uuid::new_v4(), "body": "Reply",
+            "reply_to": parent["id"]});
+        let result = sent(&app, &token, channel, request.clone()).await;
+        let retry = sent(&app, &token, channel, request).await;
+        assert_eq!(result["id"], retry["id"]);
+        assert_eq!(result["topic_id"], parent["topic_id"]);
+    }
+    let topic = Uuid::parse_str(topic["topic_id"].as_str().unwrap()).unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    assert_counts(
+        &mut conn,
+        org,
+        channel,
+        &[(Uuid::nil(), sender, 2), (topic, sender, 2)],
+    )
+    .await;
+    let totals: (i64, i64) = sqlx::query_as(
+        "SELECT s.main_appended,t.scope_appended FROM channel_message_sequences s
+         JOIN topics t USING (organization_id,channel_id)
+         WHERE s.organization_id=$1 AND s.channel_id=$2 AND t.id=$3",
+    )
+    .bind(org)
+    .bind(channel)
+    .bind(topic)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(totals, (2, 2));
+}
