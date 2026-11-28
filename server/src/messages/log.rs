@@ -323,3 +323,33 @@ async fn authorized_page(
     }
     Ok((history_generation, hydrate(rows, after, through, limit)?))
 }
+
+#[cfg(test)]
+pub(crate) async fn inject_missing_message(
+    pool: &PgPool,
+    organization: Uuid,
+    channel: Uuid,
+    seq: i64,
+) {
+    // Keep the trigger bypass inside the corruption fixture's transaction.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE messages DISABLE TRIGGER messages_forbid_delete")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let removed = sqlx::query(
+        "DELETE FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq = $3",
+    )
+    .bind(organization)
+    .bind(channel)
+    .bind(seq)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(removed.rows_affected(), 1);
+    sqlx::query("ALTER TABLE messages ENABLE TRIGGER messages_forbid_delete")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}

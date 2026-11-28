@@ -986,12 +986,12 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(admin: PgPool) {
 #[fukulow_test::test]
 async fn session_cannot_access_another_organization(admin: PgPool) {
     let app_pool = TestPools::new(admin).await.app;
-    check_tenant_denials(&app_pool).await;
+    let identity = setup(&router(&app_pool)).await;
+    check_tenant_denials(&app_pool, &identity).await;
 }
 
-async fn check_tenant_denials(app_pool: &PgPool) {
+async fn check_tenant_denials(app_pool: &PgPool, first: &Value) {
     let app = router(app_pool);
-    let first = setup(&app).await;
     let first_id = first["organization"]["organization_id"]
         .as_str()
         .unwrap()
@@ -1616,10 +1616,10 @@ async fn member_truncate_is_refused_and_preserves_history(admin: PgPool) {
     let pools = TestPools::new(admin).await;
     let app = router(&pools.app);
     let identity = setup(&app).await;
-    check_member_truncate(&pools.admin, identity, "P0001").await;
+    check_member_truncate(&pools.admin, &identity, "P0001").await;
 }
 
-async fn check_member_truncate(member_pool: &PgPool, identity: Value, expected_code: &str) {
+async fn check_member_truncate(member_pool: &PgPool, identity: &Value, expected_code: &str) {
     let error = sqlx::query("TRUNCATE users CASCADE")
         .execute(member_pool)
         .await

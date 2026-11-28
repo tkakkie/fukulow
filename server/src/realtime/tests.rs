@@ -318,12 +318,7 @@ async fn replay_missing_message_state_closes_without_hiding_log_position(pool: P
     let f = fixture(&pool).await;
     post(&f, f.channel).await;
     post(&f, f.channel).await;
-    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=1")
-        .bind(f.organization)
-        .bind(f.channel)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::messages::log::inject_missing_message(&pool, f.organization, f.channel, 1).await;
     let mut socket = f.server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
     closed(&mut socket, 1011).await;

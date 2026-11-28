@@ -122,12 +122,7 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
         ),
         (2, 2, 3)
     );
-    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
-        .bind(org)
-        .bind(channel)
-        .execute(&pool)
-        .await
-        .unwrap();
+    log::inject_missing_message(&pool, org, channel, 2).await;
     assert_eq!(positions(&pool, org, channel).await, [1, 3]);
     assert!(matches!(
         replay_page(&app_pool, org, channel, 0, 3).await,
@@ -339,12 +334,7 @@ async fn channel_event_pages_are_bounded_exclusive_and_hydrate_current_state(poo
         json!({"history_generation":page["history_generation"],"events":[],"has_more":false})
     );
     // Validate every limited position before acknowledging any part of its page.
-    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
-        .bind(org)
-        .bind(channel)
-        .execute(&pool)
-        .await
-        .unwrap();
+    log::inject_missing_message(&pool, org, channel, 2).await;
     assert_error(
         event_response(&app, &token, channel, "?after_seq=0").await,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -425,13 +415,8 @@ async fn channel_event_pages_fail_closed_on_missing_log_positions(pool: PgPool) 
     for _ in 0..3 {
         sent(&app, &token, channel, input(Uuid::new_v4(), "original")).await;
     }
-    // The owner removes the final position while leaving W at 3.
-    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=3")
-        .bind(org)
-        .bind(channel)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Inject a missing final position while leaving W at 3.
+    log::inject_missing_message(&pool, org, channel, 3).await;
     assert_error(
         event_response(&app, &token, channel, "?after_seq=0").await,
         StatusCode::INTERNAL_SERVER_ERROR,
