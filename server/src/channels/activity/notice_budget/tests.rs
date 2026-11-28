@@ -1,5 +1,5 @@
 use super::*;
-use crate::channels::activity::{self, Activity, ChangeScope, Notice, Role};
+use crate::channels::activity::{self, Activity, ChangeScope, Notice, PublicationFence, Role};
 use std::{
     future::Future,
     pin::Pin,
@@ -354,6 +354,7 @@ async fn callers_are_tagged(pool: sqlx::PgPool) {
             },
             None,
             None,
+            PublicationFence::default(),
         )
         .await
         .unwrap();

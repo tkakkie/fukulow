@@ -16,8 +16,12 @@ impl DmPublication {
             let _slot = slot;
             let _ = tokio::time::timeout(
                 Duration::from_secs(10),
-                self.activity
-                    .publish_dm(&pool, self.organization, &self.changes),
+                self.activity.publish_dm(
+                    &pool,
+                    self.organization,
+                    &self.changes,
+                    PublicationFence::default(),
+                ),
             )
             .await;
         });
@@ -41,13 +45,14 @@ impl Activity {
         pool: &sqlx::PgPool,
         organization: Uuid,
         changes: &[(Uuid, Uuid, bool)],
+        fence: PublicationFence,
     ) -> Result<(), sqlx::Error> {
         let mut by_member = HashMap::<Uuid, Vec<(Uuid, bool)>>::new();
         for &(channel, member, gained) in changes {
             by_member.entry(member).or_default().push((channel, gained));
         }
         let selected: Vec<_> = self
-            .snapshot(organization)
+            .snapshot(organization, fence.epochs.as_deref())
             .into_iter()
             .flat_map(|(entry, epoch)| {
                 by_member

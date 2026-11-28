@@ -14,6 +14,21 @@ use std::{
 use uuid::Uuid;
 
 #[derive(Clone, Default)]
+pub(crate) struct PublicationFence {
+    pub(super) epochs: Option<Arc<HashMap<Uuid, u64>>>,
+    pub(super) directory_epochs: Option<Arc<HashMap<Uuid, u64>>>,
+    pub(super) exclude_guests: bool,
+    pub(super) directory_member: Option<Uuid>,
+    pub(super) directory_channels: Vec<Uuid>,
+}
+
+pub(super) struct ScopedNotice {
+    pub(super) notice: Notice,
+    pub(super) channel: Option<Uuid>,
+    pub(super) target: Option<Uuid>,
+}
+
+#[derive(Clone, Default)]
 pub(crate) struct ActivityBatch {
     senders: Vec<(Uuid, i64)>,
     everyone: Option<i64>,
@@ -125,6 +140,7 @@ impl Activity {
                     },
                     None,
                     Some(&batch),
+                    PublicationFence::default(),
                 );
                 let _ = tokio::time::timeout(Duration::from_secs(10), work).await;
                 let mut batches = lock_ignoring_poison(&this.batches);
@@ -147,28 +163,43 @@ impl Activity {
         notice: Notice,
         target: Option<Uuid>,
         senders: Option<&ActivityBatch>,
+        fence: PublicationFence,
     ) -> Result<(), sqlx::Error> {
         let channel = notice.channel();
-        self.publish_scoped(pool, organization, notice, channel, target, senders)
-            .await
+        self.publish_scoped(
+            pool,
+            organization,
+            ScopedNotice {
+                notice,
+                channel,
+                target,
+            },
+            senders,
+            fence,
+        )
+        .await
     }
 
     async fn publish_scoped(
         &self,
         pool: &sqlx::PgPool,
         organization: Uuid,
-        notice: Notice,
-        channel: Option<Uuid>,
-        target: Option<Uuid>,
+        scoped: ScopedNotice,
         senders: Option<&ActivityBatch>,
+        fence: PublicationFence,
     ) -> Result<(), sqlx::Error> {
+        let ScopedNotice {
+            notice,
+            channel,
+            target,
+        } = scoped;
         let captured: Vec<_> = self
-            .snapshot(organization)
+            .snapshot(organization, fence.epochs.as_deref())
             .into_iter()
             .filter(|(e, _)| {
                 target.is_none_or(|t| e.member.0 == t)
                     && (!matches!(notice, Notice::MembersChanged)
-                        || self
+                        || fence
                             .directory_epochs
                             .as_ref()
                             .is_none_or(|epochs| epochs.contains_key(&e.id)))
@@ -190,7 +221,8 @@ impl Activity {
                     *epoch,
                     channel,
                     matches!(notice, Notice::MembersChanged),
-                    self.directory_epochs
+                    fence
+                        .directory_epochs
                         .as_ref()
                         .and_then(|epochs| epochs.get(&e.id).copied()),
                 )
@@ -221,9 +253,9 @@ impl Activity {
             .authorize(pool, &selected, NoticeCaller::Publish)
             .await?;
         let shared_guests =
-            if matches!(notice, Notice::MembersChanged) && !self.directory_channels.is_empty() {
+            if matches!(notice, Notice::MembersChanged) && !fence.directory_channels.is_empty() {
                 let entries: Vec<_> = selected.into_iter().map(|(entry, _)| entry).collect();
-                directory_guests(pool, organization, &entries, &self.directory_channels).await?
+                directory_guests(pool, organization, &entries, &fence.directory_channels).await?
             } else {
                 HashSet::new()
             };
@@ -248,13 +280,13 @@ impl Activity {
             let Some(proof) = proof else {
                 continue;
             };
-            if self.exclude_guests && proof.role == Role::Guest {
+            if fence.exclude_guests && proof.role == Role::Guest {
                 continue;
             }
             if matches!(notice, Notice::MembersChanged)
                 && proof.role == Role::Guest
                 && target != Some(entry.member.0)
-                && self.directory_member != Some(entry.member.0)
+                && fence.directory_member != Some(entry.member.0)
                 && !shared_guests.contains(&entry.member.0)
             {
                 continue;
@@ -292,28 +324,37 @@ impl Activity {
         organization: Uuid,
         notice: Notice,
         target: Option<Uuid>,
+        fence: PublicationFence,
     ) {
         let channel = notice.channel();
-        self.spawn_scoped(pool, organization, notice, channel, target);
+        self.spawn_scoped(
+            pool,
+            organization,
+            ScopedNotice {
+                notice,
+                channel,
+                target,
+            },
+            fence,
+        );
     }
 
     pub(super) fn spawn_scoped(
         &self,
         pool: sqlx::PgPool,
         organization: Uuid,
-        notice: Notice,
-        channel: Option<Uuid>,
-        target: Option<Uuid>,
+        scoped: ScopedNotice,
+        fence: PublicationFence,
     ) {
         let Ok(slot) = self.capacity.clone().try_acquire_owned() else {
             return;
         };
         let this = self.clone();
         #[cfg(test)]
-        let key = (organization, channel.unwrap_or(Uuid::nil()));
+        let key = (organization, scoped.channel.unwrap_or(Uuid::nil()));
         let task = tokio::spawn(async move {
             let _slot = slot;
-            this.publish_with_deadline(&pool, organization, notice, channel, target)
+            this.publish_with_deadline(&pool, organization, scoped, fence)
                 .await;
         });
         #[cfg(test)]
@@ -326,13 +367,12 @@ impl Activity {
         &self,
         pool: &sqlx::PgPool,
         organization: Uuid,
-        notice: Notice,
-        channel: Option<Uuid>,
-        target: Option<Uuid>,
+        scoped: ScopedNotice,
+        fence: PublicationFence,
     ) {
         let _ = tokio::time::timeout(
             Duration::from_secs(10),
-            self.publish_scoped(pool, organization, notice, channel, target, None),
+            self.publish_scoped(pool, organization, scoped, None, fence),
         )
         .await;
     }
@@ -370,6 +410,7 @@ impl SectionsPublication {
                 generation: self.generation,
             },
             Some(self.member),
+            PublicationFence::default(),
         );
     }
 }

@@ -1,7 +1,8 @@
 use super::{
-    Activity, Notice, Retirement,
+    Activity, Notice, PublicationFence, Retirement,
     buffer::{Epoch, Pending, QueryToken, enqueue},
     dms,
+    publish::ScopedNotice,
     revocations::Capture,
 };
 #[cfg(test)]
@@ -74,6 +75,7 @@ struct TargetChange {
     channel: Option<Uuid>,
     dm_peers: Vec<(Uuid, Uuid, bool)>,
     retired: bool,
+    directory_epochs: Option<Arc<HashMap<Uuid, u64>>>,
 }
 impl auth::activity::ActivityChanges for Activity {
     fn channel(
@@ -88,9 +90,12 @@ impl auth::activity::ActivityChanges for Activity {
                 self.spawn_scoped(
                     pool,
                     organization,
-                    Notice::ChannelListChanged,
-                    Some(channel),
-                    None,
+                    ScopedNotice {
+                        notice: Notice::ChannelListChanged,
+                        channel: Some(channel),
+                        target: None,
+                    },
+                    PublicationFence::default(),
                 );
             }
             auth::activity::ChannelChange::Created {
@@ -98,15 +103,17 @@ impl auth::activity::ActivityChanges for Activity {
                 creator,
                 public,
             } => {
-                let mut publisher = self.clone();
-                publisher.exclude_guests = true;
-                publisher.spawn(
+                self.spawn(
                     pool,
                     organization,
                     Notice::ChannelAccessGained {
                         channel_id: channel,
                     },
                     if public { None } else { Some(creator) },
+                    PublicationFence {
+                        exclude_guests: true,
+                        ..PublicationFence::default()
+                    },
                 );
             }
             auth::activity::ChannelChange::Members { channel } => self.spawn(
@@ -116,6 +123,7 @@ impl auth::activity::ActivityChanges for Activity {
                     channel_id: channel,
                 },
                 None,
+                PublicationFence::default(),
             ),
         }
     }
@@ -128,7 +136,7 @@ impl auth::activity::ActivityChanges for Activity {
     ) -> auth::activity::Capture<'a> {
         Box::pin(async move {
             let entries = self
-                .snapshot(organization)
+                .snapshot(organization, None)
                 .into_iter()
                 .filter(|(entry, _)| entry.member.0 == target)
                 .collect::<Vec<_>>();
@@ -152,13 +160,21 @@ impl auth::activity::ActivityChanges for Activity {
                 },
                 dm_peers: dms::peer_changes(tx, organization, target).await?,
                 retired: false,
+                directory_epochs: None,
             }) as Box<dyn auth::activity::ActivityChange>)
         })
     }
     fn directory(&self, pool: sqlx::PgPool, organization: Uuid, target: Uuid) {
-        let mut publisher = self.clone();
-        publisher.directory_member = Some(target);
-        publisher.spawn(pool, organization, Notice::MembersChanged, None);
+        self.spawn(
+            pool,
+            organization,
+            Notice::MembersChanged,
+            None,
+            PublicationFence {
+                directory_member: Some(target),
+                ..PublicationFence::default()
+            },
+        );
     }
 }
 impl auth::activity::ActivityChange for TargetChange {
@@ -173,19 +189,23 @@ impl auth::activity::ActivityChange for TargetChange {
             self.target,
             Retirement::Mutation(&self.registrations),
         );
-        self.activity.directory_epochs = Some(Arc::new(
+        self.directory_epochs = Some(Arc::new(
             self.activity.advance_directory_epochs(self.organization),
         ));
     }
     fn committed(mut self: Box<Self>, pool: sqlx::PgPool) {
         self.retire();
-        self.activity.epochs = Some(Arc::new(
-            self.activity
-                .snapshot(self.organization)
-                .iter()
-                .map(|(entry, epoch)| (entry.id, *epoch))
-                .collect(),
-        ));
+        let fence = PublicationFence {
+            epochs: Some(Arc::new(
+                self.activity
+                    .snapshot(self.organization, None)
+                    .iter()
+                    .map(|(entry, epoch)| (entry.id, *epoch))
+                    .collect(),
+            )),
+            directory_epochs: self.directory_epochs.take(),
+            ..PublicationFence::default()
+        };
         let Ok(slot) = self.activity.capacity.clone().try_acquire_owned() else {
             return;
         };
@@ -210,14 +230,22 @@ impl auth::activity::ActivityChange for TargetChange {
                 .await?;
                 if self.before.peer_identity != after.peer_identity {
                     self.activity
-                        .publish_dm(&pool, self.organization, &self.dm_peers)
+                        .publish_dm(&pool, self.organization, &self.dm_peers, fence.clone())
                         .await?;
                 }
                 if self.before.identity.is_none() {
-                    let mut directory = self.activity.clone();
-                    directory.directory_member = Some(self.target);
-                    directory
-                        .publish(&pool, self.organization, Notice::MembersChanged, None, None)
+                    self.activity
+                        .publish(
+                            &pool,
+                            self.organization,
+                            Notice::MembersChanged,
+                            None,
+                            None,
+                            PublicationFence {
+                                directory_member: Some(self.target),
+                                ..fence.clone()
+                            },
+                        )
                         .await?;
                     return Ok::<_, sqlx::Error>(());
                 }
@@ -266,6 +294,7 @@ impl auth::activity::ActivityChange for TargetChange {
                                 },
                                 Some(self.target),
                                 None,
+                                fence.clone(),
                             )
                             .await?;
                     }
@@ -276,6 +305,7 @@ impl auth::activity::ActivityChange for TargetChange {
                             Notice::ChannelListChanged,
                             Some(self.target),
                             None,
+                            fence.clone(),
                         )
                         .await?;
                     if after.identity.is_some_and(|r| r.0 == Role::Guest) {
@@ -286,17 +316,28 @@ impl auth::activity::ActivityChange for TargetChange {
                                 Notice::MembersChanged,
                                 Some(self.target),
                                 None,
+                                fence.clone(),
                             )
                             .await?;
                     }
                 }
                 if self.before.identity != after.identity || grants_changed {
-                    let mut directory = self.activity.clone();
-                    directory.directory_member = Some(self.target);
-                    directory.directory_channels =
-                        before_grants.union(&after_grants).copied().collect();
-                    directory
-                        .publish(&pool, self.organization, Notice::MembersChanged, None, None)
+                    self.activity
+                        .publish(
+                            &pool,
+                            self.organization,
+                            Notice::MembersChanged,
+                            None,
+                            None,
+                            PublicationFence {
+                                directory_member: Some(self.target),
+                                directory_channels: before_grants
+                                    .union(&after_grants)
+                                    .copied()
+                                    .collect(),
+                                ..fence.clone()
+                            },
+                        )
                         .await?;
                 }
                 if self.before.identity != after.identity {
@@ -316,6 +357,7 @@ impl auth::activity::ActivityChange for TargetChange {
                                 },
                                 None,
                                 None,
+                                fence.clone(),
                             )
                             .await?;
                     }
@@ -433,6 +475,7 @@ impl Activity {
             channel: Some(channel),
             dm_peers: Vec::new(),
             retired: false,
+            directory_epochs: None,
         };
         self.revoked(pool, &change, channel, false, Role::Member)
             .await?;
