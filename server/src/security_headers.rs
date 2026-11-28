@@ -78,10 +78,13 @@ mod tests {
             .unwrap();
         pool.close().await;
         for secure in [false, true] {
-            let router = app(AppState {
-                cookie_secure: secure,
-                ..AppState::with_test_pool(pool.clone())
-            });
+            let router = app(
+                AppState {
+                    cookie_secure: secure,
+                    ..AppState::with_test_pool(pool.clone())
+                },
+                Default::default(),
+            );
             for (method, path, content_type, input, status) in [
                 ("GET", "/", "application/json", "", 200),
                 ("GET", "/channels/general", "application/json", "", 200),

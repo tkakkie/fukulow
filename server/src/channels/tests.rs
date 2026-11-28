@@ -53,7 +53,7 @@ impl RecheckObservation {
 }
 
 async fn router(pool: &PgPool) -> Router {
-    crate::app(AppState::for_test(pool.clone()).await)
+    crate::app(AppState::for_test(pool.clone()).await, Default::default())
 }
 
 pub(crate) async fn body(response: Response) -> Value {
@@ -168,7 +168,7 @@ async fn channels_require_authentication_without_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = crate::app(AppState::with_test_pool(pool));
+    let app = crate::app(AppState::with_test_pool(pool), Default::default());
     for method in ["GET", "POST"] {
         for authorization in [None, Some("Bearer invalid"), Some("Basic invalid")] {
             let mut request = Request::builder()

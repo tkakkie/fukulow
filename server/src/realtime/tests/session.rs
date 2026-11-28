@@ -76,10 +76,13 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
         Duration::from_millis(500),
     );
     let fallback = changes.pause_fallback();
-    let server = Server::start(crate::app(AppState {
-        session_changes: changes,
-        ..f.state.clone()
-    }))
+    let server = Server::start(crate::app(
+        AppState {
+            session_changes: changes,
+            ..f.state.clone()
+        },
+        Default::default(),
+    ))
     .await;
     let other_token = another_session(&pool, f.organization, f.member).await;
     let mut idle = server.connect(&f.token).await;
@@ -94,10 +97,13 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
     ready(&mut other, f.channel, 0).await;
     fallback.entered().await;
     // Inject a lost notification: sign-out commits using an isolated notification registry.
-    let isolated = crate::app(AppState {
-        session_changes: Default::default(),
-        ..f.state.clone()
-    });
+    let isolated = crate::app(
+        AppState {
+            session_changes: Default::default(),
+            ..f.state.clone()
+        },
+        Default::default(),
+    );
     let started = tokio::time::Instant::now();
     assert_eq!(
         request(
@@ -138,14 +144,17 @@ async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
         .connect_with(f.state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
-    let server = Server::start(crate::app(AppState {
-        pool: isolated_pool.clone(),
-        session_changes: crate::auth::SessionChanges::with_recheck_timing(
-            Duration::from_millis(200),
-            Duration::from_millis(100),
-        ),
-        ..f.state.clone()
-    }))
+    let server = Server::start(crate::app(
+        AppState {
+            pool: isolated_pool.clone(),
+            session_changes: crate::auth::SessionChanges::with_recheck_timing(
+                Duration::from_millis(200),
+                Duration::from_millis(100),
+            ),
+            ..f.state.clone()
+        },
+        Default::default(),
+    ))
     .await;
     let mut socket = server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
@@ -166,10 +175,13 @@ async fn worker_panic_closes_existing_and_new_sockets_with_internal_error(pool: 
         Duration::from_secs(1),
     )
     .with_on_fatal(std::sync::Arc::new(|| {}));
-    let server = Server::start(crate::app(AppState {
-        session_changes: changes.clone(),
-        ..f.state.clone()
-    }))
+    let server = Server::start(crate::app(
+        AppState {
+            session_changes: changes.clone(),
+            ..f.state.clone()
+        },
+        Default::default(),
+    ))
     .await;
     let mut idle = server.connect(&f.token).await;
     subscribe(&mut idle, f.channel, 0).await;
@@ -418,10 +430,13 @@ async fn lost_membership_signal_and_reactivation_still_close_stale_idle_and_repl
             Duration::from_millis(500),
         );
         let fallback = changes.pause_fallback();
-        let server = Server::start(crate::app(AppState {
-            session_changes: changes,
-            ..f.state.clone()
-        }))
+        let server = Server::start(crate::app(
+            AppState {
+                session_changes: changes,
+                ..f.state.clone()
+            },
+            Default::default(),
+        ))
         .await;
         let mut idle = server.connect(&f.token).await;
         subscribe(&mut idle, f.channel, 0).await;
@@ -511,10 +526,13 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
         Duration::from_secs(5),
     );
     let fallback = changes.pause_fallback();
-    let server = Server::start(crate::app(AppState {
-        session_changes: changes,
-        ..f.state.clone()
-    }))
+    let server = Server::start(crate::app(
+        AppState {
+            session_changes: changes,
+            ..f.state.clone()
+        },
+        Default::default(),
+    ))
     .await;
     let mut live = server.connect(&f.token).await;
     subscribe(&mut live, f.channel, 1).await;

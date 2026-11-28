@@ -17,7 +17,7 @@ async fn send_queue_cap_returns_503_and_same_key_retry_is_idempotent(pool: PgPoo
     let (_, organization, _, channel, token) = fixture(&pool).await;
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let mut queued = Vec::new();
     for _ in 0..super::super::admission::CHANNEL_QUEUE_CAP {
         queued.push(
@@ -76,7 +76,7 @@ async fn saturated_send_queue_preserves_organization_and_private_channel_denials
     channel(&pool, organization_a, channel_id, creator, true).await;
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let admission = delivery.admission(&pool);
     let mut queued = Vec::new();
     for _ in 0..super::super::admission::CHANNEL_QUEUE_CAP {

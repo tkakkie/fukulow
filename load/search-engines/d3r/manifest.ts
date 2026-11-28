@@ -10,7 +10,7 @@ import { forceSearchRls } from './rls.ts';
 const directory = 'load/search-engines/d3r';
 const root = new URL('../../../', import.meta.url);
 const prefix = 'server/migrations';
-export const manifestFile = 'load/search-engines/manifest-v21.json';
+export const manifestFile = 'load/search-engines/manifest-v22.json';
 export const removedSettings = {
   shared_preload_libraries: 'The v13 value preloads the PGroonga WAL and crash-safety libraries, which are absent in plain PostgreSQL.',
   'pgroonga.enable_wal_resource_manager': 'The PGroonga WAL resource manager is absent.',
@@ -30,7 +30,7 @@ export function snapshot() {
   const {rangeDays, ...timing} = base.timing;
   const {b1Settings, ...sessionPolicy} = base.sessionPolicy;
   return {
-    version: 21, date: '2026-11-28', engine: 'd3r', generator: base.generator, node: base.node,
+    version: 22, date: '2026-11-28', engine: 'd3r', generator: base.generator, node: base.node,
     image: base.image.base, shmBytes: base.shmBytes,
     settings: Object.fromEntries(Object.entries(base.settings).filter(([name]) => !(name in removedSettings))),
     removedSettings, sessionPolicy,

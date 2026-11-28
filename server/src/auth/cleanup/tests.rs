@@ -281,7 +281,7 @@ async fn successful_sign_in_triggers_cleanup_without_waiting_or_failing_on_clean
         session_cleanup: cleanup.clone(),
         ..crate::AppState::for_test(pool.clone()).await
     };
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let setup = serde_json::json!({"setup_token": "setup-token-test-only",
                     "organization_name":"Organization", "name":"Owner", "email":"owner@example.com", "password":"correct horse battery staple"});
     let response = app

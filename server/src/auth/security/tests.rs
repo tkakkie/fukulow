@@ -80,7 +80,7 @@ async fn fixture(pool: &PgPool) -> Fixture {
             .unwrap();
     }
     Fixture {
-        app: crate::app(state.clone()),
+        app: crate::app(state.clone(), Default::default()),
         state,
         account,
         current,

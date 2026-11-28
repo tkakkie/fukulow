@@ -203,7 +203,7 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
             Duration::from_millis(50),
             Duration::from_millis(200),
         );
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         let server = Server::start(app).await;
         let mut socket = server.connect(&token).await;
         subscribe(&mut socket, channel, 0).await;

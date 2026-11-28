@@ -111,7 +111,7 @@ async fn topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once
     let delivery = state.message_delivery.clone();
     let mut queue = delivery.queue(org, (sender, 0), 256);
     queue.subscribe(channel);
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let mut jobs = tokio::task::JoinSet::new();
     for n in 0..16 {
         let (app, token) = (
@@ -261,7 +261,7 @@ async fn topic_first_creation_duplicates_lost_ack_and_cross_channel_race_leave_n
     let (_, org, sender, channel, token) = fixture(&pool).await;
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let other = Uuid::new_v4();
     super::super::channel(&pool, org, other, sender, false).await;
     let mut queue = delivery.queue(org, (sender, 0), 256);

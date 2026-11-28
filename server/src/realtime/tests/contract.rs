@@ -50,7 +50,7 @@ impl Runner {
         }
         let state = state(&pool).await;
         let delivery = state.message_delivery.clone();
-        let server = Server::start(crate::app(state)).await;
+        let server = Server::start(crate::app(state, Default::default())).await;
         let mut runner = Self {
             pool,
             server,

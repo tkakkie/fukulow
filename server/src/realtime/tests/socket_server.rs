@@ -189,7 +189,7 @@ pub(super) async fn fixture_with_app_pool(admin: &PgPool, app_pool: &PgPool) -> 
     let (member, token) = member(admin, organization).await;
     let channel = channel(admin, organization, member, false).await;
     let state = state(app_pool).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let server = Server::start(app.clone()).await;
     Fixture {
         app,

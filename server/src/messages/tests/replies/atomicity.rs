@@ -7,7 +7,7 @@ async fn reply_admission_and_commit_rollback_preserve_seq_topic_count_and_public
     let (_, org, sender, channel, token) = fixture(&pool).await;
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let root = sent(
         &app,
         &token,
@@ -272,7 +272,7 @@ async fn reply_chain_reauthorizes_member_revision_and_grant_after_barrier_wait(p
             sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)").bind(org).bind(channel).bind(who).execute(&pool).await.unwrap();
         }
         let state = AppState::for_test(pool.clone()).await;
-        let app = crate::app(state);
+        let app = crate::app(state, Default::default());
         let root = sent(&app, &owner_token, channel, input(Uuid::new_v4(), "Root")).await;
         let child = sent(&app, &token, channel, reply_input(Uuid::new_v4(), &root)).await;
         page(&app, &token, channel, id(&child), "").await;

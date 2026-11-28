@@ -1,5 +1,5 @@
 use axum::serve::ListenerExt;
-use fukulow_server::{AppState, database::MigrationFailure};
+use fukulow_server::{AppState, ServeOptions, database::MigrationFailure};
 use sqlx::postgres::PgPoolOptions;
 
 mod init;
@@ -157,7 +157,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     ));
     let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
     let revocation_holds_sampler = fukulow_server::spawn_revocation_holds_sampler();
-    let completed = fukulow_server::serve_with_search(
+    let completed = fukulow_server::serve(
         listener.tap_io(move |stream| measurement_listener::apply(stream, send_buffer)),
         AppState {
             pool,
@@ -172,8 +172,10 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             ws_allowed_origins,
             socket_gate: Default::default(),
         },
-        search_engine,
-        allowed_host,
+        ServeOptions {
+            search_engine,
+            allowed_host,
+        },
         signal,
         fukulow_server::DRAIN_TIMEOUT,
     )

@@ -22,7 +22,7 @@ async fn invite_nul_email_and_display_name_keep_auth_precedence_and_write_nothin
 ) {
     let org = org(&pool).await;
     let (_, _, _, token) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     let invitation = invite(&app, org, &token, "new@example.com", Role::Member).await;
     let before: Vec<(Uuid, String)> = sqlx::query_as("SELECT id,email FROM accounts ORDER BY id")
         .fetch_all(&pool)
@@ -161,7 +161,7 @@ async fn nul_invite_token_keeps_404_without_database_work() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = crate::app(AppState::with_test_pool(pool.clone()));
+    let app = crate::app(AppState::with_test_pool(pool.clone()), Default::default());
     pool.close().await;
     let mut input = accept_input();
     input["token"] = json!(format!("{}\0", "a".repeat(63)));

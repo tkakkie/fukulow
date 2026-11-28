@@ -145,9 +145,9 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
     dataset(&pool, other, other_issuer, 10000).await;
     below_cap(&pool, other).await;
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone()).layer(axum::Extension(axum::extract::ConnectInfo(
-        "127.0.0.1:3030".parse::<std::net::SocketAddr>().unwrap(),
-    )));
+    let app = crate::app(state.clone(), Default::default()).layer(axum::Extension(
+        axum::extract::ConnectInfo("127.0.0.1:3030".parse::<std::net::SocketAddr>().unwrap()),
+    ));
     let password = "measurement password long enough";
     let hash = password::hash_password(password.into(), &PASSWORD_WORKERS)
         .await

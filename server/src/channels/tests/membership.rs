@@ -4,7 +4,7 @@ use super::*;
 async fn channel_list_denies_deactivation_after_auth_and_stale_reactivation(pool: PgPool) {
     for reactivate in [false, true] {
         let state = AppState::for_test(pool.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         let organization = organization(&pool).await;
         let id = Uuid::new_v4();
         let token = member(&pool, organization, id, "member").await;

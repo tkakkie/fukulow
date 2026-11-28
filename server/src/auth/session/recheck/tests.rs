@@ -34,14 +34,14 @@ async fn readiness_rejects_abnormal_worker_until_process_replacement(pool: PgPoo
         .with_on_fatal(Arc::new(|| {}));
     let mut state = crate::AppState::for_test(pool.clone()).await;
     state.session_changes = changes.clone();
-    let router = crate::app(state);
+    let router = crate::app(state, Default::default());
     status(&router, axum::http::StatusCode::OK).await;
     changes.start_rechecks(&pool);
     status(&router, axum::http::StatusCode::OK).await;
     changes.panic_worker().await;
     status(&router, axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
     // The latch never resets in-process: #163 recovers by starting a fresh process.
-    let replacement = crate::app(crate::AppState::for_test(pool).await);
+    let replacement = crate::app(crate::AppState::for_test(pool).await, Default::default());
     status(&replacement, axum::http::StatusCode::OK).await;
 }
 async fn active_checks(pool: &PgPool) -> i64 {
