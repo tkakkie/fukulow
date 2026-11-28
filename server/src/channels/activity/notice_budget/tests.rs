@@ -1,7 +1,5 @@
 use super::*;
-use crate::channels::activity::{
-    self, Activity, ChangeScope, Notice, Role, TargetChange, TargetState,
-};
+use crate::channels::activity::{self, Activity, ChangeScope, Notice, Role};
 use std::{
     future::Future,
     pin::Pin,
@@ -366,18 +364,9 @@ async fn callers_are_tagged(pool: sqlx::PgPool) {
         .unwrap()
         .revocations
         .capture(ChangeScope::Channel(channel));
-    let change = TargetChange {
-        activity: activity.clone(),
-        organization: entry.organization,
-        target: entry.member.0,
-        before: TargetState::default(),
-        registrations: [(entry.id, mutation)].into(),
-        channel: Some(channel),
-        dm_peers: Vec::new(),
-        retired: false,
-    };
-    activity
-        .revoked(&pool, &change, channel, false, Role::Member)
+    // Keep the mutation capture live through the revocation rechecks.
+    let _change = activity
+        .revoked_for_test(&pool, &entry, channel, mutation)
         .await
         .unwrap();
     assert_eq!(totals(), [0, 0, 1, 1, 0]);
