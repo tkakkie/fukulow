@@ -7,14 +7,10 @@
   import { resolveRovingMessageId } from './composer-keys'
   import Composer from './Composer.svelte'
   import VirtualRows from './ui/VirtualRows.svelte'
-  import {
-    confirmReplaceDraftWithFailedSend,
-    decideEditAndResend,
-    discardAndFocusComposer,
-    focusTarget,
-  } from './focus-management'
+  import { focusTarget } from './focus-management'
   import { type RepliesAdapter } from './replies.svelte'
   import type { ChannelSync } from './sync.svelte'
+  import { createTimelineDraftController } from './timeline-draft'
   import {
     applyTimelineScrollAction,
     createTimelineScrollController,
@@ -29,16 +25,13 @@
   import type { TopicsAdapter } from './topics.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
   import type { UnreadAdapter } from './unread.svelte'
+  import TimelineFrame from './TimelineFrame.svelte'
   import SearchAnchorStatus from './ui/SearchAnchorStatus.svelte'
   import Button from './ui/Button.svelte'
-  import ChannelUnavailableBanner from './ui/ChannelUnavailableBanner.svelte'
-  import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
-  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import ReadMarker from './ui/ReadMarker.svelte'
   import Skeleton from './ui/Skeleton.svelte'
-  import StatusBanner from './ui/StatusBanner.svelte'
   import TopicSummaryLine from './ui/TopicSummaryLine.svelte'
 
   // The session owns the sync controller and outlives this component; this only displays its state.
@@ -482,50 +475,27 @@
   })
 
 
-  function handleDiscard(clientMessageId: string) {
-    discardAndFocusComposer(clientMessageId, (id) => channel.discard(id), composerRef)
-  }
-
-  function handleRestoreRequest(clientMessageId: string) {
-    const decision = decideEditAndResend(clientMessageId, cState.draft, cState.topicDraft)
-    if (decision.action === 'restore_now') {
-      if (channel.restore(clientMessageId)) {
-        focusTarget(composerRef)
-      }
-    } else {
-      confirmReplaceId = decision.clientMessageId
-    }
-  }
-
-  function handleConfirmReplace() {
-    const id = confirmReplaceId
-    confirmReplaceId = null
-    if (!id) return
-    const target = mainPending.find((p) => p.clientMessageId === id && p.status === 'failed')
-    const canRestore = !targetUnavailable && Boolean(target)
-    if (
-      confirmReplaceDraftWithFailedSend(
-        id,
-        cState.draft,
-        canRestore,
-        (draft) => channel.setDraft(draft),
-        (targetId) => channel.restore(targetId),
-        null,
-        {
-          currentTopicDraft: cState.topicDraft,
-          setTopicDraft: (topicDraft) => channel.setTopicDraft(topicDraft),
-        },
-      )
-    ) {
-      void tick().then(() => {
-        if (confirmReplaceId === null) focusTarget(composerRef)
-      })
-    }
-  }
-
-  function handleCancelReplace() {
-    confirmReplaceId = null
-  }
+  const {
+    handleDiscard,
+    handleRestoreRequest,
+    handleConfirmReplace,
+    handleCancelReplace,
+  } = createTimelineDraftController({
+    getDraft: () => cState.draft,
+    setDraft: (draft) => channel.setDraft(draft),
+    getTopicDraft: () => cState.topicDraft,
+    setTopicDraft: (topicDraft) => channel.setTopicDraft(topicDraft),
+    discard: (id) => channel.discard(id),
+    restore: (id) => channel.restore(id),
+    canRestore: (id) =>
+      !targetUnavailable && mainPending.some((p) => p.clientMessageId === id && p.status === 'failed'),
+    getComposerRef: () => composerRef,
+    getConfirmReplaceId: () => confirmReplaceId,
+    setConfirmReplaceId: (id) => {
+      confirmReplaceId = id
+    },
+    afterUpdate: tick,
+  })
 
   async function handleSubmit(): Promise<boolean> {
     const ok = await channel.submit()
@@ -541,169 +511,142 @@
   }
 </script>
 
-<section class="timeline-section" aria-label="タイムライン">
-  {#if reconnecting && !organizationUnavailable && effectiveStatus === 'ready'}
-    <div class="timeline-section__banner">
-      <StatusBanner tone="info" role={null} message="再接続しています…" />
-    </div>
-  {/if}
-
-  {#if organizationUnavailable}
-    <div class="timeline-section__banner">
-      <OrganizationUnavailableBanner {onrecheckmembership} {onswitchorganization} />
-    </div>
-  {:else if s.status === 'unavailable'}
-    <div class="timeline-section__banner">
-      <ChannelUnavailableBanner {ongoToChannelList} />
-    </div>
-  {:else if !search && loadFailed}
-    <div class="timeline-section__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-        actionLabel="再試行"
-        onaction={retryInitialLoad}
-      />
-    </div>
-  {/if}
-
-  {#if positioning}
-    <div class="timeline-positioning">
-      <Skeleton rows={4} label="メッセージを読み込み中" />
-    </div>
-  {/if}
-  <div
-    class="timeline-scroll"
-    class:timeline-scroll--positioning={positioning}
-    aria-busy={positioning ? 'true' : undefined}
-    inert={positioning}
-    bind:this={scrollEl}
-    onscroll={handleScroll}
-  >
+<TimelineFrame
+  ariaLabel="タイムライン"
+  classes={{
+    root: 'timeline-section',
+    banner: 'timeline-section__banner',
+    positioning: 'timeline-positioning',
+    scroll: 'timeline-scroll',
+    scrollPositioning: 'timeline-scroll--positioning',
+    older: 'timeline-older',
+    newBelow: 'timeline-new-below',
+    composer: 'timeline-composer',
+  }}
+  reconnecting={reconnecting && !organizationUnavailable && effectiveStatus === 'ready'}
+  {organizationUnavailable}
+  channelUnavailable={s.status === 'unavailable'}
+  loadErrorMessage={!search && loadFailed
+    ? 'メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。'
+    : null}
+  onretry={retryInitialLoad}
+  {ongoToChannelList}
+  {onrecheckmembership}
+  {onswitchorganization}
+  {positioning}
+  positioningLabel="メッセージを読み込み中"
+  bind:scrollEl
+  onscroll={handleScroll}
+  showOlder={Boolean(hasOlder && !targetUnavailable)}
+  olderDisabled={Boolean(loadingOlder)}
+  olderError={Boolean(olderError)}
+  onloadolder={loadOlderWithAnchor}
+  pinned={scrollView.pinned}
+  newerCount={Math.max(scrollView.belowCount, search ? 0 : tState?.main.newerCount ?? 0)}
+  onjumptobottom={() => void jumpToBottom().catch(console.error)}
+  {confirmReplaceId}
+  returnFocusFallback={composerRef}
+  onconfirmreplace={handleConfirmReplace}
+  oncancelreplace={handleCancelReplace}
+>
+  {#snippet beforeOlder()}
     {#if !organizationUnavailable && !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (lines.length === 0 && mainPending.length === 0))}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
+  {/snippet}
 
-    {#if hasOlder && !targetUnavailable}
-      <div class="timeline-older">
-        <Button variant="secondary" disabled={loadingOlder} onclick={loadOlderWithAnchor}>
-          以前のメッセージを読み込む
-        </Button>
-        {#if olderError}
-          <StatusBanner
-            tone="danger"
-            role="alert"
-            message="以前のメッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-            actionLabel="再試行"
-            onaction={loadOlderWithAnchor}
-          />
-        {/if}
-      </div>
-    {/if}
-
-    {#if !awaitingInitialSenders && (lines.length > 0 || mainPending.length > 0)}
-      <VirtualRows
-        class="timeline-list"
-        bind:this={rowWindow}
-        items={lines}
-        rowId={(line) => line.kind === 'message' ? line.message.id : `topic:${line.topicId}`}
-        confirmedSeq={(line) => line.kind === 'message' ? line.message.created_seq : null}
-        pendingItems={mainPending}
-        pendingId={(p) => p.clientMessageId}
-        pendingStatus={(p) => p.status}
-        pendingClass="timeline-list__item"
-        itemClass="timeline-list__item"
-        container={scrollEl}
-        label="メッセージ一覧"
-        followBottom={scrollView.pinned && initialScrollApplied}
-        onmounted={(ids) => { mountedIds = ids }}
-        onvisible={reportPresented}
-        onfocuslost={() => focusTarget(composerRef)}
-      >
-        {#snippet children(line)}
-          {#if line.kind === 'message'}
-              {#if firstUnreadMessageId === line.message.id}
-                <ReadMarker />
-              {/if}
-              <MessageRow
-                senderName={resolveSenderName ? resolveSenderName(line.message.sender) : undefined}
-                createdAt={line.message.created_at}
-                searchMatch={searchId === line.message.id}
-                body={line.message.body ?? ''}
-                mentions={line.message.mentions}
-                {resolveMentionName}
-                {selfId}
-                replyCount={replyCounts[line.message.reply_root_id ?? line.message.id] ?? null}
-                focusable
-                rovingTabindex={rovingRowId === line.message.id ? 0 : -1}
-                onopenreplies={onopenreplies && !targetUnavailable
-                  ? (opener) => onopenreplies(line.message, opener)
-                  : undefined}
-                onrowfocus={() => {
-                  activeRowId = line.message.id
-                }}
-                onrowkeydown={handleRowKeydown}
-              />
-          {:else}
-            {@const topicUnread = uState?.topics[line.topicId]?.unreadCount ?? null}
-              <TopicSummaryLine
-                topicId={line.topicId}
-                name={line.baseline?.summary.name ?? 'トピック'}
-                messageCount={line.messageCount ?? undefined}
-                latestBody={line.latestMessage.body ?? ''}
-                mentions={line.latestMessage.mentions}
-                {resolveMentionName}
-                mentionUnreadCount={uState?.topics[line.topicId]?.mentionUnreadCount ?? 0}
-                unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
-                onclick={() => onopentopic?.(line.topicId)}
-                onretry={!targetUnavailable && line.summaryError === 'retryable' && topics
-                  ? () => void topics.retrySummary(line.topicId).catch(console.error)
-                  : undefined}
-              />
-          {/if}
-
-          {/snippet}
-        {#snippet pendingRow(p)}
-          {#if p.topicName}
-            <p class="timeline-list__pending-topic">トピック: {p.topicName}</p>
+  {#if !awaitingInitialSenders && (lines.length > 0 || mainPending.length > 0)}
+    <VirtualRows
+      class="timeline-list"
+      bind:this={rowWindow}
+      items={lines}
+      rowId={(line) => line.kind === 'message' ? line.message.id : `topic:${line.topicId}`}
+      confirmedSeq={(line) => line.kind === 'message' ? line.message.created_seq : null}
+      pendingItems={mainPending}
+      pendingId={(p) => p.clientMessageId}
+      pendingStatus={(p) => p.status}
+      pendingClass="timeline-list__item"
+      itemClass="timeline-list__item"
+      container={scrollEl}
+      label="メッセージ一覧"
+      followBottom={scrollView.pinned && initialScrollApplied}
+      onmounted={(ids) => { mountedIds = ids }}
+      onvisible={reportPresented}
+      onfocuslost={() => focusTarget(composerRef)}
+    >
+      {#snippet children(line)}
+        {#if line.kind === 'message'}
+          {#if firstUnreadMessageId === line.message.id}
+            <ReadMarker />
           {/if}
           <MessageRow
-            body={p.body}
-            pendingStatus={p.status}
-            retryable={p.retryable}
-            failureCode={p.failureCode}
-            {targetUnavailable}
-            onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
-            onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
-            ondiscard={() => handleDiscard(p.clientMessageId)}
+            senderName={resolveSenderName ? resolveSenderName(line.message.sender) : undefined}
+            createdAt={line.message.created_at}
+            searchMatch={searchId === line.message.id}
+            body={line.message.body ?? ''}
+            mentions={line.message.mentions}
+            {resolveMentionName}
+            {selfId}
+            replyCount={replyCounts[line.message.reply_root_id ?? line.message.id] ?? null}
+            focusable
+            rovingTabindex={rovingRowId === line.message.id ? 0 : -1}
+            onopenreplies={onopenreplies && !targetUnavailable
+              ? (opener) => onopenreplies(line.message, opener)
+              : undefined}
+            onrowfocus={() => {
+              activeRowId = line.message.id
+            }}
+            onrowkeydown={handleRowKeydown}
           />
-        {/snippet}
-        </VirtualRows>
-    {:else if !search && effectiveStatus === 'ready' && !organizationUnavailable}
-      <EmptyState
-        title="まだメッセージがありません。"
-        description="下の入力欄から最初のメッセージを送信できます。"
-      />
-    {/if}
-    {#if !search && tState?.main.hasNewer && !targetUnavailable && topics}
-      <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
-    {/if}
-
-    {#if search && !targetUnavailable}
-      <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
-    {/if}
-  </div>
-
-  {#if !scrollView.pinned && (scrollView.belowCount > 0 || (search ? 0 : tState?.main.newerCount ?? 0) > 0)}
-    <div class="timeline-new-below">
-      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
-        新着 {Math.max(scrollView.belowCount, search ? 0 : tState?.main.newerCount ?? 0)}件 ↓
-      </Button>
-    </div>
+        {:else}
+          {@const topicUnread = uState?.topics[line.topicId]?.unreadCount ?? null}
+          <TopicSummaryLine
+            topicId={line.topicId}
+            name={line.baseline?.summary.name ?? 'トピック'}
+            messageCount={line.messageCount ?? undefined}
+            latestBody={line.latestMessage.body ?? ''}
+            mentions={line.latestMessage.mentions}
+            {resolveMentionName}
+            mentionUnreadCount={uState?.topics[line.topicId]?.mentionUnreadCount ?? 0}
+            unreadCount={topicUnread !== null && topicUnread > 0 ? topicUnread : 0}
+            onclick={() => onopentopic?.(line.topicId)}
+            onretry={!targetUnavailable && line.summaryError === 'retryable' && topics
+              ? () => void topics.retrySummary(line.topicId).catch(console.error)
+              : undefined}
+          />
+        {/if}
+      {/snippet}
+      {#snippet pendingRow(p)}
+        {#if p.topicName}
+          <p class="timeline-list__pending-topic">トピック: {p.topicName}</p>
+        {/if}
+        <MessageRow
+          body={p.body}
+          pendingStatus={p.status}
+          retryable={p.retryable}
+          failureCode={p.failureCode}
+          {targetUnavailable}
+          onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
+          onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
+          ondiscard={() => handleDiscard(p.clientMessageId)}
+        />
+      {/snippet}
+    </VirtualRows>
+  {:else if !search && effectiveStatus === 'ready' && !organizationUnavailable}
+    <EmptyState
+      title="まだメッセージがありません。"
+      description="下の入力欄から最初のメッセージを送信できます。"
+    />
+  {/if}
+  {#if !search && tState?.main.hasNewer && !targetUnavailable && topics}
+    <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
   {/if}
 
-  <div class="timeline-composer">
+  {#if search && !targetUnavailable}
+    <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
+  {/if}
+
+  {#snippet composer()}
     <Composer
       {members}
       {onmentionrequest}
@@ -719,85 +662,15 @@
       onsubmit={handleSubmit}
       onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
-  </div>
-
-  <ReplaceDraftDialog
-    pendingId={confirmReplaceId}
-    description="入力中の下書きを破棄して、送信できなかったメッセージを入力欄に戻します。"
-    returnFocusFallback={composerRef}
-    onconfirm={handleConfirmReplace}
-    oncancel={handleCancelReplace}
-  />
-</section>
+  {/snippet}
+</TimelineFrame>
 
 <style>
-  .timeline-section {
-    position: relative;
-    display: grid;
-    grid-template-rows: auto 1fr auto;
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-    gap: var(--space-8);
-  }
-
-  .timeline-section__banner {
-    padding: 0 var(--space-16);
-    min-width: 0;
-  }
-
-  .timeline-scroll {
-    /* Explicit column: the positioning overlay shares this cell, and auto-placement would move this into an implicit column. */
-    grid-row: 2;
-    grid-column: 1;
-    overflow-y: auto;
-    overflow-anchor: none;
-    padding: var(--space-8) var(--space-16);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-8);
-    min-height: 0;
-    min-width: 0;
-  }
-
-  .timeline-scroll--positioning {
-    visibility: hidden;
-  }
-
-  .timeline-positioning {
-    grid-row: 2;
-    grid-column: 1;
-    padding: var(--space-8) var(--space-16);
-    overflow: hidden;
-    min-width: 0;
-  }
-
-  .timeline-older {
-    display: grid;
-    justify-items: start;
-    gap: var(--space-8);
-    min-width: 0;
-  }
-
   .timeline-list__pending-topic {
     margin: 0;
     padding: var(--space-4) var(--space-8) 0;
     font-size: var(--font-size-12);
     font-weight: var(--font-weight-semibold);
     color: var(--text2);
-  }
-
-  .timeline-new-below {
-    position: absolute;
-    bottom: calc(var(--space-24) * 4);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 10;
-  }
-
-  .timeline-composer {
-    grid-row: 3;
-    padding: 0 var(--space-12) var(--space-12);
-    min-width: 0;
   }
 </style>

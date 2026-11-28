@@ -331,6 +331,7 @@ describe('timeline-view: revealScrollTarget, captureCurrentAnchor and applyScrol
 
   it('applyScrollAction waits for async reveal to settle before applying scroll and reporting presented, while reply mode applies directly', async () => {
     const scrollController = createTimelineScrollController()
+    const captureSpy = vi.spyOn(scrollController, 'captureAnchor')
     const container = makeFakeScrollContainer({
       scrollTop: 200,
       rows: [{ id: 'm-1', seq: 1, top: 0, bottom: 50 }],
@@ -354,9 +355,10 @@ describe('timeline-view: revealScrollTarget, captureCurrentAnchor and applyScrol
 
     mainCtrl.applyScrollAction('preserve_anchor', { messageId: 'm-2', offsetTop: 10 })
     expect(reveal).toHaveBeenCalledWith('m-2')
-    // Before reveal settles, scrollTop must stay untouched and presentation must not fire.
+    // Before reveal settles, neither scrollTop nor captured anchor may change, and presentation must not fire.
     await Promise.resolve()
     expect(container.el.scrollTop).toBe(200)
+    expect(captureSpy).not.toHaveBeenCalled()
     expect(onPresented).not.toHaveBeenCalled()
 
     // Mount the revealed row asynchronously and resolve reveal.
@@ -369,6 +371,7 @@ describe('timeline-view: revealScrollTarget, captureCurrentAnchor and applyScrol
     await Promise.resolve()
     // 200 + (150 - 10) = 340
     expect(container.el.scrollTop).toBe(340)
+    expect(captureSpy).toHaveBeenCalledTimes(1)
     expect(onPresented).toHaveBeenCalledTimes(1)
 
     // ReplyPanel mode (`revealBeforeApply: false`) never calls reveal

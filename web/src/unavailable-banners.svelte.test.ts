@@ -125,7 +125,9 @@ describe('ChannelUnavailableBanner (#835)', () => {
   it('keeps the reply panel detail copy unchanged', async () => {
     // The Reply Panel must keep passing the variant; the copy below is only reached through it.
     const replyPanelSrc = readFileSync(join(import.meta.dirname, 'ReplyPanel.svelte'), 'utf8')
-    expect(replyPanelSrc).toMatch(/<ChannelUnavailableBanner [^>]*variant="replyPanel"/)
+    expect(extractOpeningTag(replyPanelSrc, 'TimelineFrame')).toContain('channelUnavailableVariant="replyPanel"')
+    const timelineFrameSrc = readFileSync(join(import.meta.dirname, 'TimelineFrame.svelte'), 'utf8')
+    expect(timelineFrameSrc).toMatch(/<ChannelUnavailableBanner [^>]*variant=\{channelUnavailableVariant\}/)
     const host = dom.doc.createElement('div')
     dom.doc.body.appendChild(host)
 
@@ -143,3 +145,27 @@ describe('ChannelUnavailableBanner (#835)', () => {
     await unmount(instance)
   })
 })
+
+function extractOpeningTag(src: string, tagName: string): string {
+  const withoutComments = src.replace(/<!--[\s\S]*?-->/g, '')
+  const start = withoutComments.indexOf(`<${tagName}`)
+  if (start === -1) return ''
+  let depth = 0
+  let quote: '"' | "'" | null = null
+  for (let i = start + tagName.length + 1; i < withoutComments.length; i++) {
+    const ch = withoutComments[i]
+    if (quote) {
+      if (ch === '\\') i++
+      else if (ch === quote) quote = null
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (ch === '{') {
+      depth++
+    } else if (ch === '}') {
+      depth = Math.max(0, depth - 1)
+    } else if (ch === '>' && depth === 0) {
+      return withoutComments.slice(start, i + 1)
+    }
+  }
+  return ''
+}
