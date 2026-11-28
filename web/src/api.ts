@@ -20,6 +20,12 @@ export type SignInRequest = components['schemas']['SignInRequest']
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
 export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; error?: string; retryAfterMs?: number }
 
+export function normalizedFailure(result: Extract<Result<unknown>, { ok: false }>) {
+  return result.kind === 'http'
+    ? { status: result.status, error: typeof result.error === 'string' ? result.error : undefined }
+    : { status: 'network' as const }
+}
+
 // Bound 5xx body reads (used only when Retry-After is absent) so stalled responses cannot hang callers.
 const SERVER_ERROR_BODY_TIMEOUT_MS = 1000
 

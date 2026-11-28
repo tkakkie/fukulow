@@ -2,7 +2,7 @@ import init, { WasmCore } from '../wasm/fukulow_client_core'
 import { createValues } from './core-values'
 import { identityOrder, rememberIdentityResponse } from './identity-order'
 import type { Message } from './api'
-import type { ChannelState, CoreResult, Input, Pending, Purpose, State, SyncCore, SyncView } from './protocol-types'
+import type { AccessEndpoint, AccessLifetime, AccessOutcome, ChannelState, CoreResult, Failure, Input, Pending, Purpose, State, SyncCore, SyncView } from './protocol-types'
 
 // A Node micro-benchmark on a 200-Message Channel had find and Map break even at ~4 inserts and Map
 // clearly ahead at 8 (5.75 µs vs 2.38 µs); a single append pays ~1.7 µs more with the Map (#488).
@@ -16,6 +16,11 @@ export function initCore(): Promise<void> {
 
 export function syncDelay(purpose: Purpose, attempt: number, drawOrMs = 0): number {
   return WasmCore.syncDelay(purpose, attempt, drawOrMs)
+}
+
+export function accessOutcome(endpoint: AccessEndpoint, lifetime: AccessLifetime, failure: { status: Failure; error?: string }): AccessOutcome {
+  const status = typeof failure.status === 'number' ? failure.status : undefined
+  return JSON.parse(WasmCore.accessOutcome(endpoint, lifetime, status, failure.error)) as AccessOutcome
 }
 
 type Interned<T> = Omit<T, 'body'> & { body?: number }

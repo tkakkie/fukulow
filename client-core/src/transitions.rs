@@ -28,12 +28,6 @@ impl Step<'_> {
                 self.force_changed = true;
             }
             Input::OrganizationUnavailable => self.organization_unavailable(),
-            Input::SocketClosed {
-                connection,
-                code: 4003,
-            } if self.core.session.connection == Some(connection) => {
-                self.organization_unavailable()
-            }
             Input::UserDiscard {
                 channel,
                 client_message_id,
@@ -47,7 +41,7 @@ impl Step<'_> {
         }
         self.finish()
     }
-    fn organization_unavailable(&mut self) {
+    pub(super) fn organization_unavailable(&mut self) {
         if !self.core.session.running {
             return;
         }
@@ -94,7 +88,34 @@ impl Step<'_> {
                     self.subscribe(id);
                 }
             }
-            Input::SocketClosed { connection, code } => self.socket_closed(connection, code),
+            Input::SocketClosed { connection, code } => self.socket_closed(connection, code, false),
+            Input::SocketDisconnected {
+                connection,
+                code,
+                opened,
+                opaque,
+            } => {
+                if self.core.session.connection != Some(connection) {
+                    return;
+                }
+                if !opened && opaque {
+                    self.core.membership_probe_pending = true;
+                    self.out
+                        .effects
+                        .push(Effect::CheckMembership { connection });
+                } else {
+                    self.socket_closed(connection, code, true);
+                }
+            }
+            Input::MembershipChecked {
+                connection,
+                status,
+                error,
+            } => self.membership_checked(
+                connection,
+                status.as_ref().and_then(Failure::http_status),
+                error.as_deref(),
+            ),
             Input::Watch { channel: id } => {
                 let c = self.channel(id);
                 if c.watched && c.state != Availability::Unavailable {
@@ -205,7 +226,7 @@ impl Step<'_> {
                         _ => {}
                     }
                 }
-                self.history_response(request, Err(status));
+                self.history_response(request, Err((status, error.as_deref())));
             }
             Input::Ack { request, message } => self.send_response(request, Ok(message)),
             Input::SendFailed {
@@ -218,12 +239,50 @@ impl Step<'_> {
             _ => {}
         }
     }
-    fn socket_closed(&mut self, connection: Token, code: u16) {
+    fn socket_closed(&mut self, connection: Token, code: u16, report_organization: bool) {
         if self.core.session.connection != Some(connection) {
             return;
         }
+        if code == 4003 {
+            if report_organization {
+                self.out
+                    .effects
+                    .push(Effect::ReportOrganizationUnavailable {
+                        socket: Some(ClosedSocket { connection, code }),
+                    });
+            } else {
+                self.organization_unavailable();
+            }
+            return;
+        }
+        self.finish_socket_close(code == 4001);
+    }
+
+    fn membership_checked(&mut self, connection: Token, status: Option<u16>, error: Option<&str>) {
+        if self.core.session.connection != Some(connection) || !self.core.membership_probe_pending {
+            return;
+        }
+        self.core.membership_probe_pending = false;
+        match access_outcome(
+            AccessEndpoint::Organization,
+            AccessLifetime::Current,
+            status,
+            error,
+        ) {
+            AccessOutcome::OrganizationUnavailable => {
+                self.out
+                    .effects
+                    .push(Effect::ReportOrganizationUnavailable { socket: None });
+            }
+            AccessOutcome::AccountEnded => self.finish_socket_close(true),
+            _ => self.finish_socket_close(false),
+        }
+    }
+
+    fn finish_socket_close(&mut self, account_ended: bool) {
         self.core.session.connection = None;
         self.core.session.connected = false;
+        self.core.membership_probe_pending = false;
         self.core.socket_replies.clear();
         for id in self.ids() {
             if self
@@ -234,7 +293,7 @@ impl Step<'_> {
                 self.channel(id).subscription = None;
             }
         }
-        if code == 4001 {
+        if account_ended {
             self.stop(true);
             return;
         }
@@ -259,7 +318,7 @@ impl Step<'_> {
                 self.out.socket_delivery = Some(SocketDelivery::Activity);
             }
             Route::Reconnect if self.core.session.connected => {
-                self.socket_closed(connection, 1006);
+                self.finish_socket_close(false);
                 self.out
                     .effects
                     .push(Effect::CloseConnection { connection });

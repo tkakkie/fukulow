@@ -10,7 +10,7 @@ impl Step<'_> {
     pub(super) fn history_response(
         &mut self,
         request: Token,
-        result: Result<HistoryPage, Failure>,
+        result: Result<HistoryPage, (Failure, Option<&str>)>,
     ) {
         if !matches!(
             self.core.requests.get(&request),
@@ -29,11 +29,21 @@ impl Step<'_> {
             return;
         };
         self.metadata_changed = true;
-        if stale {
-            if matches!(result, Err(Failure::Status(401))) {
-                self.stop(true);
-            }
-            return;
+        let access = match &result {
+            Err((status, error)) => access_outcome(
+                AccessEndpoint::History,
+                AccessLifetime::request(stale),
+                status.http_status(),
+                *error,
+            ),
+            Ok(_) if stale => AccessOutcome::Ignored,
+            Ok(_) => AccessOutcome::LocalOutcome,
+        };
+        match access {
+            AccessOutcome::AccountEnded if stale => return self.stop(true),
+            AccessOutcome::OrganizationUnavailable => return self.organization_unavailable(),
+            AccessOutcome::Ignored => return,
+            _ => {}
         }
         let generation = match &result {
             Ok(HistoryPage::Messages(p)) => Some(p.history_generation),
@@ -66,8 +76,8 @@ impl Step<'_> {
             Page::After => c.fill = None,
         }
         match result {
-            Err(Failure::Status(401)) => self.stop(true),
-            Err(Failure::Status(403 | 404)) => self.unavailable(id),
+            Err(_) if access == AccessOutcome::AccountEnded => self.stop(true),
+            Err(_) if access == AccessOutcome::ChannelUnavailable => self.unavailable(id),
             Err(_) => {
                 if page == Page::After {
                     if Self::gap(c) {

@@ -8,6 +8,7 @@ import { createChannelCreation } from './channel-creation'
 import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
 import { createChannels, markChannelsRead, type ChannelsApi } from './channels'
+import { accessOutcome } from './core-wasm'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import type { InitialTimeline } from './initial-timeline'
 import { createMoveChain, type MoveChainApi } from './move-chain'
@@ -87,9 +88,12 @@ export function createSession(options: SessionOptions) {
   let dms: Dms | undefined
   let history: ReturnType<typeof createTopicSync>['sync'] | undefined
   const reportAccess: NonNullable<SyncOptions['reportSyncAccess']> = (result, source?) => {
-    if (api.isSessionEnded(result)) {
+    if (result.ok) return
+    const lifetime = options.accountSignal?.aborted ? 'replaced_session' : closed || unavailable ? 'retired_organization' : 'current'
+    const outcome = accessOutcome('organization', lifetime, api.normalizedFailure(result))
+    if (outcome === 'account_ended') {
       if (notifyEnded() && !closed) void source?.close()
-    } else if (api.isOrganizationUnavailable(result)) terminate()
+    } else if (outcome === 'organization_unavailable') terminate()
   }
   const observeResponse = async <T>(promise: Promise<api.Result<T>>, report?: typeof reportAccess): Promise<api.Result<T>> => {
     const epoch = history?.get().historyEpoch
@@ -359,7 +363,7 @@ export function createSession(options: SessionOptions) {
       listAccess = null
       activity.invalidateMemberLists()
     },
-    terminal: r => !r.ok && r.kind === 'http' && (api.isSessionEnded(r) || r.error === 'organization_unavailable'),
+    terminal: r => !r.ok && accessOutcome('capabilities', 'current', api.normalizedFailure(r)) !== 'local_outcome',
   })
   activity.hold('capabilities', capabilities)
   let historyEpoch = sync.get().historyEpoch

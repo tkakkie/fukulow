@@ -133,11 +133,21 @@ impl Step<'_> {
             return;
         };
         self.metadata_changed = true;
-        if stale {
-            if matches!(result, Err((Failure::Status(401), ..))) {
-                self.stop(true);
-            }
-            return;
+        let access = match &result {
+            Err((status, _, error)) => access_outcome(
+                AccessEndpoint::Send,
+                AccessLifetime::request(stale),
+                status.http_status(),
+                error.as_deref(),
+            ),
+            Ok(_) if stale => AccessOutcome::Ignored,
+            Ok(_) => AccessOutcome::LocalOutcome,
+        };
+        match access {
+            AccessOutcome::AccountEnded if stale => return self.stop(true),
+            AccessOutcome::OrganizationUnavailable => return self.organization_unavailable(),
+            AccessOutcome::Ignored => return,
+            _ => {}
         }
         if matches!(&result, Err((Failure::Status(409), _, Some(error))) if error == "history_generation_changed")
         {
@@ -153,7 +163,7 @@ impl Step<'_> {
                 self.merge(id, vec![message], Source::Ack);
                 self.reconcile(id, false);
             }
-            Err((Failure::Status(401), ..)) => self.stop(true),
+            Err(_) if access == AccessOutcome::AccountEnded => self.stop(true),
             Err((status, delay, error)) => {
                 let c = self.channel(id);
                 let Some(index) = c
@@ -194,12 +204,11 @@ impl Step<'_> {
                         attempt: None,
                     });
                 } else {
-                    p.state =
-                        if matches!(status, Failure::Status(400 | 403 | 404 | 409 | 413 | 415)) {
-                            PendingState::Failed
-                        } else {
-                            PendingState::Unknown
-                        };
+                    p.state = if access == AccessOutcome::LocalRefusal {
+                        PendingState::Failed
+                    } else {
+                        PendingState::Unknown
+                    };
                     p.failure_code = error;
                 }
                 self.channel(id).pending = Rc::new(pending);

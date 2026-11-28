@@ -19,6 +19,14 @@ pub enum Failure {
     Status(u16),
     Other(String),
 }
+impl Failure {
+    pub(crate) fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Status(status) => Some(*status),
+            Self::Other(_) => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -280,6 +288,17 @@ pub enum Input {
         connection: Token,
         code: u16,
     },
+    SocketDisconnected {
+        connection: Token,
+        code: u16,
+        opened: bool,
+        opaque: bool,
+    },
+    MembershipChecked {
+        connection: Token,
+        status: Option<Failure>,
+        error: Option<String>,
+    },
     Event {
         connection: Token,
         event: ServerEvent,
@@ -365,10 +384,23 @@ pub struct StepInput {
     pub refresh_mention_names: bool,
 }
 #[derive(Debug, Serialize)]
+pub struct ClosedSocket {
+    pub connection: Token,
+    pub code: u16,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Effect {
     Connect {
         id: Token,
+    },
+    CheckMembership {
+        connection: Token,
+    },
+    ReportOrganizationUnavailable {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        socket: Option<ClosedSocket>,
     },
     Close,
     CloseConnection {

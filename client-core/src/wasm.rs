@@ -34,6 +34,22 @@ impl WasmCore {
                 .map_err(error)?;
         Ok(sync_delay(purpose, attempt as u64, draw_or_ms))
     }
+    #[wasm_bindgen(js_name = accessOutcome)]
+    pub fn access_outcome(
+        endpoint: &str,
+        lifetime: &str,
+        status: Option<u16>,
+        code: Option<String>,
+    ) -> Result<String, JsValue> {
+        let endpoint =
+            AccessEndpoint::deserialize(StrDeserializer::<serde::de::value::Error>::new(endpoint))
+                .map_err(error)?;
+        let lifetime =
+            AccessLifetime::deserialize(StrDeserializer::<serde::de::value::Error>::new(lifetime))
+                .map_err(error)?;
+        serde_json::to_string(&access_outcome(endpoint, lifetime, status, code.as_deref()))
+            .map_err(error)
+    }
     #[wasm_bindgen(js_name = hasPending)]
     pub fn has_pending(&self) -> bool {
         self.0.core.has_pending()
