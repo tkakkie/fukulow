@@ -35,7 +35,7 @@ const isRetryableSummaryFailure = <T>(r: Exclude<Result<T>, { ok: true }>) =>
   r.kind === 'network' || (r.kind === 'http' && r.status >= 500)
 const paging = (): Paging => ({ hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false })
 const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false, notFound: false })
-const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
+const window = (channel: string, generation: number) => ({ channel, generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
   listRead: Promise.resolve(), listVersion: 0, listPage: undefined as symbol | undefined,
   moveRefresh: undefined as { main: boolean; list: boolean; summaries: Set<string> } | undefined,
   activeTopic: undefined as string | undefined,
@@ -125,7 +125,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     if (topic !== undefined) refresh.summaries.add(topic)
     freezeWindow(stale)
     clearActivity(channel)
-    const fresh = window(nextGeneration++)
+    const fresh = window(channel, nextGeneration++)
     fresh.moveRefresh = refresh
     fresh.activeTopic = topic
     if (topic !== undefined) fresh.topics.set(topic, topicWindow())
@@ -223,7 +223,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
   const getWindow = (channel: string) => {
     let w = windows.get(channel)
     if (!w) {
-      windows.set(channel, w = window(nextGeneration++))
+      windows.set(channel, w = window(channel, nextGeneration++))
       rememberTopicMessages(w.evidence, sync.get().channels[channel]?.messages ?? [])
     }
     return w
@@ -301,10 +301,11 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     } finally { deadline?.clear() }
   }
   function mergeBaselines(w: Window, response: Pick<TopicPage, 'as_of_seq' | 'topics'>, startedAt: number, fromList = false) {
+    const { channel } = w
+    if (windows.get(channel) !== w) return
     for (const summary of response.topics) {
       holdSummary(w, summary.id)
       const old = w.baselines.get(summary.id)
-      const channel = [...windows].find(([, value]) => value === w)?.[0] ?? ''
       const held = old?.summary.latest_message
       const state = canonical(channel, held?.id === summary.latest_message.id ? held : undefined, summary.latest_message)
       if (!state) continue
@@ -324,8 +325,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     }
   }
   function holdSummary(w: Window, topic: string) {
-    const channel = [...windows].find(([, value]) => value === w)?.[0]
-    if (!channel || !options.activity) return
+    const { channel } = w
+    if (windows.get(channel) !== w || !options.activity) return
     const key = `topic:${channel}:${topic}`
     const existing = activityTargets.get(key)
     if (existing) return existing.summaryTarget
@@ -404,8 +405,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     } finally { release() }
   }
   function holdMain(w: Window) {
-    const channel = [...windows].find(([, value]) => value === w)?.[0]
-    if (!channel || !options.activity) return
+    const { channel } = w
+    if (windows.get(channel) !== w || !options.activity) return
     const key = `main:${channel}`
     const existing = activityTargets.get(key)
     if (existing) return existing.target
@@ -442,8 +443,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     for (const key of activityTargets.keys()) if (channel === undefined || key.startsWith(`topic:${channel}:`) || key === `main:${channel}`) releaseActivity(key)
   }
   function pruneActivity(w: Window) {
-    const channel = [...windows].find(([, value]) => value === w)?.[0]
-    if (!channel) return
+    const { channel } = w
+    if (windows.get(channel) !== w) return
     // An awaited activitySummary() or queued non-retry follow-up owns its target until it settles.
     const retained = new Set([...w.baselines.keys(), ...w.topics.keys(), ...w.summaryDemands.keys()])
     for (const m of w.messages.values()) if (m.topic_id) retained.add(m.topic_id)
@@ -455,7 +456,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     w.evidenceRefresh.add(topicId)
     try {
       await Promise.resolve()
-      for (const [channel, value] of windows) if (value === w && current(channel, w)) await ensureSummary(channel, topicId)
+      if (windows.get(w.channel) === w && current(w.channel, w)) await ensureSummary(w.channel, topicId)
     } finally { w.evidenceRefresh.delete(topicId) }
   }
   function trimTopic(t: TopicWindow, edge: 'older' | 'newer') {
@@ -519,7 +520,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     pruneActivity(w)
   }
   function applyMain(w: Window, page: TimelinePage, startedAt: number) {
-    const channel = [...windows].find(([, value]) => value === w)?.[0] ?? ''
+    const { channel } = w
+    if (windows.get(channel) !== w) return
     const older = w.main.asOfSeq !== undefined
     for (const item of page.items) {
       if (item.kind === 'message') { const state = canonical(channel, w.messages.get(item.message.created_seq), item.message); if (state) w.messages.set(item.message.created_seq, state) }
@@ -611,7 +613,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     return result.ok
   }
   function snapshot(channel: string) {
-    const w = closed ? window(0) : getWindow(channel)
+    const w = closed ? window(channel, 0) : getWindow(channel)
     const syncState = closed ? undefined : sync.get()
     const c = syncState?.channels[channel]
     const messages = w.main.asOfSeq === undefined ? (c?.messages ?? []) : []

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { createActivity } from './activity'
 import type { Channel, MessagePage, Result, TimelinePage, TopicPage, TopicSummaryResponse } from './api'
 import { createSession } from './session'
+import { moveEvent } from './protocol-test-helpers'
 import { flush } from './sync-test-helpers'
 import { deferred, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { createTopics } from './topics'
@@ -1354,4 +1356,134 @@ it('selectMainTimeline emits one line per topic_id at its newest position', () =
   )
   expect(lines.map(l => l.kind === 'message' ? l.message.created_seq : [l.topicId, l.position, l.messageCount])).toEqual([3, ['U', 7, 2], 11, ['T', 12, 4]])
   expect(lines.filter(l => l.kind === 'topic').map(l => l.latestMessage)).toEqual([msg(7, 'U'), msg(12, 'T')])
+})
+
+it('ignores a late held-summary response after Channel unwatch and rewatch', async () => {
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  const late = deferred<Result<TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    expect(c.topics.hasActivitySummary('A', 'T')).toBe(true)
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(late.promise)
+    const pending = c.topics.loadSummary('A', 'T')
+    await flush()
+    await c.sync.unwatch('A')
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+      history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, has_more: false,
+      items: [{ kind: 'topic', topic: summary('U', 20, 1) }],
+    }))
+    await c.sync.watch('A')
+    c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 20 })
+    await c.topics.loadMain('A')
+    await flush()
+    late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 25, topic: summary('T', 25, 5) }))
+    await pending; await flush()
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'T')?.baseline).toBeNull()
+    expect(c.topics.get('A').topics.some(t => t.topicId === 'U')).toBe(true)
+    expect(c.topics.hasActivitySummary('A', 'T')).toBe(false)
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('ignores a late held-main list response after Channel unwatch and rewatch', async () => {
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  const late = deferred<Result<TopicPage>>()
+  try {
+    await c.boot()
+    c.topicsApi.listTopics.mockReturnValueOnce(late.promise)
+    activity.notice({ type: 'read_position_changed', channel_id: 'A', topic_id: null, read_seq: 1 })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(c.topicsApi.listTopics).toHaveBeenCalledOnce()
+    await c.sync.unwatch('A')
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+      history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, has_more: false,
+      items: [{ kind: 'topic', topic: summary('U', 20, 1) }],
+    }))
+    await c.sync.watch('A')
+    c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 20 })
+    await c.topics.loadMain('A')
+    await flush()
+    late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 25, has_more: false, topics: [summary('stale', 25, 2)] }))
+    await flush()
+    expect(c.topics.get('A').topics.some(t => t.topicId === 'stale')).toBe(false)
+    expect(c.topics.get('A').topics.some(t => t.topicId === 'U')).toBe(true)
+    expect(c.topics.hasActivitySummary('A', 'stale')).toBe(false)
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('ignores a late loadMainLatest response after Channel unwatch and rewatch', async () => {
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  const late = deferred<Result<TimelinePage>>()
+  try {
+    await c.boot()
+    c.topicsApi.listTimeline.mockReturnValueOnce(late.promise)
+    const pending = c.topics.loadMainLatest('A')
+    await flush()
+    await c.sync.unwatch('A')
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+      history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, has_more: false,
+      items: [{ kind: 'topic', topic: summary('U', 20, 1) }],
+    }))
+    await c.sync.watch('A')
+    c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 20 })
+    await c.topics.loadMain('A')
+    await flush()
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+    late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 25, has_more: false, items: [] }))
+    await pending; await flush()
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+    expect(c.topics.get('A').main.asOfSeq).toBe(20)
+    expect(c.topics.get('A').topics.find(t => t.topicId === 'U')?.baseline?.asOfSeq).toBe(20)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('fences a deferred ensureSummaryForWindow microtask when the Window is detached or replaced', async () => {
+  for (const mode of ['detached', 'replaced'] as const) {
+    const c = topicClient()
+    try {
+      await c.boot()
+      for (let seq = 11; seq <= 1010; seq++) c.event(seq, seq % 2 ? 'T' : 'U')
+      if (mode === 'replaced') {
+        const beforeGeneration = c.topics.get('A').generation
+        c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+          history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1011, has_more: false, items: [],
+        }))
+        c.handlers[0].onEvent(moveEvent(1011, 'id10'))
+        expect(c.topics.get('A').generation).not.toBe(beforeGeneration)
+        expect(c.sync.get().channels.A?.watched).toBe(true)
+      } else {
+        await c.sync.unwatch('A')
+      }
+      await flush()
+      expect(c.topicsApi.getTopicSummary).not.toHaveBeenCalled()
+    } finally { await c.sync.close() }
+  }
+})
+
+it('fences pruneActivity on a detached Window so loadTopic cannot release the replacement Window activity target', async () => {
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    await c.topics.loadTopic('A', 'T')
+    const beforeGeneration = c.topics.get('A').generation
+    let replaced = false
+    const unsubscribe = c.topics.subscribe(() => {
+      if (replaced) return
+      replaced = true
+      unsubscribe()
+      c.handlers[0].onEvent(moveEvent(11, 'id10'))
+      void c.topics.loadSummary('A', 'U')
+    }, 'A')
+    const pending = c.topics.loadTopic('A', 'V')
+    expect(replaced).toBe(true)
+    expect(c.topics.get('A').generation).not.toBe(beforeGeneration)
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+    await pending
+    expect(c.topics.hasActivitySummary('A', 'U')).toBe(true)
+  } finally { activity.close(); await c.sync.close() }
 })
