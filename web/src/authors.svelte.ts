@@ -9,6 +9,7 @@ export function authorsAdapter(controller: ReturnType<typeof createAuthors>) {
     isInitialDisplayTimedOut(key: string) { subscribe(); return controller.isInitialDisplayTimedOut(key) },
     syncInitialDisplay: controller.syncInitialDisplay,
     mentionName: (...args: Parameters<typeof controller.mentionName>) => { subscribe(); return controller.mentionName(...args) },
+    seed: controller.seed,
     watch: controller.watch,
     selectChannel: controller.selectChannel,
     confirmInitialSubscription: controller.confirmInitialSubscription,

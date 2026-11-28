@@ -603,12 +603,12 @@ test('phone 375px: defers first-Unread positioning and markRead while ?panel=top
     const readMarks = await trackReadMarks(page, orgId, targetChannel.id)
 
     await page.setViewportSize({ width: 375, height: 667 })
-    const initialTimelineLoaded = page.waitForResponse(
-      (res) =>
-        res.url().includes(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/timeline`) &&
-        res.request().method() === 'GET' &&
-        res.status() === 200,
-    )
+    const initialTimelineLoaded = page.waitForResponse((res) => {
+      const url = new URL(res.url())
+      return url.pathname === `/api/v1/orgs/${orgId}/startup` &&
+        url.searchParams.get('channel_id') === targetChannel.id &&
+        res.request().method() === 'GET' && res.status() === 200
+    })
     await page.goto(`/o/${orgId}/c/${targetChannel.id}?panel=topics`)
     await initialTimelineLoaded
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')

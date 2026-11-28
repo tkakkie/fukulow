@@ -24,8 +24,8 @@ async function holdWasm(page: Page) {
   return release
 }
 
-for (const denial of ['private Channel non-member', 'ungranted Guest', 'DM non-participant', 'lost Organization Membership'] as const) {
-  test(`the early Timeline denies ${denial} with an authorized control`, async ({ page: ownerPage, browser, baseURL }) => {
+for (const fallback of [false, true]) for (const denial of ['private Channel non-member', 'ungranted Guest', 'DM non-participant', 'lost Organization Membership'] as const) {
+  test(`the early Timeline denies ${denial} with an authorized control${fallback ? ' on fallback' : ''}`, async ({ page: ownerPage, browser, baseURL }) => {
     const owner = ownerPage.request
     const org = await signInOwner(owner)
     const context = await browser.newContext({ baseURL })
@@ -56,18 +56,26 @@ for (const denial of ['private Channel non-member', 'ungranted Guest', 'DM non-p
       const releaseViewer = await holdWasm(viewerPage)
       const path = `/o/${org}/c/${id}`
       const timeline = `${history}/timeline`
-      const response = (page: Page) => page.waitForResponse(r => new URL(r.url()).pathname === timeline, { timeout: 5_000 })
+      const startup = `${base}/startup`
+      const read = fallback ? timeline : startup
+      const response = (page: Page) => page.waitForResponse(r => new URL(r.url()).pathname === read, { timeout: 5_000 })
+      if (fallback) {
+        for (const page of [ownerPage, viewerPage]) {
+          await page.route(url => url.pathname === startup, route => route.fulfill({ status: 503, json: { error: 'unavailable' } }))
+        }
+      }
       try {
         const authorized = response(ownerPage)
         await ownerPage.goto(path)
         const control = await authorized
         expect(control.status()).toBe(200)
-        expect(await control.json()).toMatchObject({ items: [{ kind: 'message', message: { id: message.id, body: name } }] })
+        const data = await control.json()
+        expect(fallback ? data : data.timeline.page).toMatchObject({ items: [{ kind: 'message', message: { id: message.id, body: name } }] })
 
         const lostMembership = denial === 'lost Organization Membership'
         if (lostMembership) {
-          // Commit the Membership loss after the successful Organization check, before the Timeline hits the server.
-          await viewerPage.route(url => url.pathname === timeline, async route => {
+          // Commit the Membership loss after the successful Organization check, before the selected read hits the server.
+          await viewerPage.route(url => url.pathname === read, async route => {
             const deactivated = await secretSafe(() => owner.post(`${base}/members/${viewer}/deactivate`))
             expect(deactivated.ok()).toBe(true)
             await route.continue()

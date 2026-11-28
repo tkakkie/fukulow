@@ -7098,6 +7098,131 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/startup": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "operationId": "get_startup",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "query",
+            "description": "Selected Channel. Defaults to the first visible active Channel in the list.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Visible active Channels and the selected Channel's initial Timeline with its author identities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartupResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid Organization or Channel id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed between Channel list and Timeline snapshots",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or commit barrier timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/ws": {
       "get": {
         "tags": [
@@ -9843,6 +9968,49 @@
           }
         },
         "additionalProperties": false
+      },
+      "StartupResponse": {
+        "type": "object",
+        "required": [
+          "channel_list"
+        ],
+        "properties": {
+          "channel_list": {
+            "$ref": "#/components/schemas/ChannelList"
+          },
+          "timeline": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StartupTimeline",
+                "description": "Absent when there is no selected Channel."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "StartupTimeline": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "page",
+          "authors"
+        ],
+        "properties": {
+          "authors": {
+            "$ref": "#/components/schemas/AuthorIdentities"
+          },
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "page": {
+            "$ref": "#/components/schemas/TimelinePage",
+            "description": "The initial subscription resumes from this page's generation and event watermark."
+          }
+        }
       },
       "Subscribe": {
         "type": "object",
