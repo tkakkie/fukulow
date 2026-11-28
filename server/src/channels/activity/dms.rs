@@ -106,7 +106,7 @@ impl Activity {
                         epoch: Epoch::Notice(epoch),
                         directory_epoch: None,
                         proof: Some(proof.clone()),
-                        valid: authorization.valid.clone(),
+                        valid: authorization.valid().clone(),
                         recovery: None,
                     },
                 );
