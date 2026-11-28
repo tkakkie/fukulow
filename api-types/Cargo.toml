@@ -10,5 +10,8 @@ workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-utoipa = { version = "=6.0.0", features = ["uuid"] }
+utoipa = { version = "=6.0.0", features = ["uuid"], optional = true }
 uuid = { version = "1", features = ["serde"] }
+
+[features]
+openapi = ["dep:utoipa"]

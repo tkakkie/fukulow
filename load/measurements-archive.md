@@ -1965,3 +1965,7 @@ Closed on the maintainer's decision (chat, 2026-11-27) after plan v4. **Not an o
 - `ab.log`: `9668d388432684f7d6b9f2618669c9ebca4e68b3e21c28dff3b7b094c306f433`
 - `chain.log`: `3b3bdec96ef20bc1d6137a3baf81b6177d5fbf1fade43a75026a958a01a90b3b`
 - `ab983v4.ts`: `fb7e7571bc839fa3ca56b9e8d837399076541023ddb4dfe929e75435dc515d13`
+
+## Release Wasm size (#1128)
+
+#1128 release Wasm (`a878e090`): 558,619 B raw, 161,082 B gzip (level 6). macOS 27.0.1 arm64 (M5), Rust 1.100.0, wasm-bindgen 0.2.130, Node 26.13.1. From root run `(cd web && node ../scripts/build-wasm.ts)` then `node scripts/check-wasm-budget.ts web/wasm`. CI reuses `npm --prefix web run build` on `ubuntu-latest` and skips the PR delta to avoid a second build.
