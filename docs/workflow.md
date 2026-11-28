@@ -139,7 +139,7 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 ## 11. Labels and milestones
 - Status names and meanings are in AGENTS.md.
 - Other labels are in AGENTS.md (`security` red, `bug` orange; quota labels §4). Urgent = `security`/`bug` + `status:human-review`/`status:needs-decision`. No area/type/ai labels.
-- One-week sprints (max two open) hold that week's planned work. Use undated `Backlog` outside the cap for unscheduled, conditional or future work. No milestone means untriaged. Use only labels for modules.
+- One-week sprints (max two open) hold that week's planned work. Use undated `Backlog` outside the cap for unscheduled, conditional or future work. No milestone means untriaged. Modules use labels, never milestones.
 - Only the maintainer moves `Backlog` Issues into a sprint. AIs may propose moves at sprint boundaries.
 
 ## 12. Needs the maintainer
@@ -167,16 +167,16 @@ Only the maintainer pushes, moves or deletes `v*` tags or changes GHCR package s
 
 ## 16. Tests
 - Web: Svelte DOM tests extend `web/src/svelte-dom-test-helpers.ts`, never copy it. Tests may import `web/scripts`; product code never does. Request deadlines use the shared helper (target until #834 merges).
-- Rust (#844). Await concurrency conditions via observable barriers (lock waiter, gate `entered()`, counter). Fixed sleeps need a comment that duration is the subject. Time out every test-barrier await so regressions fail without hanging.
+- Rust (#844). Await concurrency conditions via observable barriers (lock waiter, gate `entered()`, counter), never fixed sleeps. Fixed sleeps need a comment that duration is the subject. Time out every test-barrier await so regressions fail without hanging.
 - Add a shared helper before the third copy: domain-free ones (gates, lock waits, plan walkers, SQLSTATE checks) in `crate::test_support`, table-writing ones in the owning module as `#[cfg(test)] pub(crate)`. No module edge for a test helper.
-- Tests may move with code (#852 R1). Keep names, named wrappers for bodies moved to helpers and separate denial case names. Use plain `mod x;` files only, no `#[path]`/`include!`. Moving inline `mod tests` to a file keeps its runner name. New child modules add a segment. PRs list changed runner names and update invariants rows and `contract/realtime/` citations (CI), plus references in docs, `--exact` strings and subprocess tests (review).
+- Tests may move with code (#852 R1), never renamed. Keep named wrappers for bodies moved to helpers and separate denial case names. Use plain `mod x;` files only, no `#[path]`/`include!`. Moving inline `mod tests` to a file keeps its runner name. New child modules add a segment. PRs list changed runner names and update invariants rows and `contract/realtime/` citations (CI), plus references in docs, `--exact` strings and subprocess tests (review).
 
 ## 17. Retiring load harnesses (#1136)
 
 Delete a `load/` unit (subdir or top-level script plus tests/helpers) only if all hold:
 - Its Issues are closed; no open Issue/PR cites its paths.
-- No current baseline, decision or open acceptance in `docs/measurements.md` cites it as command/harness.
+- No current baseline, decision or open acceptance in `docs/measurements.md` cites it.
 - No live unit imports it; no manifest hash-pins it. Keep shared infrastructure (`harness-core`, `launcher`, `proxy-target.ts`).
 - No other references (`docs/spec*`, `docs/decisions*`, `docs/invariants*`, `docs/workflow.md`, CI workflows, `Makefile`, `load/package.json` scripts).
 
-One PR per unit, appending to `load/measurements-archive.md` its paths, the last full 40-hex SHA containing it and a restore command (checkout, lockfile deps, pinned Node). Update the test glob and `tsconfig.json` includes; no other test edits, no reruns. Past results, verdicts and evidence stay unchanged. Widening needs maintainer approval.
+One PR per unit, appending to `load/measurements-archive.md` its paths, the last full 40-hex SHA containing it and a restore command (checkout, lockfile deps, pinned Node). Of tests, update only the test glob and `tsconfig.json` includes; no reruns. Past results, verdicts and evidence stay unchanged. Widening needs maintainer approval.
