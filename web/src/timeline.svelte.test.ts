@@ -839,3 +839,77 @@ describe('Search result navigation', () => {
   })
 
 })
+
+describe('Topic summary lines, TopicList and TopicView states', () => {
+  it('confirms before replacing a Topic-name-only draft and restores body with its original Topic intent', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...net.options('me'),
+    })
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 0)
+    await settle()
+
+    const ch = syncAdapter(rawSession.sync).channel('c1')
+    const tp = topicsAdapter(rawSession.topics, 'c1')
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(Timeline, {
+      target: host as unknown as Element,
+      props: { channel: ch, topics: tp, channelId: 'c1', selfId: 'me' },
+    })
+    flushSync()
+
+    // Submit a send to "Original topic" and have the server refuse it (400)
+    const topicInput = queryAll(host, 'input').find((el) => el.getAttribute('aria-label') === 'トピック名')!
+    const textarea = queryAll(host, 'textarea').find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+    topicInput.value = 'Original topic'
+    topicInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    textarea.value = '拒否されたトピック本文'
+    textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    host.querySelector('form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    await settle()
+    net.sends[0].resolve({ ok: false, kind: 'http', status: 400 })
+    await settle()
+    flushSync()
+
+    // Type ONLY "Different topic" into the Topic-name field (body draft stays empty)
+    topicInput.value = 'Different topic'
+    topicInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    expect(textarea.value).toBe('')
+
+    buttonsByText(host, '編集して送り直す')[0].click()
+    flushSync()
+    const dialog = host.querySelector('dialog:modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog?.textContent).toContain('入力中の下書きを置き換えますか？')
+
+    // Cancel keeps both "Different topic" and the failed "Original topic" send
+    buttonsByText(host, 'キャンセル')[0].click()
+    flushSync()
+    expect(topicInput.value).toBe('Different topic')
+    expect(ch.timeline.pending).toHaveLength(1)
+
+    // Confirm replaces with both the refused body AND "Original topic"
+    buttonsByText(host, '編集して送り直す')[0].click()
+    flushSync()
+    buttonsByText(host, '置き換える')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(textarea.value).toBe('拒否されたトピック本文')
+    expect(topicInput.value).toBe('Original topic')
+    expect(ch.timeline.pending).toHaveLength(0)
+
+    await unmount(instance)
+    rawSession.close()
+  })
+})
