@@ -229,7 +229,7 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version }
       - name: Compose security configuration and rejection checks
-        run: node --test scripts/compose-security.test.ts
+        run: node --test scripts/compose-app.test.ts scripts/compose-db.test.ts scripts/compose-images.test.ts scripts/compose-proxy.test.ts scripts/check-db-upgrade.test.ts
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       # Read-only: docker-cache.yml is the only writer of scope=docker (#926). A PR export once hung for 17 minutes.
       - name: Build image with GitHub Actions layer cache

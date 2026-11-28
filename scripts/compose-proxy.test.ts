@@ -2,13 +2,8 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { cwd, env, args, checkRestrictions } from './compose-test-helpers.ts'
 
-const cwd = fileURLToPath(new URL('..', import.meta.url))
-const env = { PATH: process.env.PATH, COMPOSE_PROJECT_NAME: `fukulow-config-${process.pid}`,
-  POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only', FUKULOW_VERSION: '1.2.3' }
-const args = (profile: string, external = false) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml',
-  ...(external ? ['-f', 'compose.external-db.yml'] : []), '--profile', profile, 'config', '--format', 'json']
 const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
 
 test('none publishes only loopback by default and keeps bundled proxy trust isolated', () => {
@@ -56,16 +51,6 @@ test('none publishes only loopback by default and keeps bundled proxy trust isol
   assert.equal(externalDb.app.environment.PGSSLMODE, 'verify-full')
   assert.ok(!externalDb.app.environment.DATABASE_URL.includes('owner'))
 })
-
-function checkRestrictions(service: Record<string, unknown>) {
-  assert.equal(service.read_only, true, 'read_only must be true')
-  assert.deepEqual(service.cap_drop, ['ALL'], 'cap_drop must deny ALL')
-  assert.deepEqual(service.security_opt, ['no-new-privileges:true'], 'no-new-privileges must be true')
-  assert.ok(!service.privileged, 'privileged must be disabled')
-  assert.deepEqual(service.cap_add ?? [], [], 'cap_add must stay empty')
-  assert.deepEqual(service.volumes ?? [], [], 'no demonstrated writable-path exception')
-  assert.deepEqual(service.tmpfs ?? [], [], 'no demonstrated tmpfs exception')
-}
 
 // This is a restricted grammar, not a general proxy-config interpreter. Compare
 // every token (including scope/delimiters) with the approved deployment shape so
@@ -248,29 +233,6 @@ function checkProxyHeaders(profile: string, source: string) {
     'unsupported proxy configuration: preserve the approved headers, inheritance and route scopes')
 }
 
-test('deployment and load app and migrate enforce container restrictions with removal and weakening denials', () => {
-  for (const file of ['compose.yml', 'load/compose.yml']) {
-    for (const profileArgs of file === 'compose.yml' ? [['--profile', 'caddy'], ['--profile', 'nginx']] : [[]]) {
-      const config = JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', '-f', file,
-        ...profileArgs, 'config', '--format', 'json'], { cwd, env: { ...env, LOAD_PROJECT: 'restrictions-test', LOAD_PORT: '18080',
-          LOAD_DB_PASSWORD: 'owner-test-only', LOAD_APP_PASSWORD: 'app-test-only', LOAD_SETUP_TOKEN: 'setup-test-only' }, encoding: 'utf8' }))
-      for (const name of ['app', 'migrate']) {
-        const service = config.services[name]
-        checkRestrictions(service)
-        for (const [key, weakened] of [['read_only', false], ['cap_drop', ['NET_RAW']], ['security_opt', ['no-new-privileges:false']]] as const) {
-          const removed = structuredClone(service)
-          delete removed[key]
-          assert.throws(() => checkRestrictions(removed), undefined, `${file} ${name} removed ${key}`)
-          assert.throws(() => checkRestrictions({ ...service, [key]: weakened }), undefined, `${file} ${name} weakened ${key}`)
-        }
-        for (const mutation of [{ privileged: true }, { cap_add: ['NET_RAW'] }, { volumes: ['/tmp:/tmp'] }, { tmpfs: ['/tmp'] }]) {
-          assert.throws(() => checkRestrictions({ ...service, ...mutation }))
-        }
-      }
-    }
-  }
-})
-
 test('both proxies enforce browser headers with removal weakening and inheritance denials', () => {
   for (const [profile, file] of [['caddy', 'deploy/Caddyfile'], ['nginx', 'deploy/nginx.conf']]) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
@@ -367,254 +329,6 @@ test('proxy grammar rejects unprobed scopes, inheritance controls and alternate 
   checkProxyHeaders('caddy', caddy.replaceAll('\t', '  ').replaceAll('\n', '\r\n'))
 })
 
-function checkBaseImages(dockerfile: string) {
-  const stages = new Set<string>()
-  for (const [, image, stage] of dockerfile.matchAll(/^FROM (\S+)(?: AS (\S+))?$/gmi)) {
-    if (!stages.has(image.toLowerCase())) assert.match(image, /^\w+:[\w.-]+@sha256:[a-f0-9]{64}$/, 'base image must pin tag and digest')
-    if (stage) stages.add(stage.toLowerCase())
-  }
-}
-
-// The release image is selected by the operator's FUKULOW_VERSION (an immutable SemVer tag,
-// optionally with the digest from its release notes); every other external image pins tag and digest.
-const releaseImage = /^ghcr\.io\/tkakkie\/fukulow:\d+\.\d+\.\d+(?:-[\w.-]+)?(?:@sha256:[a-f0-9]{64})?$/
-function checkImagesAndLogs(services: Record<string, { build?: unknown, image: string, logging: unknown }>) {
-  const builtImages = new Set(Object.values(services).filter(service => service.build).map(service => service.image))
-  for (const [name, service] of Object.entries(services)) {
-    const release = ['app', 'migrate'].includes(name) && releaseImage.test(service.image)
-    if (!builtImages.has(service.image) && !release) assert.match(service.image, /^[\w/.-]+:[\w.-]+@sha256:[a-f0-9]{64}$/, `${name} must pin tag and digest`)
-    assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } }, `${name} must rotate logs`)
-  }
-}
-
-test('all base images and external Compose images are pinned; every deployment/load service rotates logs', () => {
-  checkBaseImages(readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8'))
-  const loadEnv = { ...env, LOAD_PROJECT: 'config-test-only', LOAD_PORT: '18080',
-    LOAD_DB_PASSWORD: 'load-db-test-only', LOAD_APP_PASSWORD: 'load-app-test-only', LOAD_SETUP_TOKEN: 'load-setup-test-only' }
-  for (const file of ['compose.yml', 'load/compose.yml']) {
-    for (const profileArgs of file === 'compose.yml' ? [['--profile', 'caddy'], ['--profile', 'nginx']] : [[]]) {
-      const config = JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', '-f', file,
-        ...profileArgs, 'config', '--format', 'json'], { cwd, env: loadEnv, encoding: 'utf8' }))
-      checkImagesAndLogs(config.services)
-      for (const mutation of ['pin', 'rotation']) {
-        const broken = structuredClone(config.services)
-        if (mutation === 'pin') broken.db.image = broken.db.image.split('@')[0]
-        else delete broken.db.logging.options['max-file']
-        assert.throws(() => checkImagesAndLogs(broken), mutation === 'pin' ? /must pin/ : /must rotate/)
-      }
-      if (file === 'compose.yml') {
-        // Only app and migrate may use the release image, and only with a SemVer tag.
-        for (const [name, image] of [['app', 'ghcr.io/tkakkie/fukulow:latest'], ['app', 'ghcr.io/tkakkie/fukulow'],
-          ['app', 'ghcr.io/other/fukulow:1.2.3'], ['db', 'ghcr.io/tkakkie/fukulow:1.2.3']]) {
-          const broken = structuredClone(config.services)
-          broken[name].image = image
-          assert.throws(() => checkImagesAndLogs(broken), /must pin/, `${name} ${image}`)
-        }
-      }
-    }
-  }
-})
-
-test('base image check rejects an unpinned Dockerfile base', () => {
-  for (const source of ['FROM debian:bookworm-slim\n', 'FROM missing AS server',
-    'FROM base AS server\nFROM debian:bookworm-slim AS base',
-    'FROM debian:bookworm-slim AS base\nFROM base AS server']) {
-    assert.throws(() => checkBaseImages(source), /base image must pin tag and digest/)
-  }
-  checkBaseImages('FROM rust:1.99.1-slim@sha256:' + 'a'.repeat(64) + ' AS base\nFROM base AS wasm\nFROM wasm AS server')
-})
-
-test('upgrade rehearsal pins both old images for the post-merge Compose shape', () => {
-  // HEAD is available even in CI's shallow checkout and has the post-merge shape.
-  const output = execFileSync(process.execPath, ['scripts/check-db-upgrade.ts', '--check-config'],
-    { cwd, env: { PATH: process.env.PATH, CHECK_UPGRADE_REVISION: 'HEAD' }, encoding: 'utf8' })
-  assert.match(output, /PASS old stack images: app=.+ migrate=true/)
-})
-
-test('deployment Compose runs the required FUKULOW_VERSION release and builds from source only through compose.dev.yml', () => {
-  for (const profile of ['caddy', 'nginx']) {
-    for (const version of [undefined, '']) {
-      const result = spawnSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_VERSION: version }, encoding: 'utf8' })
-      assert.notEqual(result.status, 0)
-      assert.match(result.stderr, /FUKULOW_VERSION/)
-    }
-    const release = JSON.parse(execFileSync('docker', args(profile), { cwd, env, encoding: 'utf8' })).services
-    for (const name of ['app', 'migrate']) assert.equal(release[name].image, 'ghcr.io/tkakkie/fukulow:1.2.3', name)
-    for (const [name, service] of Object.entries(release)) assert.equal((service as { build?: unknown }).build, undefined, `${name} must not build`)
-    const pinned = `1.2.3@sha256:${'a'.repeat(64)}`
-    const digest = JSON.parse(execFileSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_VERSION: pinned }, encoding: 'utf8' })).services
-    assert.equal(digest.app.image, `ghcr.io/tkakkie/fukulow:${pinned}`)
-    const devArgs = [...args(profile).slice(0, 5), '-f', 'compose.dev.yml', ...args(profile).slice(5)]
-    const dev = JSON.parse(execFileSync('docker', devArgs, { cwd, env, encoding: 'utf8' })).services
-    assert.equal(dev.app.build.context, cwd.replace(/\/$/, ''))
-    for (const name of ['app', 'migrate']) assert.equal(dev[name].image, 'fukulow-app', name)
-  }
-  // The shipped example leaves the version empty, so copying it never starts an implicit release.
-  const example = spawnSync('docker', ['compose', '--env-file', '.env.example', '-f', 'compose.yml', '--profile', 'caddy', 'config'],
-    { cwd, env: { PATH: process.env.PATH, POSTGRES_APP_PASSWORD: env.POSTGRES_APP_PASSWORD, FUKULOW_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN }, encoding: 'utf8' })
-  assert.notEqual(example.status, 0)
-  assert.match(example.stderr, /FUKULOW_VERSION/)
-  // The disposable load stack still builds the app from source.
-  const load = JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', '-f', 'load/compose.yml', 'config', '--format', 'json'],
-    { cwd, env: { PATH: process.env.PATH, LOAD_PROJECT: 'release-config-test', LOAD_PORT: '18195', LOAD_DB_PASSWORD: 'owner-test-only',
-      LOAD_APP_PASSWORD: 'app-test-only', LOAD_SETUP_TOKEN: 'setup-test-only' }, encoding: 'utf8' })).services
-  assert.equal(load.app.build.context, cwd.replace(/\/$/, ''))
-})
-
-test('both profiles require a nonempty setup token before starting containers', () => {
-  for (const profile of ['caddy', 'nginx']) {
-    for (const token of [undefined, '']) {
-      const result = spawnSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_SETUP_TOKEN: token }, encoding: 'utf8' })
-      assert.notEqual(result.status, 0)
-      assert.match(result.stderr, /FUKULOW_SETUP_TOKEN/)
-    }
-  }
-})
-
-test('the shipped deployment example cannot start either profile without a setup token', () => {
-  for (const profile of ['caddy', 'nginx']) {
-    const result = spawnSync('docker', ['compose', '--env-file', '.env.example', '-f', 'compose.yml', '--profile', profile, 'config'],
-      { cwd, env: { PATH: process.env.PATH, POSTGRES_APP_PASSWORD: env.POSTGRES_APP_PASSWORD, FUKULOW_VERSION: env.FUKULOW_VERSION }, encoding: 'utf8' })
-    assert.notEqual(result.status, 0)
-    assert.match(result.stderr, /FUKULOW_SETUP_TOKEN/)
-  }
-})
-
-test('both profiles require bundled passwords and keep owner credentials outside app', () => {
-  for (const profile of ['caddy', 'nginx']) {
-    for (const key of ['POSTGRES_APP_PASSWORD', 'POSTGRES_PASSWORD']) {
-      for (const password of [undefined, '']) {
-        const result = spawnSync('docker', args(profile), { cwd, env: { ...env, [key]: password }, encoding: 'utf8' })
-        assert.notEqual(result.status, 0)
-        assert.ok(result.stderr.includes(key))
-      }
-    }
-    const { services: { app, migrate } } = JSON.parse(execFileSync('docker', args(profile), { cwd, env, encoding: 'utf8' }))
-    assert.equal(app.environment.DATABASE_URL, `postgres://fukulow_app:${env.POSTGRES_APP_PASSWORD}@db:5432/fukulow`)
-    assert.equal(app.environment.FUKULOW_SEARCH_ENGINE, 'disabled')
-    assert.ok(!Object.values(app.environment).some(value => String(value).includes(env.POSTGRES_PASSWORD)))
-    assert.equal(app.environment.POSTGRES_APP_PASSWORD, undefined)
-    assert.equal(app.environment.POSTGRES_PASSWORD, undefined)
-    assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
-    assert.deepEqual(Object.keys(migrate.networks), ['backend'])
-    assert.equal(migrate.environment.DATABASE_URL, `postgres://fukulow:${env.POSTGRES_PASSWORD}@db:5432/fukulow`)
-    assert.equal(migrate.depends_on.db.condition, 'service_healthy')
-    assert.deepEqual(migrate.entrypoint, ['fukulow-server', 'migrate'])
-    assert.deepEqual(migrate.command, [])
-    assert.equal(migrate.restart, 'no')
-  }
-})
-
-test('leftover external database URLs block bundled startup for either proxy', () => {
-  const checkHealth = (db: { healthcheck: { test: string[] } }) => {
-    const [mode, command] = db.healthcheck.test
-    assert.equal(mode, 'CMD-SHELL')
-    return spawnSync('/bin/sh', ['-c', `pg_isready() { return 0; }; ${command}`], { encoding: 'utf8' })
-  }
-  const leftoverUrl = 'postgres://user:leftover-db-test-only@postgres.example.test/chat'
-  for (const profile of ['caddy', 'nginx']) {
-    const bundled = JSON.parse(execFileSync('docker', args(profile), { cwd, env, encoding: 'utf8' }))
-    assert.equal(checkHealth(bundled.services.db).status, 0)
-    for (const [urlKey, passwordKey] of [
-      ['FUKULOW_APP_DATABASE_URL', 'POSTGRES_APP_PASSWORD'],
-      ['FUKULOW_MIGRATE_DATABASE_URL', 'POSTGRES_PASSWORD'],
-    ] as const) {
-      for (const password of [env[passwordKey], undefined, '']) {
-        const result = spawnSync('docker', args(profile), {
-          cwd, env: { ...env, [urlKey]: leftoverUrl, [passwordKey]: password }, encoding: 'utf8',
-        })
-        if (result.status !== 0) {
-          assert.match(result.stderr, new RegExp(`${urlKey}|${passwordKey}`))
-          continue
-        }
-        const { app, db, migrate } = JSON.parse(result.stdout).services
-        assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
-        assert.equal(migrate.depends_on.db.condition, 'service_healthy')
-        assert.ok(!JSON.stringify(db).includes('leftover-db-test-only'))
-        const health = checkHealth(db)
-        assert.equal(health.status, 1)
-        assert.match(health.stderr, new RegExp(urlKey))
-      }
-    }
-  }
-})
-
-test('external PostgreSQL removes bundled resources and requires separate URLs for either proxy', () => {
-  const externalEnv = {
-    PATH: env.PATH, COMPOSE_PROJECT_NAME: env.COMPOSE_PROJECT_NAME, FUKULOW_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN, FUKULOW_VERSION: env.FUKULOW_VERSION,
-    FUKULOW_APP_DATABASE_URL: 'postgres://fukulow_app:external-app-test-only@postgres.example.test:1532/chat?sslmode=verify-full',
-    FUKULOW_MIGRATE_DATABASE_URL: 'postgres://owner:external-owner-test-only@postgres.example.test:1532/chat?sslmode=verify-full',
-  }
-  for (const profile of ['caddy', 'nginx']) {
-    const { services, volumes } = JSON.parse(execFileSync('docker', args(profile, true), { cwd, env: externalEnv, encoding: 'utf8' }))
-    assert.deepEqual(Object.keys(services).sort(), ['app', 'migrate', profile].sort())
-    assert.equal(volumes.postgres_data, undefined)
-    const { app, migrate } = services
-    assert.equal(app.environment.DATABASE_URL, externalEnv.FUKULOW_APP_DATABASE_URL)
-    assert.equal(app.environment.FUKULOW_SEARCH_ENGINE, 'disabled')
-    assert.equal(migrate.environment.DATABASE_URL, externalEnv.FUKULOW_MIGRATE_DATABASE_URL)
-    assert.equal(migrate.depends_on, undefined)
-    assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
-    for (const [service, forbidden] of [[app, 'external-owner-test-only'], [migrate, 'external-app-test-only']] as const) {
-      assert.ok(!Object.values(service.environment).some(value => String(value).includes(forbidden)))
-      assert.equal(service.environment.POSTGRES_PASSWORD, undefined)
-      assert.equal(service.environment.POSTGRES_APP_PASSWORD, undefined)
-      assert.equal(service.environment.PGSSLMODE, 'verify-full')
-      assert.equal(service.ports, undefined)
-      checkRestrictions(service)
-    }
-    for (const key of ['FUKULOW_APP_DATABASE_URL', 'FUKULOW_MIGRATE_DATABASE_URL']) {
-      for (const url of [undefined, '']) {
-        const result = spawnSync('docker', args(profile, true), { cwd, env: { ...env, ...externalEnv, [key]: url }, encoding: 'utf8' })
-        assert.notEqual(result.status, 0)
-        assert.ok(result.stderr.includes(key))
-      }
-    }
-  }
-})
-
-test('the disposable load stack also separates owner migrations from app credentials', () => {
-  const loadEnv = { PATH: process.env.PATH, LOAD_PROJECT: 'roles-config-test', LOAD_PORT: '18194',
-    LOAD_DB_PASSWORD: 'load-owner-config-test-only', LOAD_APP_PASSWORD: 'load-app-config-test-only',
-    LOAD_SETUP_TOKEN: 'load-setup-config-test-only' }
-  const loadArgs = ['compose', '--env-file', '/dev/null', '-f', 'load/compose.yml', 'config', '--format', 'json']
-  const { services: { app, migrate } } = JSON.parse(execFileSync('docker', loadArgs, { cwd, env: loadEnv, encoding: 'utf8' }))
-  assert.equal(app.environment.DATABASE_URL, `postgres://fukulow_app:${loadEnv.LOAD_APP_PASSWORD}@db:5432/fukulow`)
-  assert.equal(migrate.environment.DATABASE_URL, `postgres://fukulow:${loadEnv.LOAD_DB_PASSWORD}@db:5432/fukulow`)
-  assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
-  const result = spawnSync('docker', loadArgs, { cwd, env: { ...loadEnv, LOAD_APP_PASSWORD: undefined }, encoding: 'utf8' })
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /LOAD_APP_PASSWORD/)
-})
-
-test('the send limit keeps the production default unless the environment overrides it', () => {
-  const unset = JSON.parse(execFileSync('docker', args('caddy'), { cwd, env, encoding: 'utf8' })).services.app
-  assert.equal(String(unset.environment.FUKULOW_SEND_BURST), '10')
-  assert.equal(String(unset.environment.FUKULOW_SEND_REFILL_PER_SECOND), '1')
-  const raised = JSON.parse(execFileSync('docker', args('caddy'), { cwd, env: { ...env, FUKULOW_SEND_BURST: '10000', FUKULOW_SEND_REFILL_PER_SECOND: '1000' }, encoding: 'utf8' })).services.app
-  assert.equal(String(raised.environment.FUKULOW_SEND_BURST), '10000')
-  assert.equal(String(raised.environment.FUKULOW_SEND_REFILL_PER_SECOND), '1000')
-})
-
-test('both profiles isolate the database and trust only the fixed proxy IP, including custom prefixes', () => {
-  for (const profile of ['caddy', 'nginx']) {
-    for (const prefix of ['172.30.94', '172.29.193']) {
-      const config = JSON.parse(execFileSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_EDGE_PREFIX: prefix }, encoding: 'utf8' }))
-      const { app, db } = config.services
-      assert.equal(app.ports, undefined)
-      assert.deepEqual(Object.keys(app.networks).sort(), ['backend', 'edge'])
-      assert.equal(app.networks.edge.ipv4_address, `${prefix}.3`)
-      assert.deepEqual(Object.keys(db.networks), ['backend'])
-      assert.equal(db.ports, undefined)
-      assert.deepEqual(Object.keys(config.services[profile].networks), ['edge'])
-      assert.equal(config.services[profile].networks.edge.ipv4_address, `${prefix}.2`)
-      assert.equal(app.environment.FUKULOW_TRUSTED_PROXIES, `${prefix}.2`)
-      assert.equal(app.environment.FUKULOW_CLIENT_IP_HEADER, 'x-forwarded-for')
-      assert.deepEqual(config.networks.edge.ipam.config, [{ subnet: `${prefix}.0/29`, gateway: `${prefix}.1`, ip_range: `${prefix}.4/30` }])
-    }
-  }
-})
-
 function checkNginxTLS(service: any) {
   assert.deepEqual(service.ports.map((port: any) => port.target).sort((a: number, b: number) => a - b), [80, 443])
   assert.equal(service.environment.FUKULOW_DOMAIN, 'localhost')
@@ -682,20 +396,6 @@ test('both proxy configs retain HTTP-01 routing, TLS, API compression exclusions
     for (const fragment of fragments) {
       assert.ok(config.includes(fragment), fragment)
       assert.throws(() => checkProxyHeaders(profile, config.replace(fragment, '')), /unsupported proxy/)
-    }
-  }
-})
-
-test('app pool settings forward defaults, overrides and invalid empty values only to app', () => {
-  for (const profile of ['caddy', 'nginx']) {
-    for (const overrides of [{}, { FUKULOW_DB_MAX_CONNECTIONS: '3', FUKULOW_DB_ACQUIRE_TIMEOUT_MS: '250' },
-      { FUKULOW_DB_MAX_CONNECTIONS: '', FUKULOW_DB_ACQUIRE_TIMEOUT_MS: '' }]) {
-      const config = JSON.parse(execFileSync('docker', args(profile),
-        { cwd, env: { ...env, ...overrides }, encoding: 'utf8' }))
-      for (const [name, fallback] of [['FUKULOW_DB_MAX_CONNECTIONS', '20'], ['FUKULOW_DB_ACQUIRE_TIMEOUT_MS', '5000']]) {
-        assert.equal(config.services.app.environment[name], overrides[name as keyof typeof overrides] ?? fallback)
-        assert.equal(config.services.migrate.environment[name], undefined)
-      }
     }
   }
 })
