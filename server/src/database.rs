@@ -71,7 +71,12 @@ pub async fn read_only<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    transaction(pool, true, Discard::Close, |_| false, body).await
+    transaction(pool, Access::Snapshot, Discard::Close, |_| false, body).await
+}
+
+enum Access {
+    ReadWrite,
+    Snapshot,
 }
 
 enum Discard {
@@ -81,7 +86,7 @@ enum Discard {
 
 async fn transaction<T, E>(
     pool: &PgPool,
-    read_only: bool,
+    access: Access,
     discard: Discard,
     confirm_rollback: fn(&E) -> bool,
     body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
@@ -101,16 +106,15 @@ where
     // rollback-on-drop cannot recover a BEGIN cancelled before that response.
     sqlx::Executor::execute(
         &mut **connection,
-        if read_only {
-            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
-        } else {
-            "BEGIN"
+        match access {
+            Access::Snapshot => "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            Access::ReadWrite => "BEGIN",
         },
     )
     .await?;
     let result = body(connection).await;
     // Read snapshots always roll back; writes commit only a successful body.
-    let end = if !read_only && result.is_ok() {
+    let end = if matches!(access, Access::ReadWrite) && result.is_ok() {
         "COMMIT"
     } else {
         "ROLLBACK"
