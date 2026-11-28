@@ -9,6 +9,13 @@ import { createSession } from './session'
 import { UNREAD_RECORD_LIMIT, unreadApi } from './unread'
 import { deferred, http, msg, ok, row } from './unread-test-helpers'
 
+vi.mock('./protocol-types', async importOriginal => ({
+  ...await importOriginal<typeof import('./protocol-types')>(),
+  // The notice needs an actual eviction, independent of the production window sizes.
+  MAIN_MESSAGE_LIMIT: 4,
+  TOPIC_MESSAGE_LIMIT: 3,
+}))
+
 const id = 'A'
 const message = { ...msg(1), mentions: [{ member_id: 'me', name: 'Reader' }] }
 const generation = message.history_generation
