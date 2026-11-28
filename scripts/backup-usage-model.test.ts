@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { accountUsage, type UsageState } from './backup-usage-model.ts'
 import { decodeState } from './backup-checker-state.ts'
+import { randomUUID } from 'node:crypto'
+import { now } from './backup-r2-test-helpers.ts'
 
 const day = 86_400_000
 const payload = { data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [
@@ -100,4 +102,37 @@ test('an empty today counts as zero at the first run after UTC midnight', async 
   const emptyAfterUsage = accountUsage({ async query(request) {
     return request.variables.start === '2026-11-19T00:00:00.000Z' ? empty : payload } }, 'test-only')
   await assert.rejects(emptyAfterUsage.read(Date.UTC(2026, 10, 20, 0, 0, 5), { usageCache: structuredClone(cached) }), /unavailable/)
+})
+
+test('account analytics sums the whole month across actions without a bucket filter, unclassified actions as Class A', async () => {
+  const requests: { query: string; variables: Record<string, string> }[] = []
+  const account = randomUUID()
+  const client = accountUsage({ query: async r => {
+    requests.push(r)
+    return { data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [
+      { dimensions: { actionType: 'PutObject' }, sum: { requests: 350_000 } },
+      { dimensions: { actionType: 'ListObjectsV2' }, sum: { requests: 1 } },
+      { dimensions: { actionType: 'GetObject' }, sum: { requests: 3_500_000 } },
+      { dimensions: { actionType: 'DeleteObject' }, sum: { requests: 100 } },
+      { dimensions: { actionType: 'GetBucketSippyConfiguration' }, sum: { requests: 2 } },
+      { dimensions: { actionType: 'GetBucketEncryption' }, sum: { requests: 5 } },
+      { dimensions: { actionType: 'DeleteObjects' }, sum: { requests: 3 } },
+    ] }] } } }
+  } }, account)
+  assert.deepEqual(await client.read(now + day), { classA: 700_012, classB: 7_000_010 })
+  assert.equal(requests.length, 2)
+  assert.ok(requests.every(r => r.variables.account === account && !r.query.includes('bucket')))
+  assert.ok(requests.every(r => !r.query.includes('groupBy') && /dimensions \{ actionType \}/.test(r.query)))
+  assert.equal(requests[0].variables.start, '2026-11-01T00:00:00.000Z')
+  assert.equal(requests[1].variables.end, '2026-11-03T00:00:00.000Z')
+})
+
+test('failed incomplete capped and unnamed analytics are unavailable instead of zero', async () => {
+  const group = { dimensions: { actionType: 'GetObject' }, sum: { requests: 1 } }
+  for (const payload of [null, {}, { errors: [{ message: 'PRIVATE_SENTINEL' }] },
+    ...[[], [{ ...group, sum: { requests: -1 } }], [{ ...group, sum: { requests: 0.5 } }],
+      [{ ...group, dimensions: { actionType: '' } }], [group, group], Array(1000).fill(group)].map(groups => ({ data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: groups }] } } }))]) {
+    await assert.rejects(accountUsage({ query: async () => payload }, randomUUID()).read(now), { message: 'Account operation usage unavailable' })
+  }
+  await assert.rejects(accountUsage({ query: async () => { throw new Error('PRIVATE_SENTINEL') } }, randomUUID()).read(now), { message: 'Account operation usage unavailable' })
 })
