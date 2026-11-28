@@ -1,5 +1,5 @@
 {
-  "sha256": "62bdbd1bbc8ea7c8bd60d2db8afdedd0970ffc91cb3ed69cfd6f159ea801ad0d",
+  "sha256": "0c24429cd47de7413941f471c178282283d4a4c38fa2db558eebe5459314cb2a",
   "frozen": {
     "version": 20,
     "experiment": "#689 item 4c Phase A",
@@ -313,11 +313,11 @@
       },
       {
         "path": "load/launcher/launcher.ts",
-        "sha256": "d4be9eee7058a6aa29bb4f9c6e78c98bf685a7d1d3c40120c4dc1ff6596eb63c"
+        "sha256": "6b952dc404c53d67df9bcaa9329e1b4b0a3b1939042361d7af73545ffb5782f0"
       },
       {
         "path": "load/launcher/platform.ts",
-        "sha256": "919b9f9863d72b184c6861858d1f0f6e4e3af9f1f7bee34b9f17880a09e4da91"
+        "sha256": "ae735de37e52b603fb81a3104dc671b3c06b21b2d0f02fa5769e44cf491b0b3d"
       },
       {
         "path": "load/launcher/queue.ts",
@@ -529,7 +529,7 @@
       },
       {
         "path": "load/search-engines/d3r-leak/manifest.ts",
-        "sha256": "6f747dca30a3f23b330eeed0294db3162606fcfadf2deb4a0c71f1541d9163bd"
+        "sha256": "7f11894b65cd62a6d837fb75a0018c0998f8b31977bfed6765ed6beb952c495d"
       },
       {
         "path": "load/search-engines/d3r-leak/samples.ts",
