@@ -40,7 +40,6 @@ fn watch(core: &mut Core, channel: Uuid) {
 
 fn observe(
     core: &mut Core,
-    channel: Option<Uuid>,
     issue: Option<Token>,
     lifetime: AccessLifetime,
     result: HistoryObservation,
@@ -48,7 +47,6 @@ fn observe(
     step(
         core,
         Input::ObserveHistoryGeneration {
-            channel,
             issue,
             lifetime,
             result,
@@ -56,14 +54,8 @@ fn observe(
     )
 }
 
-fn current(core: &mut Core, channel: Option<Uuid>, result: HistoryObservation) -> StepResult {
-    observe(
-        core,
-        channel,
-        core.history_issue(channel),
-        AccessLifetime::Current,
-        result,
-    )
+fn current(core: &mut Core, result: HistoryObservation) -> StepResult {
+    observe(core, core.history_issue(), AccessLifetime::Current, result)
 }
 
 fn generation(value: Uuid) -> HistoryObservation {
@@ -143,17 +135,17 @@ fn only_a_current_generation_or_its_exact_conflict_can_reset_history() {
     ];
     for (known, stale, result, expected) in cases {
         let mut core = started();
-        let issue = core.history_issue(None);
+        let issue = core.history_issue();
         if stale {
-            current(&mut core, None, conflict());
+            current(&mut core, conflict());
         }
         if let Some(known) = known {
-            current(&mut core, None, generation(known));
+            current(&mut core, generation(known));
         }
         let epoch = core.session().history_epoch;
         let before = core.session().history_generation;
         let input = format!("{result:?} with {known:?} and stale={stale}");
-        let out = observe(&mut core, None, issue, AccessLifetime::Current, result);
+        let out = observe(&mut core, issue, AccessLifetime::Current, result);
         assert_eq!(out.history_observation, Some(expected), "{input}");
         assert_eq!(
             core.session().history_epoch,
@@ -172,29 +164,45 @@ fn an_older_prefetched_generation_cannot_supersede_a_known_generation() {
     use HistoryObservationResult::*;
     let mut core = started();
     let prefetched = |generation| HistoryObservation::Prefetched { generation };
-    assert_no_change(&current(&mut core, None, prefetched(Some(OLD))), Accepted);
-    current(&mut core, None, generation(NEW));
+    assert_no_change(&current(&mut core, prefetched(Some(OLD))), Accepted);
+    current(&mut core, generation(NEW));
     for late in [None, Some(OLD)] {
-        assert_no_change(&current(&mut core, None, prefetched(late)), Stale);
+        assert_no_change(&current(&mut core, prefetched(late)), Stale);
     }
-    assert_no_change(&current(&mut core, None, prefetched(Some(NEW))), Accepted);
-    watch(&mut core, A);
-    assert_no_change(&current(&mut core, Some(A), prefetched(Some(NEW))), Stale);
+    assert_no_change(&current(&mut core, prefetched(Some(NEW))), Accepted);
     assert_eq!(core.session().history_generation, Some(NEW));
+}
+
+#[test]
+fn an_ordinary_request_issued_before_session_start_cannot_observe_history() {
+    use HistoryObservationResult::*;
+    let mut core = Core::new(SELF);
+    let issue = core.history_issue();
+    assert_eq!(issue, None);
+    step(&mut core, Input::SessionStart { self_id: SELF });
+    assert_no_change(
+        &observe(&mut core, issue, AccessLifetime::Current, generation(OLD)),
+        Stale,
+    );
+    assert_no_change(
+        &observe(&mut core, issue, AccessLifetime::Current, conflict()),
+        Ignored,
+    );
+    assert_eq!(core.session().history_generation, None);
 }
 
 #[test]
 fn stale_issue_cannot_roll_back_a_generation_or_apply_a_conflict() {
     use HistoryObservationResult::*;
     let mut core = started();
-    current(&mut core, None, generation(OLD));
-    let issue = core.history_issue(None);
+    current(&mut core, generation(OLD));
+    let issue = core.history_issue();
     assert_eq!(
-        current(&mut core, None, generation(NEW)).history_observation,
+        current(&mut core, generation(NEW)).history_observation,
         Some(Reset)
     );
     for (result, expected) in [(generation(OLD), Stale), (conflict(), Ignored)] {
-        let out = observe(&mut core, None, issue, AccessLifetime::Current, result);
+        let out = observe(&mut core, issue, AccessLifetime::Current, result);
         assert_no_change(&out, expected);
     }
     assert_eq!(core.session().history_generation, Some(NEW));
@@ -202,114 +210,21 @@ fn stale_issue_cannot_roll_back_a_generation_or_apply_a_conflict() {
 }
 
 #[test]
-fn a_channel_observation_only_restarts_its_own_channel() {
-    use HistoryObservationResult::*;
-    let mut core = started();
-    watch(&mut core, A);
-    watch(&mut core, B);
-    let issue = core.history_issue(Some(A));
-    let connection = core.session().connection;
-    assert_eq!(
-        current(&mut core, Some(A), generation(OLD)).history_observation,
-        Some(Accepted)
-    );
-    let out = current(&mut core, Some(A), generation(NEW));
-    assert_eq!(out.history_observation, Some(Reset));
-    assert_eq!(out.changed_channels, [A]);
-    assert!(matches!(
-        out.effects.as_slice(),
-        [Effect::FetchHistory { channel: A, .. }]
-    ));
-    assert_eq!(core.channel(A).unwrap().cursor, None);
-    assert_eq!(core.channel(B).unwrap().cursor, Some(10));
-    assert_eq!(core.session().history_generation, Some(OLD));
-    assert_eq!(core.session().history_epoch, 0);
-    assert_eq!(core.session().connection, connection);
-    assert_no_change(
-        &observe(
-            &mut core,
-            Some(A),
-            issue,
-            AccessLifetime::Current,
-            generation(OLD),
-        ),
-        Stale,
-    );
-    assert_no_change(&current(&mut core, Some(A), generation(NEW)), Accepted);
-    let out = current(&mut core, Some(A), conflict());
-    assert_eq!(out.history_observation, Some(Reset));
-    assert_eq!(out.changed_channels, [A]);
-    assert_eq!(core.channel(B).unwrap().cursor, Some(10));
-    assert_eq!(core.session().connection, connection);
-    assert_no_change(&current(&mut core, Some(A), generation(OLD)), Accepted);
-}
-
-#[test]
-fn an_issue_cannot_observe_a_different_scope_or_an_unavailable_channel() {
-    use HistoryObservationResult::*;
-    let mut core = started();
-    watch(&mut core, A);
-    watch(&mut core, B);
-    let organization = core.history_issue(None);
-    let a = core.history_issue(Some(A));
-    for (scope, issue) in [
-        (Some(A), organization),
-        (Some(B), a),
-        (None, a),
-        (Some(SELF), None),
-    ] {
-        assert_no_change(
-            &observe(
-                &mut core,
-                scope,
-                issue,
-                AccessLifetime::Current,
-                generation(NEW),
-            ),
-            Stale,
-        );
-        assert_no_change(
-            &observe(&mut core, scope, issue, AccessLifetime::Current, conflict()),
-            Ignored,
-        );
-    }
-    step(&mut core, Input::Unwatch { channel: A });
-    assert_no_change(
-        &observe(&mut core, Some(A), a, AccessLifetime::Current, conflict()),
-        Ignored,
-    );
-    step(&mut core, Input::Watch { channel: A });
-    assert_no_change(
-        &observe(&mut core, Some(A), a, AccessLifetime::Current, conflict()),
-        Ignored,
-    );
-    let a = core.history_issue(Some(A));
-    step(&mut core, Input::ChannelUnavailable { channel: A });
-    assert_no_change(
-        &observe(&mut core, Some(A), a, AccessLifetime::Current, conflict()),
-        Ignored,
-    );
-}
-
-#[test]
 fn noncurrent_lifetimes_deny_generation_observation() {
     use HistoryObservationResult::*;
     let mut core = started();
     watch(&mut core, A);
-    let issue = core.history_issue(None);
+    let issue = core.history_issue();
     for lifetime in [
         AccessLifetime::StaleRequest,
         AccessLifetime::RetiredOrganization,
         AccessLifetime::ReplacedSession,
     ] {
         assert_no_change(
-            &observe(&mut core, None, issue, lifetime, generation(NEW)),
+            &observe(&mut core, issue, lifetime, generation(NEW)),
             Ignored,
         );
-        assert_no_change(
-            &observe(&mut core, None, issue, lifetime, conflict()),
-            Ignored,
-        );
+        assert_no_change(&observe(&mut core, issue, lifetime, conflict()), Ignored);
     }
 }
 
@@ -318,16 +233,15 @@ fn stopped_organization_and_replaced_session_fence_issued_observations() {
     use HistoryObservationResult::*;
     let mut core = started();
     watch(&mut core, A);
-    let issue = core.history_issue(None);
+    let issue = core.history_issue();
     step(&mut core, Input::OrganizationUnavailable);
     assert_no_change(
-        &observe(&mut core, None, issue, AccessLifetime::Current, conflict()),
+        &observe(&mut core, issue, AccessLifetime::Current, conflict()),
         Ignored,
     );
     assert_no_change(
         &current(
             &mut core,
-            None,
             HistoryObservation::Prefetched {
                 generation: Some(OLD),
             },
@@ -336,13 +250,7 @@ fn stopped_organization_and_replaced_session_fence_issued_observations() {
     );
     step(&mut core, Input::SessionReplaced { self_id: SELF });
     assert_no_change(
-        &observe(
-            &mut core,
-            None,
-            issue,
-            AccessLifetime::Current,
-            generation(NEW),
-        ),
+        &observe(&mut core, issue, AccessLifetime::Current, generation(NEW)),
         Stale,
     );
 }
@@ -350,7 +258,7 @@ fn stopped_organization_and_replaced_session_fence_issued_observations() {
 #[test]
 fn an_ordinary_reconnect_preserves_the_organization_issue() {
     let mut core = started();
-    let issue = core.history_issue(None);
+    let issue = core.history_issue();
     let connection = core.session().connection.unwrap();
     step(&mut core, Input::ConnectionReady { connection });
     let closed = step(
@@ -365,18 +273,42 @@ fn an_ordinary_reconnect_preserves_the_organization_issue() {
     };
     step(&mut core, Input::TimerElapsed { id: *id });
     assert_ne!(core.session().connection, Some(connection));
-    assert_eq!(core.history_issue(None), issue);
-    let out = observe(
-        &mut core,
-        None,
-        issue,
-        AccessLifetime::Current,
-        generation(NEW),
-    );
+    assert_eq!(core.history_issue(), issue);
+    let out = observe(&mut core, issue, AccessLifetime::Current, generation(NEW));
     assert_eq!(
         out.history_observation,
         Some(HistoryObservationResult::Accepted)
     );
+}
+
+#[test]
+fn organization_conflict_restarts_watched_channels_and_clears_inactive_history() {
+    let mut core = started();
+    watch(&mut core, A);
+    watch(&mut core, B);
+    step(&mut core, Input::Unwatch { channel: B });
+    assert_eq!(core.channel(B).unwrap().cursor, Some(10));
+    let issue = core.history_issue();
+
+    let out = current(&mut core, conflict());
+
+    assert_eq!(
+        out.history_observation,
+        Some(HistoryObservationResult::Reset)
+    );
+    assert_eq!(out.changed_channels, [A, B]);
+    assert!(matches!(
+        out.effects.as_slice(),
+        [
+            Effect::Connect { .. },
+            Effect::FetchHistory { channel: A, .. }
+        ]
+    ));
+    assert_eq!(core.channel(A).unwrap().cursor, None);
+    assert_eq!(core.channel(B).unwrap().cursor, None);
+    assert_eq!(core.session().history_generation, None);
+    assert_eq!(core.session().history_epoch, 1);
+    assert_ne!(core.history_issue(), issue);
 }
 
 #[test]
@@ -400,7 +332,7 @@ fn organization_observation_restarts_all_channels_and_keeps_late_401_authoritati
     let [Effect::Send { id, .. }] = send.effects.as_slice() else {
         panic!("expected a send, got {:?}", send.effects);
     };
-    let out = current(&mut core, None, generation(NEW));
+    let out = current(&mut core, generation(NEW));
     assert_eq!(
         out.history_observation,
         Some(HistoryObservationResult::Reset)
@@ -416,6 +348,9 @@ fn organization_observation_restarts_all_channels_and_keeps_late_401_authoritati
             Effect::FetchHistory { channel: B, .. }
         ]
     ));
+    assert_eq!(core.channel(A).unwrap().cursor, None);
+    assert_eq!(core.channel(B).unwrap().cursor, None);
+    assert_eq!(core.session().history_generation, Some(NEW));
     assert_eq!(
         core.channel(B).unwrap().pending[0].state,
         PendingState::Unknown

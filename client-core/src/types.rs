@@ -281,7 +281,6 @@ pub enum Input {
         generation: Option<Uuid>,
     },
     ObserveHistoryGeneration {
-        channel: Option<Uuid>,
         issue: Option<Token>,
         lifetime: AccessLifetime,
         result: HistoryObservation,

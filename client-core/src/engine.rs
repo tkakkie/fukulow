@@ -1,4 +1,4 @@
-use crate::{history_generation::ChannelHistory, *};
+use crate::*;
 use std::rc::Rc;
 
 pub(crate) struct Step<'a> {
@@ -47,7 +47,6 @@ impl<'a> Step<'a> {
         }
         self.core.channels.clear();
         self.core.channel_order.clear();
-        self.core.channel_history.clear();
     }
     pub fn cancel(&mut self, id: Option<Token>) {
         if let Some(id) = id
@@ -173,7 +172,6 @@ impl<'a> Step<'a> {
         }
     }
     fn clear_channel_history(&mut self, id: Uuid) {
-        self.core.channel_history.remove(&id);
         let old = self.channel(id).clone();
         if old.subscription.is_some() && self.core.session.connected {
             self.out.effects.push(Effect::Unsubscribe { channel: id });
@@ -191,12 +189,9 @@ impl<'a> Step<'a> {
             ..ChannelView::default()
         };
     }
-    pub(super) fn restart_channel_history(&mut self, id: Uuid, generation: Option<Uuid>) {
+    pub(super) fn restart_channel_history(&mut self, id: Uuid) {
         self.clear_channel_history(id);
         self.history(id, Page::Latest, None);
-        if let Some(history) = self.core.channel_history.get_mut(&id) {
-            history.generation = generation;
-        }
     }
     pub fn subscribe(&mut self, id: Uuid) {
         let connected = self.core.session.connected;
@@ -237,15 +232,6 @@ impl<'a> Step<'a> {
             return;
         }
         let n = self.token();
-        if self.channel(id).watched {
-            self.core
-                .channel_history
-                .entry(id)
-                .or_insert(ChannelHistory {
-                    issue: n,
-                    generation: None,
-                });
-        }
         let c = self.channel(id);
         match page {
             Page::Latest => c.latest = Some(n),
@@ -333,7 +319,6 @@ impl<'a> Step<'a> {
         c.subscription = None;
         c.state = Availability::Unavailable;
         c.pending = pending;
-        self.core.channel_history.remove(&id);
         for r in self.core.requests.values_mut() {
             if r.channel() == id && matches!(r, Request::Send { .. }) {
                 r.invalidate();

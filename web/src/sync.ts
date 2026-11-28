@@ -492,9 +492,9 @@ export function createSync(options: SyncOptions) {
     unwatch: (channel: string) => dispatch({ type: 'unwatch', channel }),
     close: () => dispatch({ type: 'stop' }),
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
-    historyIssue: (channel?: string) => core.historyIssue(channel),
-    observeHistoryResult(result: HistoryObservation, issue: number | undefined, lifetime: AccessLifetime, channel?: string) {
-      return dispatchObservation({ type: 'observe_history_generation', channel, issue, lifetime, result })
+    historyIssue: () => core.historyIssue(),
+    observeHistoryResult(result: HistoryObservation, issue: number | undefined, lifetime: AccessLifetime) {
+      return dispatchObservation({ type: 'observe_history_generation', issue, lifetime, result })
     },
     observeHistoryGeneration(generation?: string) {
       return dispatchObservation({ type: 'history_generation', generation }) !== 'reset'

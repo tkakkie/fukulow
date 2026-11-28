@@ -69,6 +69,25 @@ it('a stale Channel list cannot install rows across a history reset', async () =
   }
 })
 
+it('a Channel list conflict from a replaced Account Session cannot reset history', async () => {
+  const net = fakeNetwork()
+  const account = new AbortController()
+  const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options(), accountSignal: account.signal })
+  try {
+    session.sync.observeHistoryGeneration(previous)
+    await settle()
+    expect(net.lists).toHaveLength(1)
+    const socket = net.socket
+    account.abort()
+    net.lists[0].resolve({ ok: false, kind: 'http', status: 409, error: 'history_generation_changed' })
+    await settle()
+    expect(session.sync.get()).toMatchObject({ running: true, historyGeneration: previous, historyEpoch: 0 })
+    expect(net.socket).toBe(socket)
+  } finally {
+    session.close()
+  }
+})
+
 it('a current send generation conflict resets history and reaches sync as stale', async () => {
   const net = fakeNetwork()
   const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options() })

@@ -89,7 +89,7 @@ export type Effect =
 export type Input = (
   | { type: 'session_start' | 'session_replaced'; selfId: string }
   | { type: 'history_generation'; generation?: string }
-  | { type: 'observe_history_generation'; channel?: string; issue?: number; lifetime: AccessLifetime; result: HistoryObservation }
+  | { type: 'observe_history_generation'; issue?: number; lifetime: AccessLifetime; result: HistoryObservation }
   | { type: 'stop' | 'organization_unavailable' }
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
@@ -123,7 +123,7 @@ export interface SyncCore {
   request(id: number): Request | undefined
   timer(id: number): Timer | undefined
   hasPending(): boolean
-  historyIssue(channel?: string): number | undefined
+  historyIssue(): number | undefined
   subscribeIssued(connection: number, channel: string, id: number): void
   step(input: Input): CoreResult
 }

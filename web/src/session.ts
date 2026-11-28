@@ -95,12 +95,12 @@ export function createSession(options: SessionOptions) {
     } else if (outcome === 'organization_unavailable') terminate()
   }
   const observeResponse = async <T>(run: () => Promise<api.Result<T>>, report?: typeof reportAccess): Promise<api.Result<T>> => {
-    // The wire generation is Organization-wide, including on Channel endpoints.
     const issue = history?.historyIssue()
     const result = await run()
     report?.(result)
     const decision = history?.observeHistoryResult(api.historyObservation(result), issue, accessLifetime())
     if (decision === 'stale' || decision === 'reset') return { ok: false, kind: 'network' }
+    // Retired controllers fence their own completions, so preserve the original HTTP outcome.
     return result
   }
   const observe = <T>(run: () => Promise<api.Result<T>>) => observeResponse(run, reportAccess)

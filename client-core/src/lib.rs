@@ -36,7 +36,6 @@ pub struct Core {
     socket_replies: socket_replies::SocketReplies,
     membership_probe_pending: bool,
     organization_history_issue: Option<Token>,
-    channel_history: BTreeMap<Uuid, history_generation::ChannelHistory>,
 }
 impl Core {
     pub fn new(self_id: Uuid) -> Self {
@@ -62,7 +61,6 @@ impl Core {
             socket_replies: socket_replies::SocketReplies::default(),
             membership_probe_pending: false,
             organization_history_issue: None,
-            channel_history: BTreeMap::new(),
         }
     }
     pub fn session(&self) -> &SessionView {

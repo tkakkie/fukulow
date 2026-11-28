@@ -1,8 +1,5 @@
 use crate::{
-    engine::Step,
-    history_generation::{ChannelHistory, is_generation_conflict},
-    merge::Source,
-    socket_replies::Route,
+    engine::Step, history_generation::is_generation_conflict, merge::Source, socket_replies::Route,
     *,
 };
 use fukulow_api::ServerEvent;
@@ -37,12 +34,11 @@ impl Step<'_> {
             }
             Input::OrganizationUnavailable => self.organization_unavailable(),
             Input::ObserveHistoryGeneration {
-                channel,
                 issue,
                 lifetime,
                 result,
             } => {
-                let decision = self.observe_history_generation(channel, issue, lifetime, result);
+                let decision = self.observe_history_generation(issue, lifetime, result);
                 // A non-reset observation only reads or updates generation metadata.
                 self.direct = decision != HistoryObservationResult::Reset;
                 self.out.history_observation = Some(decision);
@@ -65,7 +61,6 @@ impl Step<'_> {
             return;
         }
         self.teardown();
-        self.core.channel_history.clear();
         self.core.session.organization = Organization::Unavailable;
         for id in self.ids() {
             let c = self.channel(id);
@@ -157,13 +152,6 @@ impl Step<'_> {
                 }
                 let needs_history = c.cursor.is_none();
                 let empty = c.messages.is_empty();
-                self.core.channel_history.insert(
-                    id,
-                    ChannelHistory {
-                        issue: n,
-                        generation: None,
-                    },
-                );
                 if needs_history {
                     self.history(id, Page::Latest, None);
                 } else {
@@ -186,7 +174,6 @@ impl Step<'_> {
                 c.watched = false;
                 c.subscription = None;
                 c.last_used = Some(n);
-                self.core.channel_history.remove(&id);
                 self.invalidate(id, false);
             }
             Input::Refresh { channel: id } => {
@@ -424,7 +411,7 @@ impl Step<'_> {
                     return;
                 }
                 if caught_up_seq < sub.after {
-                    self.restart_channel_history(id, None);
+                    self.restart_channel_history(id);
                 } else {
                     let c = self.channel(id);
                     if !sub.confirmed || sub.watermark != caught_up_seq {

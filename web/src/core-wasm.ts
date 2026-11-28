@@ -78,7 +78,7 @@ export function createCore(selfId: string): SyncCore {
     request: id => read<ReturnType<SyncCore['request']>>(core.request(id)) ?? undefined,
     timer: id => read<ReturnType<SyncCore['timer']>>(core.timer(id)) ?? undefined,
     hasPending: () => core.hasPending(),
-    historyIssue: channel => core.historyIssue(channel === undefined ? undefined : coreId(channel)),
+    historyIssue: () => core.historyIssue(),
     subscribeIssued: (connection, channel, id) => core.subscribeIssued(connection, coreId(channel), id),
     step(input: Input): CoreResult {
       const out = read<Delta>(core.step(JSON.stringify(coreInput(input))))
