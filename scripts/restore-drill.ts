@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import { closeSync, openSync, readFileSync } from 'node:fs'
+import { accessSync, closeSync, constants, openSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { docker } from './backup.ts'
 import { diagnostic, safeFailure, type Stage } from './backup-safety.ts'
+import { psql, run } from './compose-harness.ts'
+
+const repositoryRoot = fileURLToPath(new URL('../', import.meta.url))
 
 // Read only the tracked file: invoking Compose here could load deployment secrets.
 export function postgresImageFromCompose(compose = readFileSync(new URL('../compose.yml', import.meta.url), 'utf8')): string {
@@ -15,6 +17,10 @@ export function postgresImageFromCompose(compose = readFileSync(new URL('../comp
 }
 
 export function restoreDrill(archive: string): void {
+  const env = { ...process.env }
+  delete env.DATABASE_URL
+  const dockerOptions = { cwd: repositoryRoot, env }
+  const quiet = { ...dockerOptions, captureOutput: false }
   let stage: Stage = 'image'
   const started = performance.now()
   const name = `fukulow-restore-drill-${randomUUID()}`
@@ -23,26 +29,39 @@ export function restoreDrill(archive: string): void {
     const image = postgresImageFromCompose()
     stage = 'start'
     // No Compose, host ports, bind mounts, shared volumes or production connection string.
-    docker(['run', '-d', '--name', name, '--network', 'none', '--tmpfs', '/var/lib/postgresql',
+    run('docker', ['run', '-d', '--name', name, '--network', 'none', '--tmpfs', '/var/lib/postgresql',
       '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_USER=fukulow',
-      '-e', 'POSTGRES_DB=fukulow', image])
+      '-e', 'POSTGRES_DB=fukulow', image], quiet)
     created = true
     stage = 'ready'
     const exec = ['exec', '-i', name]
     let ready = false
     for (let attempt = 0; attempt < 60; attempt++) {
       try {
-        docker([...exec, 'pg_isready', '-U', 'fukulow', '-d', 'fukulow'])
+        run('docker', [...exec, 'pg_isready', '-U', 'fukulow', '-d', 'fukulow'], quiet)
         // The entrypoint also briefly runs a temporary server. Wait for the final PID 1.
-        ready = docker([...exec, 'cat', '/proc/1/comm'], 'ignore', 'pipe') === 'postgres'
+        // Keep Docker stderr from exhausting the capture limit during the probe.
+        ready = run('docker', [...exec, 'cat', '/proc/1/comm'], { ...dockerOptions, maxBuffer: Infinity })
+          .stdout.trim() === 'postgres'
       } catch { /* startup still in progress */ }
       if (ready) break
       awaitStartupPause()
     }
     if (!ready) throw new Error('Disposable PostgreSQL did not become ready')
     const readArchive = (args: string[]) => {
-      const input = openSync(archive, 'r')
-      try { docker([...exec, ...args], input) } finally { closeSync(input) }
+      // Preserve the filesystem error code for the stage diagnostic.
+      accessSync(archive, constants.R_OK)
+      // Open relative to the caller and keep archive I/O after the access check in the operation category.
+      try {
+        const input = openSync(archive, 'r')
+        try {
+          run('docker', [...exec, ...args], { ...quiet, stdin: input })
+        } finally {
+          closeSync(input)
+        }
+      } catch {
+        throw new Error('Archive command failed')
+      }
     }
     stage = 'list'
     readArchive(['pg_restore', '--list'])
@@ -50,17 +69,15 @@ export function restoreDrill(archive: string): void {
     readArchive(['pg_restore', '-U', 'fukulow', '-d', 'fukulow', '--exit-on-error',
       '--single-transaction', '--no-owner', '--no-acl'])
     stage = 'sessions'
-    const sessions = openSync(fileURLToPath(new URL('../server/src/auth/end-all-sessions.sql', import.meta.url)), 'r')
-    try {
-      docker([...exec, 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1'], sessions)
-    } finally { closeSync(sessions) }
+    const input = readFileSync(new URL('../server/src/auth/end-all-sessions.sql', import.meta.url))
+    psql(exec, ['-U', 'fukulow', '-d', 'fukulow'], { ...quiet, input })
     stage = 'integrity'
-    docker([...exec, 'pg_amcheck', '-U', 'fukulow', '-d', 'fukulow', '--install-missing', '--heapallindexed'])
+    run('docker', [...exec, 'pg_amcheck', '-U', 'fukulow', '-d', 'fukulow', '--install-missing', '--heapallindexed'], quiet)
     console.log(`Restore drill passed in ${((performance.now() - started) / 1000).toFixed(2)} seconds (startup, restore, session end, heap/index checks; cleanup follows).`)
   } catch (error) {
     throw safeFailure(stage, error)
   } finally {
-    try { if (created) docker(['rm', '-f', '-v', name]) } catch (error) { throw safeFailure('cleanup', error) }
+    try { if (created) run('docker', ['rm', '-f', '-v', name], quiet) } catch (error) { throw safeFailure('cleanup', error) }
   }
 }
 

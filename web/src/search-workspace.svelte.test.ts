@@ -1,3 +1,4 @@
+import { messageTimeline } from './search-main-test-helpers'
 import { flushSync, mount, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
@@ -180,7 +181,7 @@ describe('Workspace search integration (#153)', () => {
     const page = (messages: Message[]) => ok({ history_generation, as_of_seq: 80, messages, has_more: false })
     const read = async (query?: ListMessagesQuery) =>
       page(query?.after_seq === 36 ? [hit] : query?.before_seq === 37 ? [] : [latest])
-    const readMessages = vi.fn((_channel: string, query?: ListMessagesQuery) => read(query))
+    const readTimeline = vi.fn<NonNullable<SessionOptions['topicsApi']>['listTimeline']>()
     const readTopicMessages = vi.fn((_channel: string, _topic: string, query?: ListMessagesQuery) => read(query))
     const searchResult = { channelId: id, topicId, replyRootId, messageId: hit.id, createdSeq: hit.created_seq }
     const ctx = await mountSearchWorkspace({
@@ -198,7 +199,9 @@ describe('Workspace search integration (#153)', () => {
       }),
       setupNet(net, options) {
         net.pages[id] = page([latest])
-        options.sync!.api!.listMessages = readMessages
+        const normalTimeline = options.topicsApi!.listTimeline
+        options.topicsApi!.listTimeline = readTimeline.mockImplementation(async (channel, query, signal) =>
+          signal && query ? ok(messageTimeline([hit, latest], 80, query)) : normalTimeline(channel, query))
         options.topicsApi!.listTopicMessages = readTopicMessages
         if (replyRootId) {
           net.replyChains[`${id}:${hit.id}`] = ok(replyPage({
@@ -230,11 +233,11 @@ describe('Workspace search integration (#153)', () => {
           channel: id, anchor: hit.id, query: expect.objectContaining({ after_seq: 36, limit: 1 }),
         })
       } else if (topicId) {
-        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ after_seq: 36 }))
-        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ before_seq: 37 }))
+        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ after_seq: 36 }), expect.any(AbortSignal))
+        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ before_seq: 37 }), expect.any(AbortSignal))
       } else {
-        expect(readMessages).toHaveBeenCalledWith(id, expect.objectContaining({ after_seq: 36 }))
-        expect(readMessages).toHaveBeenCalledWith(id, expect.objectContaining({ before_seq: 37 }))
+        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ after_position: 36, as_of_seq: 80 }), expect.any(AbortSignal))
+        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ before_position: 37, as_of_seq: 80 }), expect.any(AbortSignal))
       }
       const scope = replyRootId ? '#panel-content' : '#main-content'
       expect(ctx.host.querySelector(`${scope} .ui-message-row--search-match`)

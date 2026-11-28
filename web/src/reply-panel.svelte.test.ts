@@ -510,7 +510,7 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
 
     buttonsByText(panel, '編集して送り直す')[0].click()
     flushSync()
-    const dialog = panel.querySelector('[role="dialog"]')!
+    const dialog = panel.querySelector('dialog:modal')!
     expect(dialog).not.toBeNull()
     buttonsByText(dialog, '置き換える')[0].click()
     flushSync()
@@ -1486,7 +1486,7 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       opener.click()
       flushSync()
       await tick()
-      const dialog = host.querySelector('[role="dialog"]')!
+      const dialog = host.querySelector('dialog:modal')!
       expect(dialog).not.toBeNull()
       forceRetryableId = refusedPending.clientMessageId
       flushSync()
@@ -1494,7 +1494,7 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       flushSync()
       await tick()
       flushSync()
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
       expect(opener.isConnected).toBe(false)
       expect(dom.doc.activeElement).toBe(textarea)
       expect(rc.composer.draft).toBe('入力中の返信下書き')
@@ -1506,14 +1506,14 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       flushSync()
       buttonsByText(refusedRow, '編集して送り直す')[0].click()
       flushSync()
-      buttonsByText(host.querySelector('[role="dialog"]')!, 'キャンセル')[0].click()
+      buttonsByText(host.querySelector('dialog:modal')!, 'キャンセル')[0].click()
       flushSync()
       expect(rc.composer.draft).toBe('入力中の返信下書き')
       expect(ch.timeline.pending).toHaveLength(2)
 
       buttonsByText(refusedRow, '編集して送り直す')[0].click()
       flushSync()
-      buttonsByText(host.querySelector('[role="dialog"]')!, '置き換える')[0].click()
+      buttonsByText(host.querySelector('dialog:modal')!, '置き換える')[0].click()
       flushSync()
       await tick()
       flushSync()

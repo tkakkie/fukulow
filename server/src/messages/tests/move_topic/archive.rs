@@ -58,18 +58,14 @@ async fn assert_both_commit_orders(pool: &PgPool, writer: Writer) {
         let f = f.clone();
         async move { write(&f, root, writer).await }
     });
-    tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered_within(Duration::from_secs(3)).await;
     let archive_task = tokio::spawn({
         let f = f.clone();
         async move { patch_archive(&f.app, &f.token, f.channel, true).await }
     });
     races::wait_for_lock(pool, "%archived_at%FOR NO KEY UPDATE").await;
     assert_eq!(state(pool, f.org, f.channel).await, before);
-    gate.release.add_permits(1);
+    gate.release();
     let response = write_task.await.unwrap();
     assert_eq!(
         response.status(),
@@ -80,8 +76,17 @@ async fn assert_both_commit_orders(pool: &PgPool, writer: Writer) {
     );
     let outcome = body(response).await;
     assert_eq!(archive_task.await.unwrap().status(), StatusCode::NO_CONTENT);
+    let check_positions = |snapshot: &Value| {
+        let (messages, mutations) = match writer {
+            Writer::Send(_) => (2, 0),
+            Writer::Move(_) => (1, 1),
+        };
+        assert_eq!(snapshot[0]["seq"], 2);
+        assert_eq!(snapshot[1].as_array().unwrap().len(), messages);
+        assert_eq!(snapshot[3].as_array().map_or(0, Vec::len), mutations);
+    };
     let committed = state(pool, f.org, f.channel).await;
-    assert_eq!(committed[3].as_array().unwrap().len(), 2);
+    check_positions(&committed);
     assert_eq!(body(write(&f, root, writer).await).await, outcome);
     assert_eq!(state(pool, f.org, f.channel).await, committed);
 
@@ -130,13 +135,7 @@ async fn assert_both_commit_orders(pool: &PgPool, writer: Writer) {
         StatusCode::NO_CONTENT
     );
     assert!(write(&f, root, writer).await.status().is_success());
-    assert_eq!(
-        state(pool, f.org, f.channel).await[3]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    check_positions(&state(pool, f.org, f.channel).await);
 }
 
 #[fukulow_test::test]

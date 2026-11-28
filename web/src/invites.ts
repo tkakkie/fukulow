@@ -1,4 +1,5 @@
 import * as api from './api'
+import { createRequestDeadlines } from './request-deadlines'
 
 type Deps = Pick<typeof api, 'listInvites' | 'revokeInvite'>
 export function createInvites(org: string, onEnded: () => void, onUnavailable: () => void, deps: Deps = api) {
@@ -6,11 +7,12 @@ export function createInvites(org: string, onEnded: () => void, onUnavailable: (
     loaded: false, loading: false, busy: false, error: '', retryable: false, forbidden: false }
   let closed = false, generation = 0, loadedOnce = false
   let retryMore = false
+  const deadlines = createRequestDeadlines()
   const listeners = new Set<() => void>()
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
   function close() { generation++; closed = true; state = { ...state, invites: [], nextCursor: undefined, loading: false, busy: false }; listeners.forEach(l => l()); listeners.clear() }
   function observe<T>(r: api.Result<T>) {
-    if (!r.ok && r.kind === 'http' && r.status === 401) onEnded()
+    if (api.isSessionEnded(r)) onEnded()
     else if (!closed && !r.ok && api.isOrganizationUnavailable(r)) { close(); onUnavailable() }
     return r
   }
@@ -32,51 +34,45 @@ export function createInvites(org: string, onEnded: () => void, onUnavailable: (
     loadedOnce = true
     set({ loading: true, error: '', retryable: false, forbidden: false })
     const abort = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
     // Even late authentication loss belongs to this Account, after a timeout or close.
     const pending = deps.listInvites(org, cursor, undefined, abort.signal)
       .catch((): api.Result<api.InvitePage> => ({ ok: false, kind: 'network' })).then(observe)
-    try {
-      const r = await Promise.race([pending, new Promise<api.Result<api.InvitePage>>(resolve => {
-        timer = setTimeout(() => { resolve({ ok: false, kind: 'network' }); abort.abort() }, 10_000)
-      })])
-      if (closed || own !== generation) return
-      if (!r.ok) failed(r)
-      else {
-        const rows = more ? [...state.invites, ...r.data.invites] : r.data.invites
-        // Refreshed or repeated pages cannot duplicate a visible Invite.
-        set({ invites: [...new Map(rows.map(i => [i.id, i])).values()], nextCursor: r.data.next_cursor ?? undefined,
-          loaded: true, error: '' })
-      }
-      set({ loading: false })
-    } finally { clearTimeout(timer) }
+    const networkFailure: api.Result<api.InvitePage> = { ok: false, kind: 'network' }
+    const r = await deadlines.wait(pending, networkFailure, {
+      timeoutMs: 10_000,
+      onTimeout: () => { abort.abort(); return networkFailure },
+    })
+    if (closed || own !== generation) return
+    if (!r.ok) failed(r)
+    else {
+      const rows = more ? [...state.invites, ...r.data.invites] : r.data.invites
+      // Refreshed or repeated pages cannot duplicate a visible Invite.
+      set({ invites: [...new Map(rows.map(i => [i.id, i])).values()], nextCursor: r.data.next_cursor ?? undefined,
+        loaded: true, error: '' })
+    }
+    set({ loading: false })
   }
   async function revoke(id: string) {
     if (closed || state.busy || state.loading) return false
     const own = ++generation
     set({ busy: true, error: '', retryable: false })
-    let timer: ReturnType<typeof setTimeout> | undefined
     const pending = deps.revokeInvite(org, id)
       .catch((): api.Result<undefined> => ({ ok: false, kind: 'network' })).then(r => {
         // Account Session loss still applies after this operation's deadline.
-        return own === generation || !r.ok && r.kind === 'http' && r.status === 401 ? observe(r) : r
+        return own === generation || api.isSessionEnded(r) ? observe(r) : r
       })
-    try {
-      const r = await Promise.race([pending, new Promise<api.Result<undefined>>(resolve => {
-        timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), 10_000)
-      })])
-      if (closed || own !== generation) return false
-      // Retire this operation before refresh can reconcile an uncertain outcome.
-      generation++
-      if (!r.ok) {
-        failed(r)
-        // Retrying an uncertain DELETE could succeed and then appear unavailable.
-        set({ retryable: false, error: r.kind === 'network'
-          ? '招待の取消を確認できませんでした。一覧を更新して確認してください。' : state.error })
-      } else set({ invites: state.invites.filter(i => i.id !== id) })
-      set({ busy: false })
-      return r.ok
-    } finally { clearTimeout(timer) }
+    const r = await deadlines.wait(pending, { ok: false, kind: 'network' }, { timeoutMs: 10_000 })
+    if (closed || own !== generation) return false
+    // Retire this operation before refresh can reconcile an uncertain outcome.
+    generation++
+    if (!r.ok) {
+      failed(r)
+      // Retrying an uncertain DELETE could succeed and then appear unavailable.
+      set({ retryable: false, error: r.kind === 'network'
+        ? '招待の取消を確認できませんでした。一覧を更新して確認してください。' : state.error })
+    } else set({ invites: state.invites.filter(i => i.id !== id) })
+    set({ busy: false })
+    return r.ok
   }
   return {
     get: () => state,

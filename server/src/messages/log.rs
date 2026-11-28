@@ -1,4 +1,10 @@
-use super::{Message, MessageError, REPLAY_PAGE_SIZE, mentions, message_from_row};
+pub(crate) mod handlers;
+
+pub use handlers::list_channel_events;
+
+use super::{
+    Message, MessageError, REPLAY_PAGE_SIZE, check_visibility, mentions, message_from_row,
+};
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -122,55 +128,51 @@ pub(super) async fn record_move(
     Ok(())
 }
 
-pub(super) async fn create(
-    tx: &mut PgConnection,
-    organization: Uuid,
-    message: &Message,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO channel_log (organization_id, channel_id, event_seq, kind, message_id, sender, client_message_id) \
-         VALUES ($1, $2, $3, 'create', $4, $5, $6)",
-    )
-    .bind(organization)
-    .bind(message.channel_id)
-    .bind(message.created_seq)
-    .bind(message.id)
-    .bind(message.sender)
-    .bind(message.client_message_id)
-    .execute(tx)
-    .await?;
-    Ok(())
-}
-
-// Limit positions before hydrating current state. LEFT JOIN keeps an unhydratable
-// position visible to validation instead of silently acknowledging past it.
-// Keep the Message lookup correlated. Planning before the RLS context exists
-// can underestimate the cost of materializing all Messages in the Organization.
-// OFFSET 0 is an optimisation fence: it stops the subquery being pulled up into
-// a plain join; removing it can restore the Organization-wide scan (#515).
+// Merge bounded position scans before hydrating current Message state. Read
+// one extra key so a duplicate at the page boundary cannot escape validation.
+// OFFSET 0 keeps the state lookup correlated under generic RLS plans (#515).
 fn page_sql(channel: usize, authorized: bool) -> String {
     let (after, through, limit) = (channel + 1, channel + 2, channel + 3);
     let access = if authorized { "AND access.visible" } else { "" };
     format!(
-        r#"WITH log_page AS MATERIALIZED (
-            SELECT organization_id, channel_id, event_seq, kind, message_id, source_topic_id, destination_topic_id, operation_id FROM channel_log
-            WHERE organization_id=$1 AND channel_id=${channel} AND event_seq>${after} AND event_seq<=${through} {access}
-            ORDER BY event_seq LIMIT ${limit}
+        r#"WITH candidates AS (
+            (SELECT organization_id, channel_id, seq AS event_seq, 'create'::text AS kind,
+                NULL::uuid AS message_id, NULL::uuid AS source_topic_id,
+                NULL::uuid AS destination_topic_id, NULL::uuid AS operation_id
+             FROM messages
+             WHERE organization_id=$1 AND channel_id=${channel} AND seq>${after} AND seq<=${through} {access}
+             ORDER BY seq LIMIT (${limit}+1))
+            UNION ALL
+            (SELECT organization_id, channel_id, event_seq, kind, message_id,
+                source_topic_id, destination_topic_id, operation_id
+             FROM channel_log
+             WHERE organization_id=$1 AND channel_id=${channel} AND event_seq>${after} AND event_seq<=${through} {access}
+             ORDER BY event_seq LIMIT (${limit}+1))
+            ORDER BY event_seq LIMIT (${limit}+1)
+        ), log_page AS MATERIALIZED (
+            SELECT *, lead(event_seq) OVER (ORDER BY event_seq) = event_seq AS duplicate
+            FROM candidates ORDER BY event_seq LIMIT ${limit}
         )
-        SELECT l.event_seq,l.kind,l.message_id,l.source_topic_id,l.destination_topic_id,l.operation_id,
+        SELECT l.event_seq,l.duplicate,l.kind,l.message_id,l.source_topic_id,l.destination_topic_id,l.operation_id,
             l.channel_id AS log_channel_id,m.id,m.channel_id,m.seq,m.version,m.deleted,m.client_message_id,m.sender,m.body,m.topic_id,
             m.reply_to_id AS reply_to,m.reply_root_id,
             to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
         FROM log_page l LEFT JOIN LATERAL (
             SELECT * FROM messages
-            WHERE organization_id=l.organization_id AND channel_id=l.channel_id AND id=l.message_id AND l.kind='create'
+            WHERE organization_id=l.organization_id AND channel_id=l.channel_id AND seq=l.event_seq AND l.kind='create'
             OFFSET 0
         ) m ON true
         ORDER BY l.event_seq"#
     )
 }
 
-fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<ChannelEvent>, sqlx::Error> {
+pub(super) fn hydrate(
+    rows: Vec<PgRow>,
+    mut after: i64,
+    through: i64,
+    limit: i64,
+) -> Result<Vec<ChannelEvent>, sqlx::Error> {
+    let last_expected = after.max(through.min(after.saturating_add(limit)));
     let mut messages = Vec::with_capacity(rows.len());
     let only = rows.len() == 1;
     for row in rows {
@@ -180,7 +182,9 @@ fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<ChannelEvent>, sqlx::
             }
             return Err(sqlx::Error::RowNotFound);
         };
-        if after.checked_add(1) != Some(position) {
+        if after.checked_add(1) != Some(position)
+            || row.try_get::<Option<bool>, _>("duplicate")? == Some(true)
+        {
             return Err(sqlx::Error::RowNotFound);
         }
         let event = match row.try_get::<&str, _>("kind")? {
@@ -203,6 +207,9 @@ fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<ChannelEvent>, sqlx::
         };
         messages.push(event);
         after = position;
+    }
+    if after != last_expected {
+        return Err(sqlx::Error::RowNotFound);
     }
     Ok(messages)
 }
@@ -245,7 +252,7 @@ pub(crate) async fn replay_page(
         },
     )
     .await?;
-    hydrate(rows, after)
+    hydrate(rows, after, through, REPLAY_PAGE_SIZE)
 }
 
 // Authorization, log coverage and current state share one snapshot per page.
@@ -302,15 +309,11 @@ async fn authorized_page(
         },
     )
     .await?;
-    match rows
-        .first()
-        .ok_or(sqlx::Error::RowNotFound)?
-        .try_get::<Option<bool>, _>("visible")?
-    {
-        None => return Err(MessageError::OrganizationUnavailable),
-        Some(false) => return Err(MessageError::NotFound),
-        Some(true) => {}
-    }
+    check_visibility(
+        rows.first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .try_get::<Option<bool>, _>("visible")?,
+    )?;
     let history_generation: Uuid = rows
         .first()
         .ok_or(sqlx::Error::RowNotFound)?
@@ -318,61 +321,35 @@ async fn authorized_page(
     if generation.is_some_and(|old| old != history_generation) {
         return Err(MessageError::HistoryGenerationChanged);
     }
-    Ok((history_generation, hydrate(rows, after)?))
+    Ok((history_generation, hydrate(rows, after, through, limit)?))
 }
 
-/// Read event positions for C3 gap recovery. Auth extraction and query validation
-/// precede Channel visibility, exactly as on the history GET.
-#[utoipa::path(get, path = "/api/v1/orgs/{org}/channels/{id}/events",
-    params(("org" = Uuid, Path), ("id" = Uuid, Path), fukulow_api::ListChannelEventsQuery),
-    security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, description = "Ascending Channel event envelopes after the exclusive event cursor, with current-state replay hydration and directional has_more", body = fukulow_api::ChannelEventPage),
-        (status = 400, description = "Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200", body = crate::auth::ErrorBody),
-        (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = crate::auth::ErrorBody),
-        (status = 409, description = "history_generation_changed for a stale Organization epoch", body = crate::auth::ErrorBody),
-        (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence", body = crate::auth::ErrorBody),
-        (status = 503, description = "Committed watermark admission unavailable", body = crate::auth::ErrorBody, headers(("Retry-After" = u64, description = "Retry seconds"))),
-        (status = 500, description = "Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged", body = crate::auth::ErrorBody)))]
-pub async fn list_channel_events(
-    axum::extract::State(state): axum::extract::State<crate::AppState>,
-    auth: crate::auth::Auth,
-    path: Result<axum::extract::Path<(Uuid, Uuid)>, axum::extract::rejection::PathRejection>,
-    query: Result<
-        axum::extract::Query<fukulow_api::ListChannelEventsQuery>,
-        axum::extract::rejection::QueryRejection,
-    >,
-) -> Result<axum::response::Response, MessageError> {
-    use axum::response::IntoResponse;
-    let axum::extract::Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
-    let axum::extract::Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
-    let limit = query.limit.unwrap_or(50);
-    if query.after_seq < 0 || !(1..=200).contains(&limit) {
-        return Err(MessageError::InvalidInput);
-    }
-    let organization = auth.identity.organization.organization_id;
-    let member = (auth.identity.member.id, auth.membership_revision);
-    super::require_visible_scoped(&state.pool, organization, member, channel).await?;
-    let through = super::topics::watermark(&state, organization, channel).await?;
-    let (history_generation, mut events) = authorized_page(
-        &state.pool,
-        auth.identity.organization.organization_id,
-        (auth.identity.member.id, auth.membership_revision),
-        channel,
-        (query.after_seq, through),
-        i64::from(limit) + 1,
-        query.history_generation,
+#[cfg(test)]
+pub(crate) async fn inject_missing_message(
+    pool: &PgPool,
+    organization: Uuid,
+    channel: Uuid,
+    seq: i64,
+) {
+    // Keep the trigger bypass inside the corruption fixture's transaction.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE messages DISABLE TRIGGER messages_forbid_delete")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let removed = sqlx::query(
+        "DELETE FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq = $3",
     )
-    .await?;
-    let has_more = events.len() > usize::from(limit);
-    events.truncate(usize::from(limit));
-    let events = events.into_iter().map(ChannelEvent::into_wire).collect();
-    Ok((
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        axum::Json(fukulow_api::ChannelEventPage {
-            history_generation,
-            events,
-            has_more,
-        }),
-    )
-        .into_response())
+    .bind(organization)
+    .bind(channel)
+    .bind(seq)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(removed.rows_affected(), 1);
+    sqlx::query("ALTER TABLE messages ENABLE TRIGGER messages_forbid_delete")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 }

@@ -2,8 +2,15 @@ import { createHash } from 'node:crypto'
 import { createServer, type RequestListener } from 'node:http'
 import { createServer as createSecureServer, type ServerOptions } from 'node:https'
 import { networkInterfaces } from 'node:os'
-import { day, checksum, sha256, type BackupBucket, type ObjectInfo } from './backup-r2-model.ts'
-import type { Request, Response, Runner } from './backup-r2.ts'
+import type { Request, Response, Runner } from './backup-curl.ts'
+import { day, checksum, type BackupBucket, type Manifest, type ObjectInfo } from './backup-r2-inventory.ts'
+import { sha256 } from './backup-r2-model.ts'
+
+export const epoch = Date.UTC(2026, 10, 14, 12)
+export function manifest(capture = epoch, bytes = Buffer.from('encrypted-test-data')): Manifest {
+  return { formatVersion: 1, captureTime: new Date(capture).toISOString(), postgresMajor: 18,
+    plaintext: { size: 4, sha256: sha256('dump') }, ciphertext: { size: bytes.length, sha256: sha256(bytes) }, recipientFingerprint: sha256('public recipient') }
+}
 
 export type Fault = 'lost-response' | 'truncated' | 'bad-checksum' | '5xx'
 export class FakeBucket implements BackupBucket {

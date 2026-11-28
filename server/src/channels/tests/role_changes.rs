@@ -1,9 +1,7 @@
 use super::management::{grant, mutation, snapshot};
 use super::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use crate::channels::access::AccessStatus;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 pub(super) async fn change(app: &Router, token: &str, target: Uuid, role: &str) -> Response {
@@ -45,26 +43,6 @@ async fn all_state(pool: &PgPool) -> Value {
     let auth: Value = sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id,id) FROM users u),(SELECT jsonb_agg(to_jsonb(s) ORDER BY token_hash) FROM account_sessions s),(SELECT jsonb_agg(to_jsonb(c) ORDER BY organization_id,id) FROM channels c))")
         .fetch_one(pool).await.unwrap();
     json!([auth, snapshot(pool).await])
-}
-
-#[derive(Default)]
-struct ObservedAccess {
-    access: super::super::access::AccessChanges,
-    calls: AtomicUsize,
-}
-impl auth::SubscriptionRecheck for ObservedAccess {
-    fn check<'a>(
-        &'a self,
-        pool: &'a PgPool,
-        scope: auth::SubscriptionScope,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
-    {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move { auth::SubscriptionRecheck::check(&self.access, pool, scope).await })
-    }
-    fn failed(&self, _: auth::SubscriptionScope) {
-        panic!("unexpected subscription failure");
-    }
 }
 
 #[fukulow_test::test]
@@ -118,10 +96,7 @@ async fn role_change_body_errors_follow_path_decoding_and_precede_member_uuid_pa
 async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgPool) {
     let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());
-    let observed = Arc::new(ObservedAccess::default());
-    state
-        .session_changes
-        .set_subscription_recheck(observed.clone());
+    let observed = RecheckObservation::install(&state.session_changes);
     let org = organization(&pool).await;
     let target = Uuid::new_v4();
     let tt = member(&pool, org, target, "owner").await;
@@ -156,7 +131,7 @@ async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgP
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(body(response).await, json!({"error":"last_owner"}));
         assert_eq!(all_state(&pool).await, before);
-        assert_eq!(watch.status(), 0);
+        assert_eq!(watch.status(), AccessStatus::Active);
         assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
     }
     let replacement = Uuid::new_v4();
@@ -169,13 +144,13 @@ async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgP
         json!({"error":"last_channel_manager"})
     );
     assert_eq!(all_state(&pool).await, before);
-    assert_eq!(watch.status(), 0);
+    assert_eq!(watch.status(), AccessStatus::Active);
     assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
     grant(&pool, org, channel, replacement).await;
     let response = change(&app, &ot, target, "member").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body(response).await["role"], "member");
-    assert_eq!(watch.status(), 0);
+    assert_eq!(watch.status(), AccessStatus::Active);
     assert_eq!(observed.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -184,10 +159,7 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
     for multiple in [false, true] {
         let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state.clone());
-        let observed = Arc::new(ObservedAccess::default());
-        state
-            .session_changes
-            .set_subscription_recheck(observed.clone());
+        let observed = RecheckObservation::install(&state.session_changes);
         let org = organization(&pool).await;
         let ot = member(&pool, org, Uuid::new_v4(), "owner").await;
         let target = Uuid::new_v4();
@@ -238,7 +210,7 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
                 json!({"error":"last_channel_manager"})
             );
             assert_eq!(all_state(&pool).await, before);
-            assert_eq!(watch.status(), 0);
+            assert_eq!(watch.status(), AccessStatus::Active);
             assert_eq!(observed.calls.load(Ordering::SeqCst), 0);
         }
         // Once every Channel has another usable manager, the entire update succeeds.
@@ -249,7 +221,7 @@ async fn role_demotion_is_atomic_across_private_channels_and_leaks_no_details(po
             change(&app, &ot, target, "guest").await.status(),
             StatusCode::OK
         );
-        assert_eq!(watch.status(), 1);
+        assert_eq!(watch.status(), AccessStatus::ChannelLost);
         assert_eq!(observed.calls.load(Ordering::SeqCst), 1);
     }
 }
@@ -346,14 +318,13 @@ async fn role_demotion_counts_only_usable_scoped_managers_with_allowed_controls(
 }
 
 async fn wait_for_lock(pool: &PgPool, pattern: &str, count: i64) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1")
-                .bind(pattern).fetch_one(pool).await.unwrap();
-            if waiting == count { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery(pattern),
+        Count::Exactly(count),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 #[fukulow_test::test]

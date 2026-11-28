@@ -1,65 +1,16 @@
 import { createHash } from 'node:crypto';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync, appendFileSync, renameSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, mkdirSync, readFileSync, readdirSync, rmSync, cpSync, existsSync, utimesSync, appendFileSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { readConfig, readRunConfig, type Config } from './dms-formal-config.ts';
-import { budgets, commonWindow, judge, reconcile } from './dms-formal-judgment.ts';
+import type { Config } from './dms-formal-config.ts';
+import { judge } from './dms-formal-judgment.ts';
 import { spawnSync } from 'node:child_process';
 import { abortSettleMs, cleanupReserveMs, collectionEndMs, collectionSlackMs, dbLogCommand, dbLogTimeoutMs, hostStopMaxMs, localCleanupMs, run, samplerStopEndMs, seedDbLogMs, type Runtime } from './dms-formal-run.ts';
-import { checked, execute, type Command } from './dms-formal-exec.ts';
-import { parseSend } from './dms-formal-results.ts';
+import type { Command } from './dms-formal-exec.ts';
 import { kernelFiles, snapshotsPerSession, stopTiming } from './dms-formal-seed-samplers.ts';
-const checkout=resolve(import.meta.dirname,'..');
-function temporary(t: {after:(fn:()=>void)=>void}) { const path=mkdtempSync(`${tmpdir()}/dm-formal-test-`);t.after(()=>rmSync(path,{recursive:true,force:true}));return path; }
-function env(path:string, extra='') {return `DM_FORMAL_APP=app-alias\nDM_FORMAL_DB=db-alias\nDM_FORMAL_GENERATOR=generator-alias\nDM_FORMAL_SHA=${'a'.repeat(40)}\nDM_FORMAL_OUTPUT=${path}/output\n${extra}`;}
-test('private config refuses checkout, symlink, wide mode and existing output',t=>{
-  const path=temporary(t), file=`${path}/private.env`;
-  writeFileSync(file,env(path),{mode:0o600});
-  assert.equal(readConfig(file,checkout).attempts,3);
-  assert.equal(readConfig(file,checkout).mode,'formal');
-  chmodSync(file,0o640);assert.throws(()=>readConfig(file,checkout),/0600/);chmodSync(file,0o600);
-  writeFileSync(file,env(path).replace(`${path}/output`,`${checkout}/output`));assert.throws(()=>readConfig(file,checkout),/outside checkout/);
-  writeFileSync(file,env(path));mkdirSync(`${path}/output`);assert.throws(()=>readConfig(file,checkout),/must be new/);
-  const inside=`${checkout}/.formal-test-${process.pid}.env`;writeFileSync(inside,env(path),{mode:0o600});t.after(()=>rmSync(inside,{force:true}));
-  assert.throws(()=>readConfig(inside,checkout),/outside checkout/);
-  symlinkSync(inside,`${path}/linked.env`);assert.throws(()=>readConfig(`${path}/linked.env`,checkout),/outside checkout/);
-});
-test('config has no ambient env fallback, rejects unsafe aliases, short SHA and too few formal attempts',t=>{
-  const path=temporary(t),file=`${path}/private.env`;
-  for(const extra of ['DM_FORMAL_ATTEMPTS=1\n','DM_FORMAL_MODE=invalid\n','DM_FORMAL_SCENARIO=unknown\n','DM_FORMAL_UNKNOWN=x\n']) {writeFileSync(file,env(path,extra),{mode:0o600});assert.throws(()=>readConfig(file,checkout));}
-  for(const value of [env(path).replace('app-alias','-oProxyCommand=bad'),env(path).replace('a'.repeat(40),'abcd')]) {writeFileSync(file,value);assert.throws(()=>readConfig(file,checkout));}
-  writeFileSync(file,env(path,'DM_FORMAL_MODE=smoke\nDM_FORMAL_ATTEMPTS=1\n'));assert.equal(readConfig(file,checkout).attempts,1);
-});
-test('every missing or failing budget prevents acceptance, including smoke with perfect evidence',()=>{
-  const evidence=Object.fromEntries(Object.keys(budgets).map(key=>[key,0]));
-  assert.equal(judge(evidence,'formal').acceptance,true);
-  for(const [key,limit] of Object.entries(budgets)) {
-    assert.equal(judge({...evidence,[key]:limit+1},'formal').acceptance,false,key);
-    assert.equal(judge({...evidence,[key]:undefined},'formal').acceptance,false,key);
-    assert.equal(judge({...evidence,[key]:NaN},'formal').rows.find(row=>row.budget===key)?.status,'NOT EVALUATED');
-  }
-  assert.equal(judge(evidence,'smoke').acceptance,false);assert.equal(judge(evidence,'smoke').label,'NON-ACCEPTANCE');
-});
-test('common window is minute 10–40, never an artificially shortened intersection',()=>{
-  const starts=Array<number>(11).fill(100000);
-  assert.deepEqual(commonWindow(starts,'formal'),{from:700000,to:2500000});
-  starts[10]++;assert.throws(()=>commonWindow(starts,'formal'),/exact scheduled epoch/);
-  assert.throws(()=>commonWindow(starts.slice(1),'formal'),/eleven/);
-});
-test('ledger catches missing, duplicate, unoffered and mismatched durable results',()=>{
-  const row={organization:'o',member:'m',channel:'c',client_message_id:'client',id:'message',seq:1};
-  assert.deepEqual(reconcile([row],[row]),{missing:0,duplicates:0,unexpected:0});
-  assert.equal(reconcile([row],[]).missing,1);
-  assert.equal(reconcile([row],[row,row]).duplicates,1);
-  assert.equal(reconcile([row,row],[row]).duplicates,1);
-  assert.equal(reconcile([],[row]).unexpected,1);
-  assert.equal(reconcile([row],[{...row,seq:2}]).missing,1);
-  assert.equal(parseSend('unrelated'),undefined);
-  assert.equal(parseSend('DM_SEND '+JSON.stringify(row))?.id,'message');
-  assert.throws(()=>parseSend('DM_SEND broken'));
-});
+import { checkout, temporary } from './dms-formal-run-fixture.ts';
+
 function stub(t:Parameters<typeof temporary>[0],interrupt:boolean) {
   const path=temporary(t),events:string[]=[],listeners=new Map<string,()=>void>();
   const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:`${path}/output`,scenario:'main',attempts:3,mode:'formal'};
@@ -109,69 +60,10 @@ for(const signal of ['SIGINT','SIGTERM'] as const) test(`cleanup registered befo
   assert.ok(events.some(event=>event.includes('mkdir ')));
   assert.ok(!events.some(event=>event.includes("'generators'")));
 });
-test('executor retains nonzero exit and kills a hung child at its deadline',async()=>{
-  assert.equal((await execute({program:process.execPath,args:['-e','process.exit(17)'],timeout:1000})).code,17);
-  await assert.rejects(checked(execute,{program:process.execPath,args:['-e','setInterval(()=>{},1000)'],timeout:20}),/timeout/);
-});
-test('common-window report retains outside-window errors and reconciles the full ledger',async t=>{
-  const {reportAttempt}=await import('./dms-formal-results.ts');
-  const path=temporary(t),directory=`${path}/attempt`;mkdirSync(directory);
-  const epoch=1000000,from=epoch+60000;
-  writeFileSync(`${directory}/window-starts.json`,JSON.stringify(Array(11).fill(epoch)));
-  writeFileSync(`${directory}/exits.json`,JSON.stringify([{shard:0,code:99},{shard:10,code:0}]));
-  const row={organization:'o',member:'m',channel:'c',client_message_id:'ab000000-0000-0000-0000-000000000000',id:'id',seq:1,started:from+1,completed:from+2,status:201,bodyBytes:1024};
-  for(const shard of [0,10]) {
-    mkdirSync(`${directory}/shard-${shard}`);
-    writeFileSync(`${directory}/shard-${shard}/run.log`,shard===0?'DM_SEND '+JSON.stringify(row)+'\n':'');
-    writeFileSync(`${directory}/shard-${shard}/summary.json`,JSON.stringify({metrics:{dm_duplicate_frames:{values:{count:0}},dm_errors:{values:{count:shard===0?1:0}},dropped_iterations:{values:{count:shard===0?1:0}}}}));
-    const points=[{type:'Point',metric:'dm_latency_ms',data:{time:new Date(from-1).toISOString(),value:999999,tags:{shape:'send'}}},{type:'Point',metric:'dm_latency_ms',data:{time:new Date(from+1).toISOString(),value:10,tags:{shape:'send'}}}];
-    writeFileSync(`${directory}/shard-${shard}/metrics.json`,points.map(point=>JSON.stringify(point)).join('\n')+'\n');
-  }
-  writeFileSync(`${directory}/durable.jsonl`,JSON.stringify(row)+'\n');
-  const report=await reportAttempt(directory,'smoke',execute,'held200');
-  assert.ok('reconciliation' in report,JSON.stringify(report));
-  assert.equal(report.acceptance,false);assert.equal(report.label,'NON-ACCEPTANCE');
-  assert.equal(report.scenario,'held200');
-  assert.equal(JSON.parse(readFileSync(`${directory}/combined.json`,'utf8')).scenario,'held200');
-  for(const organization of [...report.organizations,...report.organizationsCore])assert.equal((organization as {scenario:string}).scenario,'held200');
-  assert.deepEqual(report.reconciliation,{missing:0,duplicates:0,unexpected:0});
-  assert.equal(report.evidence.errors,1);assert.equal(report.evidence.dropped,1);
-  assert.equal(report.evidence['ack.p99'],10);
-  assert.equal(report.rows.find(row=>row.budget==='pool.p95')?.status,'NOT EVALUATED');
-  assert.ok(readFileSync(`${directory}/judgment.md`,'utf8').includes('NOT EVALUATED'));
-});
-test('deadline kills descendants holding inherited pipes and reaps leader',async()=>{
-  const start=Date.now();
-  await assert.rejects(execute({program:process.execPath,args:['-e',`require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});setInterval(()=>{},1000)`],timeout:100}),/timeout/);
-  assert.ok(Date.now()-start<1000);
-});
-test('production pool parser rejects instrumented and malformed lines',async()=>{
-  const {parseProductionPoolLine,productionPoolEvidence}=await import('./dms-formal-pool.ts');
-  for(const line of ['','{}','event=measure_pool us=1 active=0 size=32 error=false','event=measure_hold op=x wait_us=1 hold_us=1 active=0 waiting=0 http=0 acquired=true'])assert.equal(parseProductionPoolLine(line),undefined);
-  assert.match(productionPoolEvidence(['{}'],0,1000,{complete:true,startedAt:0,endedAt:1000}).reasons.join(),/Missing pool_stats/);
-});
-test('restore failure after daemon creation stops, awaits and removes its own copy',async()=>{
-  const {copyVolume}=await import('./dms-formal-copy.ts');const events:string[][]=[];
-  await assert.rejects(copyVolume(async command=>{
-    events.push(command.args);
-    if(command.args[0]==='run')throw new Error('failed after creation');
-    return {code:0,stdout:command.args[0]==='ps'?'copy-id':''};
-  },'dm-formal-test',2,'snapshot','data','pinned',true),/after creation/);
-  assert.deepEqual(events.slice(1).map(args=>args[0]),['ps','stop','wait','rm']);
-  assert.ok(events.slice(2).every(args=>args.includes('dm-formal-test-copy-2')));
-});
 test('deadline admission reserves an entire attempt and cleanup',async()=>{
   const {canStartAttempt,attemptBudgetMs,cleanupReserveMs}=await import('./dms-formal-run.ts');
   const config={mode:'formal',deadline:1000+attemptBudgetMs('formal')+cleanupReserveMs} as Config;
   assert.equal(canStartAttempt(config,1000),true);assert.equal(canStartAttempt(config,1001),false);
-});
-test('reportAttempt rejects absent, duplicate or malformed shards and never passes counters',async t=>{
-  const {reportAttempt}=await import('./dms-formal-results.ts');
-  for(const manifest of [[],[{shard:0,code:0},{shard:0,code:0}], [{shard:0,code:0},{shard:10,code:'0'}],null]) {
-    const path=temporary(t);writeFileSync(path+'/exits.json',JSON.stringify(manifest));
-    const report=await reportAttempt(path,'smoke',execute);
-    assert.equal(report.acceptance,false);assert.ok(report.rows.every(row=>row.status==='NOT EVALUATED'));
-  }
 });
 function lifecycle(t:Parameters<typeof temporary>[0],failTransfer=false) {
   const path=temporary(t),events:string[]=[],statuses:unknown[]=[];
@@ -218,72 +110,6 @@ test('summary transfer failure preserves failed attempt and allows the next rest
   assert.equal(events.filter(e=>e.includes("'stop-copy'")).length,3);
   const first=JSON.parse(readFileSync(config.output+'/attempt-1/judgment.json','utf8'));
   assert.match(first.operation,/transfer/);assert.match(first.error,/summary transfer/);
-});
-test('preliminary summary preserves aggregate with old and tagged round fixtures',async t=>{
-  for(const tagged of [false,true]) {
-    const path=temporary(t);mkdirSync(path+'/shard-0');
-    writeFileSync(path+'/shard-0/metrics.json',JSON.stringify({type:'Point',metric:'dm_round_ms',data:{time:new Date().toISOString(),value:42,tags:tagged?{attempts:'5'}:{}}})+'\n');
-    await checked(execute,{program:'env',args:['DM_SHARDS=1',process.execPath,resolve(import.meta.dirname,'dms-summary.ts'),path],timeout:10000});
-    const summary=JSON.parse(readFileSync(path+'/combined.json','utf8'));
-    assert.equal(summary.latencies.dm_round_ms.p99,42);
-    if(tagged)assert.equal(summary.latencies['dm_round_ms:attempts=5'].p99,42);
-  }
-});
-test('reportAttempt judges slow extension on the population supplying samples, sparse RSS is absent',async t=>{
-  const {reportAttempt}=await import('./dms-formal-results.ts');
-  const path=temporary(t),epoch=1000000;
-  writeFileSync(path+'/window-starts.json',JSON.stringify(Array(11).fill(epoch)));
-  writeFileSync(path+'/exits.json',JSON.stringify(Array.from({length:11},(_,shard)=>({shard,code:0}))));
-  writeFileSync(path+'/durable.jsonl','');
-  writeFileSync(path+'/resources-app.jsonl',JSON.stringify({at:epoch+600001,rssKiB:100,cpu:0,intervalMs:1000})+'\n');
-  for(let shard=0;shard<11;shard++) {
-    const dir=path+'/shard-'+shard;mkdirSync(dir);
-    for(const file of ['run.log','metrics.json'])writeFileSync(dir+'/'+file,'');
-    writeFileSync(dir+'/summary.json',JSON.stringify({state:{testRunDurationMs:2700000},metrics:{dm_errors:{values:{count:0}},dm_duplicate_frames:{values:{count:0}},iterations:{values:{count:1}}}}));
-  }
-  const reducer:Runtime['exec']=async command=>{
-    const dest=command.args.at(-1)!;
-    const extended=command.args.some(arg=>arg==='DM_WINDOW_TO='+String(epoch+2640000));
-    const latencies=Object.fromEntries([...['resolve','create','renew','refresh','delta','coverage','send','first','deep'].map(s=>'dm_latency_ms:'+s),'dm_receipt_ms','dm_round_ms:attempts=5'].map(key=>[key,{samples:extended?10200:9000,p95:extended?500:10,p99:extended?700:10}]));
-    writeFileSync(dest+'/combined.json',JSON.stringify({window:{from:epoch+600000,to:epoch+2400000},latencies,mix:{},peerMissing:0,pool:{samples:0},fullIntervals:[]}));
-    return {code:0,stdout:''};
-  };
-  const report=await reportAttempt(path,'formal',reducer);
-  assert.ok('core' in report,JSON.stringify(report));
-  assert.equal(report.core.latencies['dm_latency_ms:create'].p99,10);
-  assert.equal(report.evidence.sampleDeficit,0);
-  assert.equal(report.evidence['open.p99'],700);
-  assert.equal(report.rows.find(row=>row.budget==='open.p99')?.status,'FAIL');
-  assert.equal(report.rows.find(row=>row.budget==='app.rssKiB')?.status,'NOT EVALUATED');
-  // Missing required counters in an otherwise complete manifest must not pass.
-  const bad=temporary(t);
-  for(const file of ['exits.json','window-starts.json','durable.jsonl'])cpSync(path+'/'+file,bad+'/'+file);
-  for(let i=0;i<11;i++)cpSync(path+'/shard-'+i,bad+'/shard-'+i,{recursive:true});
-  writeFileSync(bad+'/shard-0/summary.json',JSON.stringify({metrics:{iterations:{values:{count:1}}}}));
-  const malformed=await reportAttempt(bad,'formal',reducer);
-  assert.ok(malformed.rows.every(row=>row.status==='NOT EVALUATED'));
-  assert.ok('error' in malformed);assert.match(malformed.error,/required metric/);
-});
-test('held assignment and explicit traversal demand make the five-lane mix eligible',async()=>{
-  const {retainedAssignment,demandFormalMix}=await import('./dms-formal-mix.ts');
-  const {dmListState,stepDmList}=await import('../web/src/dm-list.ts');
-  assert.deepEqual(Array.from({length:6},(_,i)=>retainedAssignment(i)),[0,50,0,50,0,50]);
-  assert.deepEqual(Array.from({length:6},(_,i)=>retainedAssignment(i,'held200')),[0,50,200,0,50,200]);
-  for(const held of [0,50,200]) {
-    let state=dmListState();
-    state.rows=Array.from({length:held},(_,i)=>({identity:{id:String(i),kind:'dm' as const,peer:{id:'peer',name:'Peer',active:true}},access:i,used:i}));
-    state=demandFormalMix(state,'absent-peer');
-    const lanes:string[]=[];
-    for(let i=0;i<5;i++) {
-      state=stepDmList(state,{type:'wake',now:0}).state;
-      assert.ok(state.request);
-      const request=state.request;lanes.push(request.lane);
-      // Failures continue to consume attempts; the next iteration checks lane fairness.
-      state=stepDmList(state,{type:'failure',request,retryAt:0,terminal:false}).state;
-    }
-    assert.ok(lanes.includes('delta')&&lanes.includes('coverage')&&lanes.includes('browse')&&lanes.includes('recovery'));
-    if(held)assert.ok(lanes.includes('held'));
-  }
 });
 test('failure after app container creation still cleans every host before returning',async t=>{
   const {config,runtime,events}=lifecycle(t);const original=runtime.exec;
@@ -411,31 +237,6 @@ test('seed diagnostic collection ends before the three local cleanup allowances,
   // A signal without a deadline gets the same slack.
   assert.equal(collectionEndMs(undefined,fired),fired+collectionSlackMs);
 });
-test('config validates deadline timezone and raw opt-in',t=>{
-  const path=temporary(t),file=path+'/config.env';
-  for(const extra of ['DM_FORMAL_DEADLINE=invalid\n','DM_FORMAL_DEADLINE=2000-01-01T00:00:00Z\n','DM_FORMAL_DOWNLOAD_RAW=yes\n']) {
-    writeFileSync(file,env(path,extra),{mode:0o600});assert.throws(()=>readConfig(file,checkout));
-  }
-  const future=new Date(Date.now()+14*3600000).toISOString();
-  writeFileSync(file,env(path,'DM_FORMAL_DEADLINE='+future+'\nDM_FORMAL_DOWNLOAD_RAW=1\n'));
-  assert.equal(readConfig(file,checkout).deadline,Date.parse(future));assert.equal(readConfig(file,checkout).downloadRaw,true);
-});
-test('reportAttempt rejects malformed raw points and missing files in an exact manifest',async t=>{
-  const {reportAttempt}=await import('./dms-formal-results.ts');
-  const path=temporary(t);
-  writeFileSync(path+'/exits.json',JSON.stringify([{shard:0,code:0},{shard:10,code:0}]));
-  let report=await reportAttempt(path,'smoke',execute);
-  assert.ok('error' in report);assert.match(report.error,/Missing shard evidence/);
-  writeFileSync(path+'/window-starts.json',JSON.stringify(Array(11).fill(1000000)));
-  for(const shard of [0,10]) {
-    mkdirSync(path+'/shard-'+shard);
-    writeFileSync(path+'/shard-'+shard+'/metrics.json',JSON.stringify({type:'Point',metric:'dm_latency_ms',data:{time:'invalid',value:'fast',tags:{}}})+'\n');
-    writeFileSync(path+'/shard-'+shard+'/run.log','');
-    writeFileSync(path+'/shard-'+shard+'/summary.json','{}');
-  }
-  report=await reportAttempt(path,'smoke',execute);
-  assert.ok(report.rows.every(row=>row.status==='NOT EVALUATED'));
-});
 test('unverified owned-process cleanup prevents retention and another restore',async t=>{
   const {config,runtime,events}=lifecycle(t);const original=runtime.exec;
   runtime.exec=async command=>{
@@ -447,14 +248,6 @@ test('unverified owned-process cleanup prevents retention and another restore',a
   assert.equal(events.filter(event=>event.includes("'retain-raw'")).length,0);
   assert.equal(events.filter(event=>event.includes(' cleanup && timeout')).length,3);
 });
-
-test('scenario config selects main, held200 and explicit deferred stubs',t=>{
-  const path=temporary(t),file=path+'/private.env';
-  for(const scenario of ['main','held200','hot-DM','pool-overhead']) {
-    writeFileSync(file,env(path,`DM_FORMAL_SCENARIO=${scenario}\n${scenario==='pool-overhead'?'DM_FORMAL_REVIEWED_PATCH_SHA256='+createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex')+'\n':''}`),{mode:0o600});
-    assert.equal(readConfig(file,checkout).scenario,scenario);
-  }
-});
 test('deferred selection records its scenario as NOT EVALUATED without contacting hosts',async t=>{
   const path=temporary(t);
   const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',scenario:'hot-DM',attempts:3,mode:'formal'};
@@ -463,46 +256,6 @@ test('deferred selection records its scenario as NOT EVALUATED without contactin
   assert.equal(result.acceptance,false);
   const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
   assert.equal(summary.scenario,'hot-DM');assert.equal(summary.status,'NOT EVALUATED');
-});
-
-test('Q4 reduction checks concurrent connection/send/open/O5 evidence and keeps browsing separate',async t=>{
-  const {reportAttempt}=await import('./dms-formal-results.ts');
-  const epoch=1000000,from=epoch+600000,to=epoch+2400000;
-  for(const fault of ['none','connections','send-rate','open-rate','O5','outside-core','sparse-O5','missing-cadence','browsing-rate','browsing-split','browsing-99-rate','browsing-99-split','open-mix','nonconcurrent']) {
-    const path=temporary(t);
-    writeFileSync(path+'/window-starts.json',JSON.stringify(Array(11).fill(epoch)));
-    writeFileSync(path+'/exits.json',JSON.stringify(Array.from({length:11},(_,shard)=>({shard,code:0}))));
-    writeFileSync(path+'/durable.jsonl','');
-    for(let shard=0;shard<11;shard++) {
-      const dir=path+'/shard-'+shard;mkdirSync(dir);
-      for(const file of ['run.log','metrics.json'])writeFileSync(dir+'/'+file,'');
-      writeFileSync(dir+'/summary.json',JSON.stringify({state:{testRunDurationMs:2700000},metrics:{dm_errors:{values:{count:0}},dm_duplicate_frames:{values:{count:0}},iterations:{values:{count:1}}}}));
-    }
-    const reducer:Runtime['exec']=async command=>{
-      const dest=command.args.at(-1)!,browser=dest.endsWith('/browsing-organization');
-      const latencies=Object.fromEntries([...['resolve','create','renew','refresh','delta','coverage','send','first','deep'].map(s=>'dm_latency_ms:'+s),'dm_receipt_ms','dm_round_ms:attempts=5'].map(key=>[key,{samples:10000,p95:1,p99:2}]));
-      const mixMembers=Object.fromEntries([0,50].flatMap(held=>['delta','coverage','browse','recovery','held','completed5'].map(lane=>[held+':'+lane,fault==='O5'?0:500])));
-      const counters={'dm_offered:send':fault==='send-rate'?359999:360000,'dm_offered:resolve':1800,'dm_offered:create':900,'dm_offered:renew':fault==='open-rate'?899:900};
-      const buckets=Array.from({length:30},(_,i)=>{
-        const start=from+i*60000;
-        const rounds=browser?[]:Array.from({length:1000},(_,member)=>[0,30000].map(offset=>({member,retained:member%2?50:0,at:start+offset,lanes:['delta','coverage','browse','recovery',...(member%2?['held']:['delta'])]}))).flat();
-        if(fault==='sparse-O5')rounds.splice(i===0?1000:0);
-        return {from:start,to:start+60000,offered:{send:12000,resolve:fault==='open-mix'?120:60,create:fault==='open-mix'?0:30,renew:fault==='open-mix'?0:30,first:fault==='browsing-rate'?1500:fault==='browsing-split'?6000:['browsing-99-rate','browsing-99-split'].includes(fault)?2970:3000,deep:fault==='browsing-rate'?1500:fault==='browsing-99-rate'?2970:fault==='browsing-99-split'?3030:3000},rounds};
-      });
-      // Whole-core totals remain sufficient; only the sample-time bucket is light.
-      if(fault==='nonconcurrent') {buckets[0]!.offered.send=0;buckets[1]!.offered.send=24000;}
-      const offeredWork=fault==='missing-cadence'?undefined:{bucketMs:60000,buckets};
-      writeFileSync(dest+'/combined.json',JSON.stringify({scenario:'main',window:{from:browser && fault==='outside-core'?from-1:from,to},latencies,mixMembers,counters,offeredWork,peerMissing:0,fullIntervals:fault==='connections'?[]:[{start:from,end:to}]}));
-      return {code:0,stdout:''};
-    };
-    const report=await reportAttempt(path,'formal',reducer);
-    assert.ok('browsingLoad' in report,JSON.stringify(report));
-    assert.equal(report.browsingLoad.fullMixedLoad,['none','outside-core'].includes(fault));
-    assert.ok(report.latencyJudgment.browsingRows.every(row=>row.status===(fault==='none'?'PASS':'NOT EVALUATED')),fault);
-    assert.ok(report.latencyJudgment.rows.filter(row=>row.organization!=='browsing').every(row=>!['first','deep'].includes(row.shape)));
-    assert.equal(report.acceptance,false);
-    assert.match(readFileSync(path+'/judgment.md','utf8'),/Separate browsing Organization/);
-  }
 });
 test('pool overhead refuses unreviewed patch before contacting hosts',async t=>{
   const path=temporary(t);
@@ -533,34 +286,6 @@ test('reviewed overhead runner restores six arms in order and retains a judged c
   assert.equal(JSON.parse(readFileSync(config.output+'/summary.json','utf8')).acceptance,false);
   assert.equal(events.filter(e=>e.includes(' cleanup && timeout')).length,3);
 });
-
-for(const code of [0,17])test('executor records flushed generator log bytes, exit '+code,async t=>{
-  const path=temporary(t)+'/run.log';
-  const result=await execute({program:process.execPath,args:['-e',"process.stdout.write('日本語');process.stderr.write('stderr');process.exitCode="+code],log:path});
-  assert.equal(result.code,code);
-  const manifest=JSON.parse(readFileSync(path+'-retention.json','utf8'));
-  assert.equal(manifest.complete,true);
-  assert.equal(manifest.bytes,Buffer.byteLength('日本語stderr'));
-  assert.equal(manifest.bytes,readFileSync(path).length);
-});
-test('executor marks timed out log capture incomplete',async t=>{
-  const path=temporary(t)+'/run.log';
-  await assert.rejects(execute({program:process.execPath,args:['-e',"process.stdout.write('partial');setInterval(()=>{},1000)"],timeout:500,log:path}),/timeout/);
-  const manifest=JSON.parse(readFileSync(path+'-retention.json','utf8'));
-  assert.equal(manifest.complete,false);
-  assert.equal(manifest.bytes,readFileSync(path).length);
-});
-
-test('executor writes a redacted log only, never the raw cp output with home paths',async t=>{
-  const path=temporary(t)+'/transfer.log';
-  const redactLog=(text:string)=>text.replace(/\/Users\/[^/\s]+/g,'/Users/[user]');
-  await assert.rejects(checked(execute,{program:'sh',args:['-c',"echo 'cp: /Users/someone/runs/out/formal: Permission denied' >&2; echo out /Users/someone/x; exit 1"],timeout:5000,log:path,redactLog}),/sh failed/);
-  const saved=readFileSync(path,'utf8');
-  assert.ok(!saved.includes('someone'),saved);
-  assert.match(saved,/cp: \/Users\/\[user\]\/runs\/out\/formal: Permission denied/);
-  const manifest=JSON.parse(readFileSync(path+'-retention.json','utf8'));
-  assert.deepEqual([manifest.complete,manifest.redacted,manifest.bytes>0],[true,true,true]);
-});
 test('every transfer.log capture of the runner is redacted',async t=>{
   const {config,runtime}=stub(t,false);const original=runtime.exec;const logged:Command[]=[];
   runtime.exec=async command=>{if(command.log?.endsWith('/transfer.log'))logged.push(command);return original(command);};
@@ -568,41 +293,25 @@ test('every transfer.log capture of the runner is redacted',async t=>{
   assert.ok(logged.length>0,'the preflight uploads write transfer.log');
   for(const command of logged)assert.equal(command.redactLog?.('cp: /Users/someone/x: Permission denied'),'cp: /Users/[user]/x: Permission denied',command.program);
 });
-test('seed diagnostic CLI accepts only local pool-overhead at pair scale with a formal fixture', t => {
-  const path=temporary(t), file=path+'/config.env';
-  const patch='DM_FORMAL_REVIEWED_PATCH_SHA256='+'a'.repeat(64)+'\n';
-  const overhead='DM_FORMAL_SCENARIO=pool-overhead\n'+patch;
-  const local='DM_FORMAL_TARGET=local\n';
-  writeFileSync(file,env(path,local+overhead),{mode:0o600});
-  assert.equal(readRunConfig([file],checkout).seedDiagnostic,undefined);
-  assert.equal(readRunConfig([file,'--pilot'],checkout).pilot,true);
-  const diagnostic=readRunConfig([file,'--seed-diagnostic'],checkout);
-  assert.equal(diagnostic.seedDiagnostic,true);
-  assert.equal(diagnostic.pilot,false);
-  assert.equal(diagnostic.loadScale,'1/25');
-  assert.throws(()=>readRunConfig([file,'--pilot','--seed-diagnostic'],checkout),/Expected/);
-  // The baseline arm is the same seed diagnostic run with the instrumentation off.
-  const baselineArm=readRunConfig([file,'--seed-diagnostic-baseline'],checkout);
-  assert.deepEqual([baselineArm.seedDiagnostic,baselineArm.seedBaseline,baselineArm.loadScale,baselineArm.pilot],[true,true,'1/25',false]);
-  assert.equal(diagnostic.seedBaseline,undefined);
-  for (const extra of [overhead,local+'DM_FORMAL_SCENARIO=smoke\nDM_FORMAL_MODE=smoke\n',
-    local+overhead+'DM_FORMAL_LOAD_SCALE=1/10\n',local+overhead+'DM_FORMAL_MODE=smoke\n']) {
-    writeFileSync(file,env(path,extra));
-    assert.throws(()=>readRunConfig([file,'--seed-diagnostic'],checkout),/requires/);
-  }
+
+test('a rehearsal is refused outside a seed diagnostic arm', async t => {
+  const path=temporary(t);
+  const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedRehearsal:true};
+  await assert.rejects(run(config,{exec:async()=>{throw new Error('no host contact');},transfer:async()=>{},on:()=>{},off:()=>{}}),/Rehearsal requires a seed diagnostic arm/);
+  assert.ok(!existsSync(config.output));
 });
 
 // The rows and DB log a seed diagnostic writes: per Organization 200 batches and its Organization row; each instrumented
-// batch logs its five statement durations inside its clock window. A stopped seed ends at Organization 6 batch 124.
-function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean) {
+// batch logs the opening clock query and Message INSERT durations. A stopped seed ends at Organization 6 batch 124.
+function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean,shape={organizations:10,batchesPerOrganization:200}) {
   const base=Date.parse('2026-11-22T00:00:00Z'), rows:string[]=[], log:string[]=[];
   const at=(ms:number)=>new Date(ms).toISOString().replace('T',' ').replace('Z',' UTC');
-  for(let o=0;o<10;o++) {
-    for(let b=0;b<200;b++) {
+  for(let o=0;o<shape.organizations;o++) {
+    for(let b=0;b<shape.batchesPerOrganization;b++) {
       const index=o*201+b, startMs=base+index*1000, stop=stopped && o===6 && b===124, durationMs=stop?12166:b===0?2000:1000;
       rows.push(JSON.stringify(arm==='baseline'?{kind:'batch',organization:o,batchIndex:b,durationMs}
         :{kind:'batch',organization:o,batchIndex:b,durationMs,startedAtMs:startMs,endedAtMs:startMs+durationMs,dbClockStartMs:startMs,dbClockEndMs:startMs+900,dbClockSpanMs:900,dbBackendPid:1000+index,recorderMs:0.1}));
-      for(const [offset,ms] of [[0,'0.050'],[100,'800.000'],[101,'0.100'],[899,'50.000'],[900,'0.020']] as const)
+      for(const [offset,ms] of [[0,'0.050'],[899,'850.120']] as const)
         log.push(`2026-11-22T00:00:00.000000000Z ${at(startMs+offset)} [${1000+index}] LOG:  duration: ${ms} ms`);
       if(stop)return {timing:rows.join('\n')+'\n',dbLog:log};
     }
@@ -611,15 +320,18 @@ function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean) {
   return {timing:rows.join('\n')+'\n',dbLog:log};
 }
 
-for (const outcome of ['success','stop-rule','interrupted','collection-failure','interrupted-late','baseline','vm-gap','baseline-vm-gap']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
+// One seed diagnostic arm against fakes (no Docker): a full-size arm, or a rehearsal arm (#920) with the same collectors.
+// Returns the arm's output directory.
+async function seedDiagnosticArm(t:TestContext,outcome:string,rehearsal=false) {
   const path=temporary(t), events:string[]=[], listeners=new Map<string,()=>void>();
+  const shape=rehearsal?{organizations:1,batchesPerOrganization:5}:{organizations:10,batchesPerOrganization:200};
   const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',
-    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,...(outcome.startsWith('baseline')?{seedBaseline:true}:{}),
+    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,...(outcome.startsWith('baseline')?{seedBaseline:true}:{}),...(rehearsal?{seedRehearsal:true}:{}),
     reviewedPatchSha256:createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex')};
   const stop={organization:6,batchIndex:124,durationMs:12166,baselineMs:983.941,rule:'message-batch',
     limitMs:2951.823,startedAtMs:100,endedAtMs:12266};
   const baseline=outcome.startsWith('baseline'), vmGap=outcome.endsWith('vm-gap'), interrupted=outcome==='interrupted'||outcome==='interrupted-late', stopped=outcome==='stop-rule'||interrupted;
-  const {timing,dbLog}=diagnosticSeedRecords(baseline?'baseline':'instrumented',stopped);
+  const {timing,dbLog}=diagnosticSeedRecords(baseline?'baseline':'instrumented',stopped,shape);
   const vmLogDirectory=path+'/vm';mkdirSync(vmLogDirectory);writeFileSync(vmLogDirectory+'/console.log','1970-01-01T00:00:00Z kernel: ok\n');
   const collectionFailure=outcome==='collection-failure'||vmGap;
   // vm-gap: the init.log followed since the seed start is rotated and removed before the collector reads it (retention
@@ -690,6 +402,7 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
           assert.equal(workerState.seedBaseline,baseline?true:undefined);
           assert.equal(workerState.pilot,false);
           assert.equal(workerState.loadScale,'1/25');
+          assert.equal(workerState.seedRehearsal,rehearsal?true:undefined);
           mkdirSync(roleRoot+'/formal');
           writeFileSync(roleRoot+'/formal/seed-timing.jsonl',timing,{mode:0o600});
           if(outcome==='stop-rule')writeFileSync(roleRoot+'/formal/seed-stop.json',JSON.stringify(stop));
@@ -725,10 +438,17 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   assert.ok(!existsSync(config.output+'/overhead-comparison.json'));
   const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
   const status=JSON.parse(readFileSync(config.output+'/status.json','utf8'));
-  for(const record of [summary,status]) {
-    assert.equal(record.label,'DIAGNOSTIC');
-    assert.equal(record.status,'NOT EVALUATED');
+  const metadata=JSON.parse(readFileSync(config.output+'/metadata.json','utf8'));
+  const failed=existsSync(config.output+'/failure.json')?[JSON.parse(readFileSync(config.output+'/failure.json','utf8'))]:[];
+  for(const record of [summary,status,metadata,...failed]) {
+    assert.equal(record.label,rehearsal?'DIAGNOSTIC REHEARSAL':'DIAGNOSTIC');
+    // A rehearsal is marked in every record; a full-size arm's records carry no rehearsal field at all.
+    assert.equal(record.rehearsal,rehearsal?true:undefined);
+    assert.equal('rehearsal' in record,rehearsal);
   }
+  for(const record of [summary,status,...failed])assert.equal(record.status,'NOT EVALUATED');
+  // The seed size the arm expects: the full fixture (10 Organizations of 200 batches) or the rehearsal's.
+  assert.deepEqual(summary.conditions.shape,shape);
   assert.deepEqual(summary.attempts,[]);
   assert.deepEqual(summary.collectionFailures,vmGap?['docker-vm: partial']:collectionFailure?['db-samples.txt: postgres: sample timing missing']
     :outcome==='interrupted'?['host.log: failed']:outcome==='interrupted-late'?['db.log: redaction cut short: no time left before cleanup','db.log: server duration missing or incomplete on 1325 of 1325 batches','docker-vm: failed','host.log: failed']:[]);
@@ -746,14 +466,14 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
     assert.ok(existsSync(config.output+'/formal/docker-vm/init.log.partial')&&!existsSync(config.output+'/formal/docker-vm/init.log'));
   }
   assert.equal(summary.hostLog.status,interrupted?'failed':'complete');
-  const batches=stopped?6*200+125:2000;
+  const batches=stopped?6*200+125:shape.organizations*shape.batchesPerOrganization;
   assert.deepEqual([summary.overhead.batches.batches,summary.overhead.batches.missingRows,summary.overhead.batches.unexpectedRows],[batches,0,0]);
   if(baseline) {
     assert.deepEqual([summary.samplers,summary.hostSamples,summary.overhead.dockerExecs,summary.overhead.recorderMs],[null,null,null,null]);
     assert.equal(summary.overhead.instrumentationEffect,'baseline-arm');
     assert.equal(summary.overhead.batches.medianMs,1000);
     assert.ok(!existsSync(config.output+'/formal/seed-batch-server.jsonl'));
-    return;
+    return config.output;
   }
   assert.equal(summary.samplers.kernel.samples,1);
   assert.equal(summary.samplers.postgres.samples,3);
@@ -766,10 +486,10 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   assert.equal(server.length,batches);
   const late=outcome==='interrupted-late';
   // A late interrupt leaves no time: the redaction keeps only the first line, so no batch has a server duration.
-  assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:late?null:850.17,serverStatements:late?0:5});
+  assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:late?null:850.17,serverStatements:late?0:2});
   const dbLogFile=config.output+'/formal/db.log'+(late?'.partial':'');
   if(late)assert.equal(readFileSync(dbLogFile,'utf8').trim().split('\n').length,1);
-  else assert.match(readFileSync(dbLogFile,'utf8'),/duration: 800\.000 ms/);
+  else assert.match(readFileSync(dbLogFile,'utf8'),/duration: 850\.120 ms/);
   assert.doesNotMatch(readFileSync(dbLogFile,'utf8'),/fukulow-log-end/,'the end marker is not kept');
   assert.equal(summary.dbLogStream.status,outcome==='interrupted-late'?'partial':'complete');
   assert.equal(summary.dbLogStream.marker,'seen');
@@ -787,5 +507,35 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
       assert.equal(failure.seedStop.organization,null);
       assert.ok(failure.seedStop.endedAtMs>=failure.seedStop.startedAtMs);
     }
+  }
+  return config.output;
+}
+for (const outcome of ['success','stop-rule','interrupted','collection-failure','interrupted-late','baseline','vm-gap','baseline-vm-gap']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
+  await seedDiagnosticArm(t,outcome);
+});
+// The rehearsal keeps every collector and the same collection checks: a collector failure still fails the arm.
+for (const outcome of ['success','collection-failure','vm-gap','baseline','baseline-vm-gap']) test('seed diagnostic rehearsal runs every collector and captures logs before cleanup on '+outcome, async t => {
+  await seedDiagnosticArm(t,outcome,true);
+});
+
+test('both rehearsal arms run and are compared as a rehearsal only; a rehearsal is never pair evidence or mixed with a full arm', async t => {
+  // Instrumented arms first: the baseline arm mocks setTimeout for the rest of the test.
+  const full=await seedDiagnosticArm(t,'success'), instrumented=await seedDiagnosticArm(t,'success',true), baseline=await seedDiagnosticArm(t,'baseline',true);
+  const effect=(...args:string[])=>{
+    const result=spawnSync(process.execPath,[checkout+'/load/dms-formal-seed-effect.ts',...args],{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const rehearsed=effect('--rehearsal',instrumented,baseline);
+  assert.deepEqual([rehearsed.status,rehearsed.rehearsal,rehearsed.reasons,rehearsed.medianBatchDeltaMs],['rehearsal-compared',true,[],0]);
+  assert.deepEqual([rehearsed.instrumented.batches,rehearsed.baseline.batches],[5,5]);
+  assert.match(rehearsed.evidence,/never pair evidence/);
+  const pair=effect(instrumented,baseline);
+  assert.deepEqual([pair.status,pair.reasons],['unevaluated',['instrumented arm is a rehearsal, never pair evidence','baseline arm is a rehearsal, never pair evidence']]);
+  assert.equal('medianBatchDeltaMs' in pair,false);
+  for(const args of [[full,baseline],['--rehearsal',full,baseline]]) {
+    const mixed=effect(...args);
+    assert.equal(mixed.status,'unevaluated');
+    assert.ok(mixed.reasons.includes('a rehearsal arm and a full-size arm are never compared'),mixed.reasons.join('; '));
   }
 });

@@ -21,8 +21,9 @@ function restoreReasons(run: HoldsRun) {
 export function setupReasons(run: HoldsRun) {
   const reasons: string[] = [];
   const e = edges(run.times);
+  reasons.push(...(run.setup.gateErrors ?? []));
   if (run.setup.targetsReadyAtStall < targetSockets(run.cell) || run.setup.bystandersReadyAtStall < BYSTANDERS) reasons.push('not every socket was ready when the stall started');
-  if (run.accounts.length !== CELLS[run.cell].accounts || run.accounts.some(a => a.revokeStatus !== 200 || a.revokedAt === undefined || !(a.revokedAt < e.healthFrom))) reasons.push('a revoke mutation failed or completed after the fault started');
+  if (run.accounts.length !== CELLS[run.cell].accounts || run.accounts.some(a => a.revokeStatus !== 200 || a.revokeStartedAt === undefined || a.revokedAt === undefined || !(a.revokedAt < e.healthFrom))) reasons.push('a revoke mutation failed or completed after the fault started');
   reasons.push(...restoreReasons(run));
   const [from, to] = baselineWindow(run);
   // At least one successful probe of each kind keeps the baseline p99 finite.
@@ -50,17 +51,15 @@ export function setupReasons(run: HoldsRun) {
  *     received at least one stall Message, so a backlog existed through the pause;
  * (b) no revoked-Channel send record lies certainly before the gate-on statement: an unblocked
  *     socket loop would have sent the queued notice right after the revoke;
- * (c) no close evidence before resume + 1.5 s: a target close seen by the client or the proxy
- *     (harness receipt time), or any server `websocket_closed` event that may have been logged
- *     before it by its server timestamp (it has no socket identity, so any counts; an untimed
- *     one counts too).
+ * (c) no target close before its resume + 1.5 s. Server closes use the earlier of actual and
+ *     scheduled resume, unless a bystander close takes precedence at the scored gate.
  */
 export function stallReasons(run: HoldsRun) {
   const reasons: string[] = [];
   const backlog = run.targets.length === targetSockets(run.cell) && run.targets.every(t => {
     const resumed = t.stall.resumedAt[0];
     return t.stall.pausedAt.length > 0 && resumed !== undefined &&
-      bytesBetween(t.stall, resumed, Infinity) > 0 && t.stallMessagesAt.some(at => at >= resumed);
+      bytesBetween(t.stall, resumed, Infinity) > 0 && t.stallMessages.some(message => message.at >= resumed);
   });
   if (!backlog) reasons.push('a target socket shows no stalled backlog');
   const timing = run.sendTiming;
@@ -70,14 +69,13 @@ export function stallReasons(run: HoldsRun) {
     const early = timing.records.filter(r => revoked.has(r.channelId) && offset + (r.beforeMs + r.afterMs) / 2 + timing.uncertaintyMs < edges(run.times).sendFrom);
     if (early.length) reasons.push(`${early.length} revoked-Channel sends before the fault (socket loop not blocked)`);
   }
-  const limit = (resumed: number | undefined) => (resumed ?? Infinity) + TIMELINE.closeMargin;
   const targetClosed = run.targets.some(t => {
-    const before = limit(t.stall.resumedAt[0]);
+    const before = (t.stall.resumedAt[0] ?? Infinity) + TIMELINE.closeMargin;
     return (t.close && t.close.at < before) || t.stall.closes.some(c => c.at < before);
   });
   if (targetClosed) reasons.push('a target socket closed before resume + 1.5 s');
-  const serverLimit = limit(run.times.resume);
-  if (run.serverCloses.some(c => { const t = wallInterval(run, c.wallMs); return !t || t[0] < serverLimit; })) reasons.push('the server closed a socket before resume + 1.5 s');
+  const serverLimit = Math.min(run.times.resume, run.times.pass + TIMELINE.resume) + TIMELINE.closeMargin;
+  if (!run.bystanderCloses.length && run.serverCloses.some(c => { const t = wallInterval(run, c.wallMs); return !t || t[0] < serverLimit; })) reasons.push('the server closed a socket before resume + 1.5 s');
   return reasons;
 }
 

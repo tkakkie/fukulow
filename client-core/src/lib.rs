@@ -1,14 +1,25 @@
 //! Deterministic Message sync policy. The owner supplies all I/O results and timer ticks.
+mod access;
 #[cfg(any(feature = "wasm", test))]
 mod boundary_delta;
 mod engine;
+mod history_generation;
 mod merge;
 pub mod reply_counts;
 mod responses;
+mod retention;
+mod sends;
+mod socket_replies;
+mod sync_delay;
+#[cfg(test)]
+mod test_support;
 mod transitions;
 mod types;
 #[cfg(feature = "wasm")]
 mod wasm;
+pub use access::{AccessEndpoint, AccessLifetime, AccessOutcome, access_outcome};
+pub use history_generation::{HistoryObservation, HistoryObservationResult};
+pub use sync_delay::sync_delay;
 pub use types::*;
 
 use std::collections::BTreeMap;
@@ -22,6 +33,9 @@ pub struct Core {
     pub(crate) channel_order: Vec<Uuid>,
     pub(crate) requests: BTreeMap<Token, Request>,
     pub(crate) timers: BTreeMap<Token, Timer>,
+    socket_replies: socket_replies::SocketReplies,
+    membership_probe_pending: bool,
+    organization_history_issue: Option<Token>,
 }
 impl Core {
     pub fn new(self_id: Uuid) -> Self {
@@ -44,6 +58,9 @@ impl Core {
             channel_order: Vec::new(),
             requests: BTreeMap::new(),
             timers: BTreeMap::new(),
+            socket_replies: socket_replies::SocketReplies::default(),
+            membership_probe_pending: false,
+            organization_history_issue: None,
         }
     }
     pub fn session(&self) -> &SessionView {

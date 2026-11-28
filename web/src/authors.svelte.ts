@@ -6,8 +6,13 @@ export function authorsAdapter(controller: ReturnType<typeof createAuthors>) {
   return {
     get identities() { subscribe(); return controller.get() },
     isPending(id: string) { subscribe(); return controller.isPending(id) },
+    isInitialDisplayTimedOut(key: string) { subscribe(); return controller.isInitialDisplayTimedOut(key) },
+    syncInitialDisplay: controller.syncInitialDisplay,
     mentionName: (...args: Parameters<typeof controller.mentionName>) => { subscribe(); return controller.mentionName(...args) },
     watch: controller.watch,
+    selectChannel: controller.selectChannel,
+    confirmInitialSubscription: controller.confirmInitialSubscription,
+    invalidate: controller.invalidate,
     retry: controller.retry,
   }
 }

@@ -87,14 +87,14 @@ async fn delivery_reads_role_after_subscription_and_after_http_response(pool: Pg
     let key = Uuid::new_v4();
     let gate = messages::pause_publication(key);
     let blocked = send(&f, &f.token, f.channel, key, "must not reach Guest").await;
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     sqlx::query("UPDATE users SET role='guest' WHERE organization_id=$1 AND id=$2")
         .bind(f.organization)
         .bind(reader)
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     access_loss::access_lost(&mut socket, f.channel).await;
     silent(&mut socket).await;

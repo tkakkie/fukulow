@@ -1,11 +1,13 @@
 use super::*;
 use crate::auth::{SubscriptionRecheck, SubscriptionScope};
+use crate::channels::AccessWatch;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 
 #[fukulow_test::test]
 async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let (_, org, _, channel, token) = fixture(&pools.admin).await;
-    crate::database::tests::context::context_policies(&pools.admin).await;
+    crate::database::test_support::context_policies(&pools.admin).await;
     let app = router(&pools.app).await;
     let key = Uuid::new_v4();
     let intent = json!({"client_message_id":key,"body":"Topic root","topic_name":"Context"});
@@ -23,22 +25,27 @@ async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool)
     }
     // Both preflight lookups must see no Message before the winner commits.
     // The loser then necessarily exercises the post-conflict canonical lookup.
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%135%'")
-                .fetch_one(&pools.admin).await.unwrap();
-            if waiting == 2 { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pools.admin,
+        Blocked::Advisory(Advisory::Query("%135%")),
+        Count::Exactly(2),
+        std::time::Duration::from_secs(3),
+    )
+    .await;
     held.rollback().await.unwrap();
     let root = sends.join_next().await.unwrap().unwrap();
     assert_eq!(sends.join_next().await.unwrap().unwrap(), root);
     assert_eq!(root["created_seq"], 1);
-    let logged: Vec<i64> = sqlx::query_scalar("SELECT event_seq FROM channel_log WHERE organization_id=$1 AND channel_id=$2 ORDER BY event_seq")
-        .bind(org).bind(channel).fetch_all(&pools.admin).await.unwrap();
+    let created: Vec<i64> = sqlx::query_scalar(
+        "SELECT seq FROM messages WHERE organization_id=$1 AND channel_id=$2 ORDER BY seq",
+    )
+    .bind(org)
+    .bind(channel)
+    .fetch_all(&pools.admin)
+    .await
+    .unwrap();
     assert_eq!(
-        logged,
+        created,
         [1],
         "the in-flight unique-key loser appends nothing"
     );
@@ -106,7 +113,7 @@ async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
             .unwrap();
     sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Shared Account','member')")
         .bind(other_org).bind(Uuid::new_v4()).bind(account).execute(&pools.admin).await.unwrap();
-    crate::database::tests::context::context_policies(&pools.admin).await;
+    crate::database::test_support::context_policies(&pools.admin).await;
     let app = router(&pools.app)
         .await
         .layer(axum::Extension(axum::extract::ConnectInfo(
@@ -184,7 +191,10 @@ async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
         .check(&pools.app, SubscriptionScope::All)
         .await
         .unwrap();
-    assert_eq!((first.status(), second.status()), (0, 0));
+    assert_eq!(
+        (first.status(), second.status()),
+        (AccessWatch::ACTIVE, AccessWatch::ACTIVE)
+    );
     sqlx::query(
         "UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",
     )
@@ -197,7 +207,10 @@ async fn handlers_and_fanout_require_authenticated_context(pool: PgPool) {
         .check(&pools.app, SubscriptionScope::All)
         .await
         .unwrap();
-    assert_eq!((first.status(), second.status()), (0, 3));
+    assert_eq!(
+        (first.status(), second.status()),
+        (AccessWatch::ACTIVE, AccessWatch::MEMBERSHIP_LOST)
+    );
     // Account identity is global, but only for the authenticated Account.
     use argon2::PasswordHasher;
     let hash = argon2::Argon2::default()

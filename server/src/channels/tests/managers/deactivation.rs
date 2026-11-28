@@ -1,4 +1,5 @@
 use super::*;
+use crate::channels::access::AccessStatus;
 use std::time::Duration;
 
 mod concurrency;
@@ -138,7 +139,7 @@ async fn denial(pool: PgPool, case: &str) {
     assert_eq!(body(response).await, json!({"error":error}), "{case}");
     assert_eq!(all_state(&f.pools.admin).await, before, "{case}");
     if let Some(watch) = watch {
-        assert_eq!(watch.status(), 0);
+        assert_eq!(watch.status(), AccessStatus::Active);
     }
     assert_eq!(f.observed.calls.load(Ordering::SeqCst), calls);
     f.pools.app.close().await;

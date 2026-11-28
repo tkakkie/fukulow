@@ -1,7 +1,9 @@
 // Test fixture for #668 judgement: a clean H512 short run on a synthetic clock (offset ±1 ms).
 // Server wall timestamps equal harness time here, with the same ±1 ms calibration.
-import { SOCKETS_PER_ACCOUNT } from './revocation-holds-plan.ts';
+import { channelsXor } from './revocation-holds-evidence.ts';
+import { SOCKETS_PER_ACCOUNT, STALL_MESSAGES } from './revocation-holds-plan.ts';
 import type { HoldsRun, HoldsSample, TargetSocket } from './revocation-holds-judgment.ts';
+import { parseTrace } from './revocation-holds-trace.ts';
 
 export const TIMES = { pass: 40_000, stall: 36_000, revoke: 37_000, resume: 40_100, end: 80_000 };
 export const GATE_ON = 39_700, GATE_OFF = 43_500;
@@ -11,7 +13,34 @@ export const poolSample = (at: number, lag = 0) => ({ at: at + lag, wallMs: at, 
 export const timeoutsFrom = (run: { pool: { wallMs: number | undefined; fields: Record<string, number> }[] }, from: number, n: number) => {
   for (const p of run.pool) if ((p.wallMs ?? -Infinity) >= from) p.fields.acquire_timeout = n;
 };
-export const CHANNELS = Array.from({ length: 16 }, (_, i) => `c${i}`);
+export const channelId = (i: number) => `00000000-0000-4000-8000-${(i + 1).toString(16).padStart(12, '0')}`;
+export const CHANNELS = Array.from({ length: 16 }, (_, i) => channelId(i));
+export const memberId = (i: number) => `a0000000-0000-4000-8000-${(i + 1).toString(16).padStart(12, '0')}`;
+
+export const traceLine = (event: string, fields: Record<string, unknown>) =>
+  JSON.stringify({ target: 'fukulow_revocation_measurement', fields: { event, ...fields } });
+export const watermarkLine = (n: number, overrides: Record<string, unknown> = {}) => traceLine('revocation_trace_watermark', {
+  attempted: n, written: n, dropped: 0, timing_attempted: 1, timing_written: 1, timing_dropped: 0, ...overrides,
+});
+export function traceLines(run: HoldsRun) {
+  const fault = run.kind === 'fault', n = run.revokedChannels.length, xor = channelsXor(run.revokedChannels);
+  const snapshots = run.targets.map((t, i) => `${run.accounts[t.account].memberId}:${n}:${n}:${n}:${xor}:${i}`);
+  const outcomes = run.targets.map((t, i) => {
+    const member = run.accounts[t.account].memberId;
+    return fault ? `${member}:${n}:0:0:0:0:0:${i}:40020` : `${member}:0:0:0:${n}:0:0:${i}:-`;
+  });
+  return [
+    traceLine('revocation_fallback_snapshot', { trace_seq: 1, check_seq: 1, server_ms: 40_010, registrations: run.targets.length, records: snapshots.join(',') }),
+    traceLine('revocation_fallback_outcome', { trace_seq: 2, check_seq: 1, server_ms: 40_025, records: outcomes.join(',') }),
+    traceLine('revocation_fallback_check', { trace_seq: 3, check_seq: 1, started_ms: 40_005, finished_ms: 40_025,
+      registrations: 1024 + run.targets.length, rows: 2048, chunks: 3, failed_chunks: fault ? 3 : 0 }),
+    traceLine('subscription_fallback_pass', { trace_seq: 4, trace_dropped: 0, tick: 1, started_ms: 40_000,
+      session_ms: 40_004, completed_ms: 40_029, outcome: fault ? 'error' : 'ok' }),
+    traceLine('subscription_fallback_timing', { tick: 1, started_ms: 40_000, session_ms: 40_004,
+      final_admission_ms: fault ? 40_024 : undefined, completed_ms: 40_030 }),
+  ];
+}
+export const jsonl = (lines: string[]) => lines.join('\n') + '\n';
 
 const retriesAt = (t: number) => t >= 41_800 ? 1536 : t >= 40_800 ? 1024 : t >= 40_300 ? 512 : 0;
 export const sample = (serverMs: number, over: Partial<HoldsSample> = {}): HoldsSample => ({
@@ -22,23 +51,23 @@ export const sample = (serverMs: number, over: Partial<HoldsSample> = {}): Holds
 export const target = (socket: number): TargetSocket => ({
   account: Math.floor(socket / SOCKETS_PER_ACCOUNT), ready: true, subscribed: true,
   stall: { reads: [{ at: 1_000, bytes: 200 }, { at: 40_101, bytes: 64_000 }], pausedAt: [TIMES.stall], resumedAt: [TIMES.resume], closes: [] },
-  stallMessagesAt: [40_150],
+  stallMessages: Array.from({ length: STALL_MESSAGES }, (_, i) => ({ id: String(i), at: 40_150 + i })),
 });
 
-export function holdsFixture(): HoldsRun {
+export function holdsFixture(kind: HoldsRun['kind'] = 'fault'): HoldsRun {
   const sockets = 32;
   const notices = Array.from({ length: sockets }, (_, socket) => CHANNELS.map((channelId, i) => ({ socket, channelId, at: 44_100 + i }))).flat();
   const probes = (ms: number) => Array.from({ length: 1600 }, (_, i) => ({ at: i * 50, ms, ok: true, status: 200 }));
   
-  return {
-    kind: 'fault', cell: 'H512', duration: 'short', repeat: 1,
+  const run: HoldsRun = {
+    kind, cell: 'H512', duration: kind === 'fault' ? 'short' : undefined, repeat: 1,
     times: { ...TIMES, gateOn: [GATE_ON, GATE_ON], gateOff: [GATE_OFF, GATE_OFF], nominalRecovery: { short: GATE_OFF } },
     setup: { bystanders: 1024, bystandersReadyAtStall: 1024, targetsReadyAtStall: sockets, calibrationErrors: [], stallPostFailures: 0 },
     serverCloses: [], wallOffsetBoundsMs: [-1, 1],
     revokedChannels: [...CHANNELS],
-    accounts: [{ revokeStartedAt: 37_000, revokedAt: 37_100, revokeStatus: 200 }],
+    accounts: [{ memberId: memberId(0), revokeStartedAt: 37_000, revokedAt: 37_100, revokeStatus: 200 }],
     targets: Array.from({ length: sockets }, (_, i) => target(i)),
-    notices, bystanderNotices: 0, bystanderCloses: 0,
+    notices, bystanderNotices: 0, bystanderCloses: [],
     sendTiming: {
       offsetBoundsMs: [-1, 1], uncertaintyMs: 2,
       records: notices.map(n => ({ channelId: n.channelId, beforeMs: 44_000, afterMs: 44_002, afterHold: true })),
@@ -52,4 +81,19 @@ export function holdsFixture(): HoldsRun {
     rss: Array.from({ length: 160 }, (_, i) => ({ at: i * 500, kb: 1000 })),
     metrics: { revocation_held: 512, revocation_delivered_after_hold: 512, revocation_retired_timeout: 0, revocation_retired_retries: 0, revocation_retired_fenced: 0, revocation_retired_global_cap: 0, revocation_retired_registration_cap: 0 },
   };
+  run.trace = parseTrace(jsonl([...traceLines(run), watermarkLine(4)]), true);
+  return run;
+}
+
+export function holdsFence(duration: 'short' | 'long' = 'short') {
+  const run = holdsFixture();
+  run.cell = 'Hfence'; run.duration = duration;
+  run.revokedChannels = Array.from({ length: 64 }, (_, i) => channelId(i));
+  run.targets = Array.from({ length: 64 }, (_, i) => target(i));
+  run.setup.targetsReadyAtStall = 64;
+  run.accounts = [run.accounts[0], { revokeStartedAt: 37_000, revokedAt: 37_200, revokeStatus: 200, restoreStartedAt: 42_000, restoredAt: 42_050, restoreStatus: 200 }];
+  run.notices = []; run.sendTiming!.records = [];
+  run.samples = run.samples.map(s => ({ ...s, highWaterMark: s.serverMs >= 39_750 ? 4096 : 0, retryAttempts: s.serverMs >= 41_800 ? 3 * 4096 : 0 }));
+  run.metrics = { ...run.metrics!, revocation_held: 4096, revocation_delivered_after_hold: 0, revocation_retired_fenced: 2048, revocation_retired_retries: 1536 };
+  return run;
 }

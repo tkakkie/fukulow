@@ -10,7 +10,7 @@ import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { CommandTimeoutError, SqlStatementTimeoutError } from './bench.ts';
 import { denialCases, probe } from './definer.ts';
-import { appSessionSettings, hash, settings, snapshot as v13 } from './manifest.ts';
+import { appSessionSettings, hash, settings, snapshot as baseSnapshot } from './manifest.ts';
 import { queries } from './queries.ts';
 import { channel, epoch, generate, org, uuid } from './seed.ts';
 import { accepts, completeness, denialExpectation, denials, judge, rehearsalComplete, shortIds, type Evidence, type Sample } from './d3r/acceptance.ts';
@@ -26,9 +26,9 @@ import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFi
 import { timeQuery } from './d3r/timing.ts';
 import { assertHeadroom, dfBytes, dockerDiskArgs, headroomSampler, outputDisk, projectHeadroom, type Disk } from './d3r/headroom.ts';
 
-test('v17 freezes the approved settings and every production migration while preserving v13', () => {
+test('the current d3r manifest freezes the approved settings and every production migration', () => {
   const {sha256, frozen} = loadManifest();
-  const baseline = v13();
+  const baseline = baseSnapshot();
   assert.equal(sha256, hash(JSON.stringify(frozen)));
   assert.equal(frozen.image, 'postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42');
   assert.deepEqual(frozen.performance, {
@@ -113,9 +113,18 @@ function pinnedV16(): ReturnType<typeof loadManifest> {
   return v16;
 }
 
+function pinnedV17(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v17.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), '2753a5aacfffe7fc974baa4b9ae52275540ae2ab110558c1bf0bc5959c987195');
+  const v17 = JSON.parse(text);
+  assert.equal(v17.sha256, 'd096806e8cedfcbc20e8b638c9f6aad9494908e7603f15d11b724de8a47b3f03');
+  assert.equal(v17.sha256, hash(JSON.stringify(v17.frozen)));
+  return v17;
+}
+
 test('v16 stays pinned and v17 differs from it only by the new migration and its sources', () => {
   const v16 = pinnedV16();
-  const {frozen} = loadManifest();
+  const {frozen} = pinnedV17();
   const keys = [...new Set([...Object.keys(v16.frozen), ...Object.keys(frozen)])];
   const changed = keys.filter(key => JSON.stringify((v16.frozen as Record<string, unknown>)[key]) !== JSON.stringify((frozen as Record<string, unknown>)[key]));
   assert.deepEqual(changed.sort(), ['migrations', 'sourceHashes', 'version']);
@@ -126,6 +135,47 @@ test('v16 stays pinned and v17 differs from it only by the new migration and its
   const before = new Map<string, string>(v16.frozen.sourceHashes.map((s: {path: string; sha256: string}) => [s.path, s.sha256]));
   assert.ok([...before.keys()].every(path => frozen.sourceHashes.some(source => source.path === path)));
   assert.deepEqual(frozen.sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', added]);
+});
+
+function pinnedV18(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v18.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), '094587ccf3aee1068fe0d4af7ca72917e3ec000282ada33fa7580617e2bc9454');
+  const v18 = JSON.parse(text);
+  assert.equal(v18.sha256, 'a038803ee87a8ef066dccef4b88f6f354ddc4ee45e0efa061b92e9492e7c38c8');
+  assert.equal(v18.sha256, hash(JSON.stringify(v18.frozen)));
+  return v18;
+}
+
+test('v18 records the replay and Search 429 sources with v17 conditions', () => {
+  const {version, date, migrations, sourceHashes, ...conditions} = pinnedV18().frozen;
+  const {version: previousVersion, date: previousDate, migrations: previousMigrations,
+    sourceHashes: previousSources, ...previousConditions} = pinnedV17().frozen;
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual([previousDate, date], ['2026-11-23', '2026-11-27']);
+  assert.deepEqual(conditions, previousConditions);
+  const added = 'server/migrations/202611260620_create_from_messages.sql';
+  assert.deepEqual(migrations, [...previousMigrations, added].sort());
+  assert.deepEqual(sourceHashes.map(source => source.path), [...previousSources.map(source => source.path), added].sort());
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path), [
+    '.gitattributes', 'load/search-engines/d3r/manifest.ts', 'load/search-engines/manifest.ts', 'load/search-engines/summarize.ts',
+    'deploy/db-grants.sql', 'server/src/messages/search.rs', added,
+  ].sort());
+});
+
+test('v19 records Message retention with v18 conditions', () => {
+  const {version, date, migrations, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, date: previousDate, migrations: previousMigrations,
+    sourceHashes: previousSources, ...previousConditions} = pinnedV18().frozen;
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual([previousDate, date], ['2026-11-27', '2026-11-28']);
+  assert.deepEqual(conditions, previousConditions);
+  const added = 'server/migrations/202611280001_messages_no_delete.sql';
+  assert.deepEqual(migrations, [...previousMigrations, added].sort());
+  assert.deepEqual(sourceHashes.map(source => source.path), [...previousSources.map(source => source.path), added].sort());
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
     ['load/search-engines/d3r/manifest.ts', added]);
 });
 

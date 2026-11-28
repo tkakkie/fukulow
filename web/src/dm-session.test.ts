@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { createSession } from './session'
 import type { Dm, Message, ReadPosition, Result, TimelinePage } from './api'
-import type { RealtimeHandlers } from './realtime'
+import type { DmListChanged } from './api-schema'
+import { connectRealtime, type RealtimeHandlers, type SocketLike } from './realtime'
 import { dm } from './dm-test-helpers'
 const ok = <T>(data: T): Result<T> => ({ ok: true, data })
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve() }
@@ -214,4 +215,57 @@ it('unwatched DM Mention baselines follow activity notices and cross-device mark
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(0)
   expect(c.listMessages).not.toHaveBeenCalled(); expect(c.markRead).not.toHaveBeenCalled()
   c.session.close()
+})
+
+it('a raw dm_list_changed socket frame reaches DM discovery through the parser and respects the P-D5 burst budget', async () => {
+  let rows: Dm[] = [dm('D')]
+  let rawSocket!: SocketLike
+  const listChannels = vi.fn(async () => ok({ history_generation: rows[0]!.history_generation, channels: [] }))
+  const changes = vi.fn(async ({ lane }: import('./api').DmChangesQuery) => ok({ dms: rows.map(({ id, kind, peer }) => ({ id, kind, peer })), next_cursor: lane, caught_up: true }))
+  const listDms = vi.fn(async (q: import('./api').DmListQuery) => ok({ history_generation: rows[0]!.history_generation, dms: q.channel_id ? rows.filter(row => q.channel_id!.includes(row.id)) : rows, next_cursor: null }))
+  const session = createSession({
+    selfId: 'me', organizationId: 'org', onEnded: vi.fn(),
+    channelsApi: { listChannels, createChannel: async () => ({ ok: false, kind: 'network' }) },
+    dmsApi: { changes, list: listDms, open: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: { listTimeline: async () => ({ ok: false, kind: 'network' }), listTopics: async () => ({ ok: false, kind: 'network' }), getTopicSummary: async () => ({ ok: false, kind: 'network' }), listTopicMessages: async () => ({ ok: false, kind: 'network' }) },
+    unreadApi: { listChannels, markRead: async () => ({ ok: false, kind: 'network' }), getTopicSummary: async () => ({ ok: false, kind: 'network' }) },
+    sync: {
+      connect(handlers) {
+        rawSocket = { send() {}, close() {}, onopen: null, onmessage: null, onclose: null }
+        return connectRealtime(handlers, () => rawSocket)
+      },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ({ ok: false, kind: 'network' }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
+      random: () => 0.5,
+    },
+  })
+  const deltas = () => changes.mock.calls.filter(([q]) => q.lane === 'delta').length
+  try {
+    rawSocket.onopen?.()
+    rawSocket.onmessage?.({ data: JSON.stringify({ type: 'activity_ready' }) })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(deltas()).toBe(1)
+    expect(session.dms.get().rows.map(r => r.identity.id)).toEqual(['D'])
+
+    // Extra fields are rejected by isServerEvent and do not trigger DM discovery.
+    rows = [dm('D'), dm('peer-empty')]
+    rawSocket.onmessage?.({ data: JSON.stringify({ type: 'dm_list_changed', channel_id: 'peer-empty' }) })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(deltas()).toBe(1)
+    expect(session.dms.get().rows.map(r => r.identity.id)).toEqual(['D'])
+
+    // A canonical dm_list_changed frame passes through isServerEvent -> activity -> DM discovery.
+    const notice: DmListChanged = { type: 'dm_list_changed' }
+    rawSocket.onmessage?.({ data: JSON.stringify(notice) })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(deltas()).toBe(2)
+    expect(changes).toHaveBeenLastCalledWith({ lane: 'delta', cursor: 'delta' }, expect.any(AbortSignal))
+    expect(session.dms.get().rows.map(r => r.identity.id)).toEqual(['D', 'peer-empty'])
+
+    // A burst of dm_list_changed frames before the next O5 run spends no further delta budget (P-D5).
+    for (let i = 0; i < 10; i++) rawSocket.onmessage?.({ data: JSON.stringify(notice) })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(deltas()).toBe(2)
+  } finally {
+    session.close()
+  }
 })

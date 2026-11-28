@@ -78,6 +78,8 @@ impl<'a> Step<'a> {
     }
     pub fn connect(&mut self) {
         let id = self.token();
+        self.core.socket_replies.clear();
+        self.core.membership_probe_pending = false;
         self.core.session.connection = Some(id);
         self.out.effects.push(Effect::Connect { id });
     }
@@ -96,7 +98,7 @@ impl<'a> Step<'a> {
             }
         }
     }
-    pub fn stop(&mut self, sign_in: bool) {
+    pub(super) fn teardown(&mut self) {
         let timers: Vec<_> = self.core.timers.keys().copied().collect();
         for id in timers {
             self.cancel(Some(id));
@@ -104,10 +106,15 @@ impl<'a> Step<'a> {
         self.core.session.running = false;
         self.core.session.connected = false;
         self.core.session.connection = None;
+        self.core.socket_replies.clear();
+        self.core.membership_probe_pending = false;
         self.core.requests.clear();
         self.metadata_changed = true;
-        self.clear_channels();
         self.out.effects.push(Effect::Close);
+    }
+    pub fn stop(&mut self, sign_in: bool) {
+        self.teardown();
+        self.clear_channels();
         if sign_in {
             self.core.session.session = Session::SignInRequired;
             self.out.effects.push(Effect::SignIn);
@@ -150,40 +157,41 @@ impl<'a> Step<'a> {
         self.core.session.history_generation = generation;
         self.core.session.history_epoch += 1;
         for id in self.ids() {
-            let old = self.channel(id).clone();
-            if old.subscription.is_some() && self.core.session.connected {
-                self.out.effects.push(Effect::Unsubscribe { channel: id });
-            }
-            self.invalidate(id, true);
-            let mut pending = (*old.pending).clone();
-            for p in &mut pending {
-                self.cancel(p.retry_wait);
-                p.retry_wait = None;
-                if matches!(p.state, PendingState::Sending | PendingState::Throttled) {
-                    p.state = PendingState::Unknown;
-                }
-            }
-            *self.channel(id) = ChannelView {
-                watched: old.watched,
-                pending: Rc::new(pending),
-                state: if old.state == Availability::Unavailable {
-                    Availability::Unavailable
-                } else {
-                    Availability::Loading
-                },
-                ..ChannelView::default()
-            };
+            self.clear_channel_history(id);
         }
         // A fresh socket fences frames from retired subscriptions without discarding HTTP
         // completions: their same-session late 401 still has authority.
         self.core.session.connected = false;
         self.connect();
+        self.core.organization_history_issue = self.core.session.connection;
         for id in self.ids() {
             let c = self.channel(id);
             if c.watched && c.state != Availability::Unavailable {
                 self.history(id, Page::Latest, None);
             }
         }
+    }
+    fn clear_channel_history(&mut self, id: Uuid) {
+        let old = self.channel(id).clone();
+        if old.subscription.is_some() && self.core.session.connected {
+            self.out.effects.push(Effect::Unsubscribe { channel: id });
+        }
+        self.invalidate(id, true);
+        let pending = self.interrupt_pending_sends(&old.pending);
+        *self.channel(id) = ChannelView {
+            watched: old.watched,
+            pending,
+            state: if old.state == Availability::Unavailable {
+                Availability::Unavailable
+            } else {
+                Availability::Loading
+            },
+            ..ChannelView::default()
+        };
+    }
+    pub(super) fn restart_channel_history(&mut self, id: Uuid) {
+        self.clear_channel_history(id);
+        self.history(id, Page::Latest, None);
     }
     pub fn subscribe(&mut self, id: Uuid) {
         let connected = self.core.session.connected;
@@ -257,7 +265,7 @@ impl<'a> Step<'a> {
     }
     pub fn gap(c: &ChannelView) -> bool {
         c.cursor.is_some_and(|cursor| {
-            c.held_through.unwrap_or(0) > cursor + 1
+            c.held_through.unwrap_or(0) > cursor.saturating_add(1)
                 || c.forgotten_through.unwrap_or(0) > cursor
                 || c.subscription
                     .as_ref()
@@ -300,146 +308,22 @@ impl<'a> Step<'a> {
             self.channel(id).wait = Some(n);
         }
     }
-    pub fn attempt(&mut self, id: Uuid, mut p: Pending) {
-        self.cancel(p.retry_wait);
-        let n = self.token();
-        p.state = PendingState::Sending;
-        p.request = n;
-        p.retry_wait = None;
-        let c = self.channel(id);
-        let mut pending = (*c.pending).clone();
-        if let Some(index) = pending
-            .iter()
-            .position(|v| v.client_message_id == p.client_message_id)
-        {
-            pending[index] = p.clone();
-        } else {
-            pending.push(p.clone());
-        }
-        c.pending = Rc::new(pending);
-        self.core.requests.insert(
-            n,
-            Request::Send {
-                channel: id,
-                client_message_id: p.client_message_id,
-                stale: false,
-            },
-        );
-        self.metadata_changed = true;
-        self.out.effects.push(Effect::Send {
-            history_generation: self.core.session.history_generation,
-            id: n,
-            channel: id,
-            client_message_id: p.client_message_id,
-            body: p.body,
-            reply_to: p.reply_to,
-            topic_name: p.topic_name,
-        });
-    }
     pub fn unavailable(&mut self, id: Uuid) {
         self.invalidate(id, false);
         let c = self.channel(id).clone();
         if c.subscription.is_some() && self.core.session.connected {
             self.out.effects.push(Effect::Unsubscribe { channel: id });
         }
-        let mut pending = (*c.pending).clone();
-        for p in &mut pending {
-            self.cancel(p.retry_wait);
-            p.state = PendingState::Failed;
-            p.retry_wait = None;
-        }
+        let pending = self.fail_pending_sends(&c.pending);
         let c = self.channel(id);
         c.subscription = None;
         c.state = Availability::Unavailable;
-        c.pending = Rc::new(pending);
+        c.pending = pending;
         for r in self.core.requests.values_mut() {
             if r.channel() == id && matches!(r, Request::Send { .. }) {
                 r.invalidate();
                 self.metadata_changed = true;
             }
-        }
-    }
-    fn trim(&mut self, id: Uuid, limit: usize) {
-        let c = self.channel(id);
-        c.messages = Rc::new(c.messages[c.messages.len().saturating_sub(limit)..].to_vec());
-        c.retained_count = Some(c.messages.len());
-        c.has_older = true;
-    }
-    fn retention(&mut self) {
-        for (id, before) in &self.touched {
-            let changed = before
-                .as_ref()
-                .zip(self.core.channel(*id))
-                .is_none_or(|(a, b)| !Rc::ptr_eq(&a.messages, &b.messages));
-            if changed && let Some(c) = self.core.channels.get_mut(id) {
-                c.retained_count = Some(c.messages.len());
-            }
-        }
-        let mut inactive: Vec<_> = self
-            .core
-            .channel_order
-            .iter()
-            .filter_map(|id| {
-                self.core
-                    .channel(*id)
-                    .filter(|c| !c.watched)
-                    .map(|c| (*id, c.last_used.unwrap_or(0)))
-            })
-            .collect();
-        inactive.sort_by_key(|a| std::cmp::Reverse(a.1));
-        for (index, (id, _)) in inactive.into_iter().enumerate() {
-            let limit = if index < INACTIVE_CHANNEL_LIMIT {
-                INACTIVE_CHANNEL_MESSAGE_LIMIT
-            } else {
-                0
-            };
-            if self
-                .core
-                .channel(id)
-                .is_some_and(|c| c.versions.len() > limit)
-            {
-                self.cap_versions(id, limit);
-            }
-            if self
-                .core
-                .channel(id)
-                .is_some_and(|c| c.moved_roots.len() > limit)
-            {
-                self.cap_moved_roots(id, limit);
-            }
-            if self
-                .core
-                .channel(id)
-                .is_some_and(|c| c.retained_count.unwrap_or(0) > limit)
-            {
-                self.trim(id, limit);
-            }
-        }
-        let mut priority: Vec<_> = self
-            .core
-            .channel_order
-            .iter()
-            .filter_map(|id| {
-                self.core
-                    .channel(*id)
-                    .map(|c| (*id, c.watched, c.last_used.unwrap_or(0)))
-            })
-            .collect();
-        priority.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
-        let mut remaining = SYNC_MESSAGE_LIMIT;
-        for (id, _, _) in priority {
-            if self
-                .core
-                .channel(id)
-                .is_some_and(|c| c.retained_count.unwrap_or(0) > remaining)
-            {
-                self.trim(id, remaining);
-            }
-            remaining -= self
-                .core
-                .channel(id)
-                .and_then(|c| c.retained_count)
-                .unwrap_or(0);
         }
     }
     pub fn finish(mut self) -> StepResult {
@@ -463,5 +347,21 @@ impl<'a> Step<'a> {
             || !self.out.changed_channels.is_empty()
             || self.before != self.core.session;
         self.out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gap_is_false_at_maximum_cursor() {
+        let channel = ChannelView {
+            cursor: Some(i64::MAX),
+            held_through: Some(i64::MAX),
+            forgotten_through: Some(i64::MAX),
+            ..ChannelView::default()
+        };
+        assert!(!Step::gap(&channel));
     }
 }

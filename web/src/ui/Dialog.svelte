@@ -12,9 +12,29 @@
   const FOCUSABLE_SELECTOR =
     'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
 
+  const NON_TEXT_INPUT_TYPES = new Set([
+    'button',
+    'checkbox',
+    'color',
+    'file',
+    'hidden',
+    'image',
+    'radio',
+    'range',
+    'reset',
+    'submit',
+  ])
+
+  function isTextInputTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement) || target.tagName !== 'INPUT') return false
+    const type = (target.getAttribute('type') ?? 'text').toLowerCase()
+    return !NON_TEXT_INPUT_TYPES.has(type)
+  }
+
   let {
     open = false,
     busy = false,
+    form = false,
     title,
     description,
     confirmLabel,
@@ -26,6 +46,7 @@
   }: {
     open?: boolean
     busy?: boolean
+    form?: boolean
     title: string
     description?: string
     confirmLabel?: string
@@ -36,7 +57,7 @@
     children?: Snippet
   } = $props()
 
-  let dialogEl = $state<HTMLElement | null>(null)
+  let dialogEl = $state<HTMLDialogElement | null>(null)
   let wasOpen = false
   let openerEl: FocusableTarget | null = null
 
@@ -46,14 +67,25 @@
   }
 
   $effect(() => {
-    if (open && !wasOpen) {
-      wasOpen = true
-      const active = typeof document !== 'undefined' ? document.activeElement : null
-      openerEl = active instanceof HTMLElement ? active : null
-      void tick().then(() => {
-        if (!open || !dialogEl) return
-        focusDialogOnOpen(getFocusableControls(), dialogEl)
-      })
+    const el = dialogEl
+    if (open && el) {
+      if (!wasOpen) {
+        wasOpen = true
+        const active = typeof document !== 'undefined' ? document.activeElement : null
+        openerEl = active instanceof HTMLElement && active !== document.body && active !== document.documentElement ? active : null
+        if (!el.open) {
+          el.showModal()
+        }
+        void tick().then(() => {
+          if (!open || !dialogEl) return
+          focusDialogOnOpen(getFocusableControls(), dialogEl)
+        })
+      }
+      return () => {
+        if (el.open) {
+          el.close()
+        }
+      }
     } else if (!open && wasOpen) {
       wasOpen = false
       const opener = openerEl
@@ -67,6 +99,11 @@
       })
     }
   })
+
+  function handleDialogCancel(e: Event) {
+    // Keep dialog open state controlled by Svelte so Escape during IME composition or busy cannot close it natively.
+    e.preventDefault()
+  }
 
   function handleDialogKeydown(e: KeyboardEvent) {
     if (!open) return
@@ -83,61 +120,80 @@
         ? document.activeElement
         : null
       stepDialogTab(getFocusableControls(), active, e.shiftKey, dialogEl)
+      return
     }
+    if (form && e.key === 'Enter') {
+      if (isImeComposing(e)) {
+        e.preventDefault()
+        return
+      }
+      if ((e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) && isTextInputTarget(e.target)) {
+        e.preventDefault()
+      }
+    }
+  }
+
+  function handleFormSubmit(e: SubmitEvent) {
+    e.preventDefault()
+    if (!open || busy) return
+    onconfirm?.()
   }
 </script>
 
-{#if open}
-  <div class="ui-dialog-backdrop">
-    <div
-      bind:this={dialogEl}
-      class="ui-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      tabindex="-1"
-      onkeydown={handleDialogKeydown}
-    >
-      <header class="ui-dialog__header">
-        <h2 class="ui-dialog__title">{title}</h2>
-      </header>
-      {#if description}
-        <p class="ui-dialog__description">{description}</p>
-      {/if}
-      {#if children}
-        <div class="ui-dialog__body">
-          {@render children()}
-        </div>
-      {/if}
-      {#if onconfirm || oncancel}
-        <footer class="ui-dialog__actions">
-          {#if oncancel}
-            <Button variant="secondary" disabled={busy} onclick={oncancel}>{cancelLabel}</Button>
-          {/if}
-          {#if onconfirm && confirmLabel}
-            <Button variant="primary" disabled={busy} onclick={onconfirm}>{confirmLabel}</Button>
-          {/if}
-        </footer>
-      {/if}
+{#snippet dialogContent()}
+  {#if children}
+    <div class="ui-dialog__body">
+      {@render children()}
     </div>
-  </div>
+  {/if}
+  {#if onconfirm || oncancel}
+    <footer class="ui-dialog__actions">
+      {#if oncancel}
+        <Button variant="secondary" disabled={busy} onclick={oncancel}>{cancelLabel}</Button>
+      {/if}
+      {#if onconfirm && confirmLabel}
+        {#if form}
+          <Button variant="primary" type="submit" disabled={busy}>{confirmLabel}</Button>
+        {:else}
+          <Button variant="primary" disabled={busy} onclick={onconfirm}>{confirmLabel}</Button>
+        {/if}
+      {/if}
+    </footer>
+  {/if}
+{/snippet}
+
+{#if open}
+  <dialog
+    bind:this={dialogEl}
+    class="ui-dialog"
+    aria-modal="true"
+    aria-label={title}
+    oncancel={handleDialogCancel}
+    onkeydown={handleDialogKeydown}
+  >
+    <header class="ui-dialog__header">
+      <h2 class="ui-dialog__title">{title}</h2>
+    </header>
+    {#if description}
+      <p class="ui-dialog__description">{description}</p>
+    {/if}
+    {#if form}
+      <form class="ui-dialog__form" onsubmit={handleFormSubmit}>
+        {@render dialogContent()}
+      </form>
+    {:else}
+      {@render dialogContent()}
+    {/if}
+  </dialog>
 {/if}
 
 <style>
-  .ui-dialog-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 900;
-    display: grid;
-    place-items: center;
-    padding: var(--space-16);
-  }
-
   .ui-dialog {
     display: flex;
     flex-direction: column;
     gap: var(--space-12);
-    width: 100%;
+    margin: auto;
+    width: calc(100% - 2 * var(--space-16));
     max-width: 24rem;
     max-height: calc(100vh - 2 * var(--space-16));
     max-height: calc(100dvh - 2 * var(--space-16));
@@ -147,6 +203,10 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-16);
+  }
+
+  .ui-dialog::backdrop {
+    background-color: transparent;
   }
 
   .ui-dialog__header {
@@ -172,6 +232,15 @@
     font-size: var(--font-size-14);
     color: var(--text2);
     overflow-wrap: anywhere;
+  }
+
+  .ui-dialog__form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-12);
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
   }
 
   .ui-dialog__body {

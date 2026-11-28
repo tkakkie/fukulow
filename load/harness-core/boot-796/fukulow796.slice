@@ -1,0 +1,6 @@
+# #796 measured CPUs; installed by load/harness-core/boot-796.ts (#996).
+[Unit]
+Description=fukulow #796 measured CPUs (server and client sets)
+
+[Slice]
+AllowedCPUs=1-6,9-14

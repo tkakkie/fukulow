@@ -1,12 +1,13 @@
 import { isAbsolute } from 'node:path'
-import { curlRunner, dailyBackup, objectTransport, readPrivateFile, recheckNewest } from './backup-r2.ts'
+import { curlRunner, readPrivateFile } from './backup-curl.ts'
+import { dailyBackup, objectTransport, recheckNewest } from './backup-r2.ts'
 import { discordNotifier } from './backup-notify.ts'
 import { acquireLocalLock, diagnostic, privateDirectory, SafeFailure, safeFailure } from './backup-safety.ts'
 
 export interface DailyConfig {
   directory: string; recipientFile: string; curlConfigFile: string; baseUrl: string; notifierConfigFile: string
 }
-export async function readDailyConfig(path: string): Promise<DailyConfig> {
+async function readDailyConfig(path: string): Promise<DailyConfig> {
   const value = JSON.parse(await readPrivateFile(path))
   if (!value || !['directory', 'recipientFile', 'curlConfigFile', 'notifierConfigFile'].every(key =>
     typeof value[key] === 'string' && isAbsolute(value[key])) || typeof value.baseUrl !== 'string') throw new Error('Invalid operator configuration')

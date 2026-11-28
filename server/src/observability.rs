@@ -18,6 +18,10 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
+pub(crate) mod notice_permits;
+pub mod revocation_trace;
+mod revocation_trace_writer;
+
 pub const INTERVAL: Duration = Duration::from_secs(60);
 const REVOCATION_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 const TARGET: &str = "fukulow";
@@ -80,7 +84,7 @@ pub(crate) struct RevocationHoldCounts {
 pub(crate) fn spawn_revocation_holds_sampler(
     sample: impl Fn() -> RevocationHoldCounts + Send + 'static,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    revocation_measurement_enabled().then(|| {
+    notice_permits::notice_permit_gauges().map(|gauges| {
         tokio::spawn(async move {
             let period = REVOCATION_SAMPLE_INTERVAL;
             let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
@@ -97,6 +101,7 @@ pub(crate) fn spawn_revocation_holds_sampler(
                     high_water_mark = counts.high_water_mark,
                     retry_attempts = counts.retry_attempts,
                 );
+                gauges.emit();
             }
         })
     })

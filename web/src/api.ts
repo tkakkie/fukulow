@@ -10,6 +10,7 @@ export async function checkHealth(fetchFn: typeof fetch = fetch): Promise<boolea
 
 import { rememberIdentityResponse } from './identity-order'
 import type { components } from './api-schema'
+import type { HistoryObservation } from './protocol-types'
 
 export type AccountIdentity = components['schemas']['AccountIdentity']
 export type Identity = components['schemas']['Identity']
@@ -19,6 +20,25 @@ export type SignInRequest = components['schemas']['SignInRequest']
 /** Result of an API call. `network` covers fetch failures and 5xx, including admission 503
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
 export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; error?: string; retryAfterMs?: number }
+
+export function normalizedFailure(result: Extract<Result<unknown>, { ok: false }>) {
+  return result.kind === 'http'
+    ? { status: result.status, error: typeof result.error === 'string' ? result.error : undefined }
+    : { status: 'network' as const }
+}
+
+export function readHistoryGeneration(data: unknown): { generation: string } | undefined {
+  if (data && typeof data === 'object' && 'history_generation' in data) {
+    const generation = data.history_generation
+    if (typeof generation === 'string') return { generation }
+  }
+}
+
+export function historyObservation(result: Result<unknown>): HistoryObservation {
+  return result.ok
+    ? { kind: 'success', ...readHistoryGeneration(result.data) }
+    : { kind: 'failure', ...normalizedFailure(result) }
+}
 
 // Bound 5xx body reads (used only when Retry-After is absent) so stalled responses cannot hang callers.
 const SERVER_ERROR_BODY_TIMEOUT_MS = 1000
@@ -136,12 +156,30 @@ export const deleteSession = (f: typeof fetch = fetch) =>
 export const getMe = (f: typeof fetch = fetch) => call<AccountIdentity>(f, '/api/v1/me', { cache: 'no-store' }, true)
 
 const orgPath = (organizationId: string) => `/api/v1/orgs/${encodeURIComponent(organizationId)}`
+const channelPath = (organizationId: string, channelId: string) =>
+  `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}`
+const querySuffix = (query: object) => {
+  const qs = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) if (value !== undefined) qs.set(key, String(value))
+  return qs.size ? `?${qs}` : ''
+}
 
 export const getOrganizationMe = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
   call<Identity>(f, `${orgPath(organizationId)}/me`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
+export const isSessionEnded = (r: Result<unknown>) =>
+  !r.ok && r.kind === 'http' && r.status === 401
+
 export const isOrganizationUnavailable = (r: Result<unknown>) =>
   !r.ok && r.kind === 'http' && r.status === 404 && r.error === 'organization_unavailable'
+
+/** Callers handle Organization unavailability separately so C10 keeps its original precedence. */
+export const isChannelDenial = (r: Result<unknown>, { statuses, localNotFound }: {
+  statuses: readonly number[]
+  localNotFound?: string
+}) =>
+  !r.ok && r.kind === 'http' && statuses.includes(r.status) &&
+  (localNotFound === undefined || r.error !== localNotFound)
 
 export type Channel = components['schemas']['Channel']
 export type ChannelVisibility = components['schemas']['ChannelVisibility']
@@ -151,15 +189,22 @@ export type Message = components['schemas']['Message']
 export type ChannelEventPage = components['schemas']['ChannelEventPage']
 export type ListChannelEventsQuery = NonNullable<import('./api-schema').operations['list_channel_events']['parameters']['query']>
 export const listChannelEvents = (organizationId: string, channelId: string, query: ListChannelEventsQuery, f: typeof fetch = fetch) =>
-  call<ChannelEventPage>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/events?${new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]))}`, { cache: 'no-store' }, true)
+  call<ChannelEventPage>(f, `${channelPath(organizationId, channelId)}/events${querySuffix(query) || '?'}`, { cache: 'no-store' }, true)
 export type MessagePage = components['schemas']['MessagePage']
 export type SendMessageRequest = components['schemas']['SendMessageRequest']
 export type ListMessagesQuery = NonNullable<
   import('./api-schema').operations['list_messages']['parameters']['query']
 >
 
-export const listChannels = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal, query?: NonNullable<import('./api-schema').operations['list_channels']['parameters']['query']>) =>
-  call<components['schemas']['ChannelList']>(f, `${orgPath(organizationId)}/channels${querySuffix(query ?? {})}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
+export const CHANNEL_READ_ID_HEADER = 'x-fukulow-read-id'
+
+export const listChannels = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal, query?: NonNullable<import('./api-schema').operations['list_channels']['parameters']['query']>, readId?: string) =>
+  call<components['schemas']['ChannelList']>(
+    f,
+    `${orgPath(organizationId)}/channels${querySuffix(query ?? {})}`,
+    { cache: 'no-store', ...(signal ? { signal } : {}), ...(readId ? { headers: { [CHANNEL_READ_ID_HEADER]: readId } } : {}) },
+    true,
+  )
 
 export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
   call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)
@@ -201,15 +246,11 @@ export const openDm = (org: string, body: components['schemas']['OpenDmRequest']
   call<components['schemas']['Dm']>(f, `${orgPath(org)}/dms`, { ...json(body), signal }, true)
 
 /** No cursor = latest page; pages are ascending by seq. */
-export const listMessages = (organizationId: string, channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch) => {
-  const qs = new URLSearchParams()
-  for (const [k, v] of Object.entries(query)) if (v !== undefined) qs.set(k, String(v))
-  const suffix = qs.size > 0 ? `?${qs}` : ''
-  return call<MessagePage>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/messages${suffix}`, { cache: 'no-store' }, true)
-}
+export const listMessages = (organizationId: string, channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<MessagePage>(f, `${channelPath(organizationId, channelId)}/messages${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const sendMessage = (organizationId: string, channelId: string, body: SendMessageRequest, f: typeof fetch = fetch) =>
-  call<Message>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/messages`, json(body), true)
+  call<Message>(f, `${channelPath(organizationId, channelId)}/messages`, json(body), true)
 
 export type ServerEvent = import('./api-schema').ServerEvent
 export type ClientMessage = import('./api-schema').ClientMessage
@@ -242,23 +283,14 @@ export type ListTimelineQuery = NonNullable<import('./api-schema').operations['l
 export type ListTopicsQuery = NonNullable<import('./api-schema').operations['list_topics']['parameters']['query']>
 export type TopicHistoryQuery = NonNullable<import('./api-schema').operations['topic_history']['parameters']['query']>
 
-const channelPath = (organizationId: string, channelId: string) =>
-  `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}`
-
 export const getChannel = (org: string, id: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
   call<Channel>(f, channelPath(org, id), { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const updateChannel = (org: string, id: string, body: components['schemas']['UpdateChannelRequest'], f: typeof fetch = fetch) =>
   call<undefined>(f, channelPath(org, id), { ...json(body), method: 'PATCH' }, false, 204)
 
-const querySuffix = (query: object) => {
-  const qs = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) if (value !== undefined) qs.set(key, String(value))
-  return qs.size ? `?${qs}` : ''
-}
-
-export const listTimeline = (organizationId: string, channelId: string, query: ListTimelineQuery = {}, f: typeof fetch = fetch) =>
-  call<TimelinePage>(f, `${channelPath(organizationId, channelId)}/timeline${querySuffix(query)}`, { cache: 'no-store' }, true)
+export const listTimeline = (organizationId: string, channelId: string, query: ListTimelineQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<TimelinePage>(f, `${channelPath(organizationId, channelId)}/timeline${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const listTopics = (organizationId: string, channelId: string, query: ListTopicsQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
   call<TopicPage>(f, `${channelPath(organizationId, channelId)}/topics${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
@@ -266,8 +298,8 @@ export const listTopics = (organizationId: string, channelId: string, query: Lis
 export const getTopicSummary = (organizationId: string, channelId: string, topicId: string, f: typeof fetch = fetch, signal?: AbortSignal, query: NonNullable<import('./api-schema').operations['topic_summary']['parameters']['query']> = {}) =>
   call<TopicSummaryResponse>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
-export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch) =>
-  call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store' }, true)
+export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export type ReplyCountPage = components['schemas']['ReplyCountPage']
 export type ReplyCountRequest = components['schemas']['ReplyCountRequest']
@@ -290,13 +322,13 @@ export type ChannelMemberList = components['schemas']['ChannelMemberList']
 export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelManagerRequest']
 
 export const listChannelMembers = (org: string, channel: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
-  call<ChannelMemberList>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
+  call<ChannelMemberList>(f, `${channelPath(org, channel)}/members`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 export const addChannelMember = (org: string, channel: string, body: components['schemas']['AddChannelMemberRequest'], f: typeof fetch = fetch) =>
-  call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members`, json(body), false)
+  call<undefined>(f, `${channelPath(org, channel)}/members`, json(body), false)
 export const removeChannelMember = (org: string, channel: string, member: string, f: typeof fetch = fetch) =>
-  call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members/${encodeURIComponent(member)}`, { method: 'DELETE' }, false)
+  call<undefined>(f, `${channelPath(org, channel)}/members/${encodeURIComponent(member)}`, { method: 'DELETE' }, false)
 export const changeChannelManager = (org: string, channel: string, member: string, body: ChangeChannelManagerRequest, f: typeof fetch = fetch) =>
-  call<undefined>(f, `${orgPath(org)}/channels/${encodeURIComponent(channel)}/members/${encodeURIComponent(member)}`, { ...json(body), method: 'PATCH' }, false)
+  call<undefined>(f, `${channelPath(org, channel)}/members/${encodeURIComponent(member)}`, { ...json(body), method: 'PATCH' }, false)
 
 export type MemberList = components['schemas']['MemberList']
 

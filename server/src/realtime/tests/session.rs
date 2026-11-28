@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 pub(super) async fn fallback_close(socket: &mut Client, code: u16) {
     let frame = tokio::time::timeout(Duration::from_secs(3), delivery_next(socket, None))
@@ -85,9 +86,9 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
     let mut replay = server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     let mut other = server.connect(&other_token).await;
     subscribe(&mut other, f.channel, 0).await;
     ready(&mut other, f.channel, 0).await;
@@ -174,9 +175,9 @@ async fn worker_panic_closes_existing_and_new_sockets_with_internal_error(pool: 
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
     let mut replay = server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     tokio::time::timeout(Duration::from_secs(3), changes.panic_worker())
         .await
         .unwrap();
@@ -294,11 +295,13 @@ async fn endpoint_membership_loss(pool: PgPool, cancel: bool) {
             .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(5),async { loop {
-        let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT organization_id%FOR NO KEY UPDATE')")
-            .fetch_one(&pool).await.unwrap();
-        if waiting {break;} tokio::task::yield_now().await;
-    }}).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::LockQuery("SELECT organization_id%FOR NO KEY UPDATE"),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
     if cancel {
         pending.abort();
     }
@@ -424,9 +427,9 @@ async fn lost_membership_signal_and_reactivation_still_close_stale_idle_and_repl
         subscribe(&mut idle, f.channel, 0).await;
         ready(&mut idle, f.channel, 0).await;
         let mut replay = server.connect(&f.token).await;
-        let gate = pause(f.channel);
+        let gate = hooks::register_replay(f.channel);
         subscribe(&mut replay, f.channel, 0).await;
-        entered(&gate).await;
+        gate.entered().await;
         fallback.entered().await;
         let started = tokio::time::Instant::now();
         // Direct SQL deliberately drops the process signal; the DB trigger records the epoch.
@@ -450,7 +453,7 @@ async fn lost_membership_signal_and_reactivation_still_close_stale_idle_and_repl
             fallback_close(&mut replay, CLOSE_ORGANIZATION_UNAVAILABLE)
         );
         assert!(started.elapsed() < Duration::from_secs(3));
-        gate.release.add_permits(1);
+        gate.release();
         if reactivate {
             let mut current = server.connect(&f.token).await;
             subscribe(&mut current, f.channel, 0).await;
@@ -530,9 +533,9 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
     .unwrap();
     assert_eq!(event(&mut idle).await["code"], "channel_not_found");
     let mut replay = server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     fallback.entered().await;
     // Lost signal, followed by reactivation before the worker is permitted to check.
     sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
@@ -547,7 +550,7 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     closed(&mut replay, CLOSE_ORGANIZATION_UNAVAILABLE).await;
     subscribe(&mut idle, f.channel, 0).await;
     closed(&mut idle, CLOSE_ORGANIZATION_UNAVAILABLE).await;

@@ -2,12 +2,30 @@ import init, { WasmCore } from '../wasm/fukulow_client_core'
 import { createValues } from './core-values'
 import { identityOrder, rememberIdentityResponse } from './identity-order'
 import type { Message } from './api'
-import type { ChannelState, CoreResult, Input, Pending, State, SyncCore, SyncView } from './protocol-types'
+import type { AccessEndpoint, AccessLifetime, AccessOutcome, ChannelState, CoreResult, Failure, Input, Pending, Purpose, State, SyncCore, SyncView } from './protocol-types'
+
+// A Node micro-benchmark on a 200-Message Channel had find and Map break even at ~4 inserts and Map
+// clearly ahead at 8 (5.75 µs vs 2.38 µs); a single append pays ~1.7 µs more with the Map (#488).
+const PRIOR_MAP_MIN_INSERTS = 8
 
 let ready: Promise<void> | undefined
 /** Starts loading once; every caller shares the same outcome, so a failed load is never retried behind the error. */
 export function initCore(): Promise<void> {
   return ready ??= init().then(() => undefined)
+}
+
+export function syncDelay(purpose: Purpose, attempt: number, drawOrMs = 0): number {
+  return WasmCore.syncDelay(purpose, attempt, drawOrMs)
+}
+
+export function accessOutcome(endpoint: AccessEndpoint, lifetime: AccessLifetime, failure: { status: Failure; error?: string }): AccessOutcome {
+  const status = typeof failure.status === 'number' ? failure.status : undefined
+  return JSON.parse(WasmCore.accessOutcome(endpoint, lifetime, status, failure.error)) as AccessOutcome
+}
+
+export function isGenerationConflict(failure: { status: Failure; error?: string }): boolean {
+  const status = typeof failure.status === 'number' ? failure.status : undefined
+  return WasmCore.isGenerationConflict(status, failure.error)
 }
 
 type Interned<T> = Omit<T, 'body'> & { body?: number }
@@ -42,6 +60,14 @@ const sameMessage = (a: Message, b: Message) => a.history_generation === b.histo
   (!a.deleted || (!('body' in a) && !('mentions' in a))) && a.topic_id === b.topic_id && a.reply_to === b.reply_to && a.reply_root_id === b.reply_root_id &&
   (a.mentions ?? []).length === (b.mentions ?? []).length && (a.mentions ?? []).every((m, i) => m.member_id === b.mentions![i].member_id && m.name === b.mentions![i].name)
 
+export function inputMessages(input: Input): Message[] {
+  return (input.type === 'event' || input.type === 'socket_frame') && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
+    : input.type === 'ack' ? [input.message]
+    : input.type === 'history_result' ? input.page.messages
+    : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : [])
+    : []
+}
+
 export function createCore(selfId: string): SyncCore {
   const { coreId, coreInput, coreOutput } = createValues()
   const read = <T>(json: string): T => coreOutput(JSON.parse(json)) as T
@@ -52,12 +78,12 @@ export function createCore(selfId: string): SyncCore {
     request: id => read<ReturnType<SyncCore['request']>>(core.request(id)) ?? undefined,
     timer: id => read<ReturnType<SyncCore['timer']>>(core.timer(id)) ?? undefined,
     hasPending: () => core.hasPending(),
+    historyIssue: () => core.historyIssue(),
+    subscribeIssued: (connection, channel, id) => core.subscribeIssued(connection, coreId(channel), id),
     step(input: Input): CoreResult {
       const out = read<Delta>(core.step(JSON.stringify(coreInput(input))))
       const { bodies } = out
-      const incoming = input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
-        : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : []) : []
-      const originals = new Map(incoming.map(m => [m.id, m]))
+      const originals = new Map(inputMessages(input).map(m => [m.id, m]))
       const channelViews = out.changedChannels.length ? { ...view.channels } : view.channels
       const records = new Map(out.records.map(([id, messages]) => [id, messages.map(encoded => {
         const m = expandBody<Message>(encoded, bodies)
@@ -84,9 +110,18 @@ export function createCore(selfId: string): SyncCore {
         }
         if (patch.splices) {
           const observed = new Map(records.get(id)?.map(m => [m.id, m]))
+          let insertCount = 0
+          for (const op of patch.splices) insertCount += op.insert.length
+          let priorById: Map<string, Message> | undefined
+          if (insertCount >= PRIOR_MAP_MIN_INSERTS && before?.messages.length) {
+            priorById = new Map()
+            for (const old of before.messages) {
+              if (!priorById.has(old.id)) priorById.set(old.id, old)
+            }
+          }
           const restore = (encoded: Interned<Message>) => {
             const m = expandBody<Message>(encoded, bodies)
-            const prior = before?.messages.find(old => old.id === m.id)
+            const prior = priorById ? priorById.get(m.id) : before?.messages.find(old => old.id === m.id)
             const record = observed.get(m.id)
             if (prior && sameMessage(prior, m) && !(input.refreshMentionNames && record)) return prior
             if (record && sameMessage(record, m)) return record
@@ -107,7 +142,9 @@ export function createCore(selfId: string): SyncCore {
       }
       const effects = out.effects.map(e => e.type === 'send' ? expandBody<Send>(e, bodies) : e)
       return { effects, changedChannels: new Set(out.changedChannels), records,
-        ...(out.moves ? { moves: out.moves } : {}), stateChanged: out.stateChanged }
+        ...(out.moves ? { moves: out.moves } : {}),
+        ...(out.socketDelivery ? { socketDelivery: out.socketDelivery } : {}),
+        ...(out.historyObservation ? { historyObservation: out.historyObservation } : {}), stateChanged: out.stateChanged }
     },
   }
 }

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { percentile } from './dms-workload.ts';
 import { randomUUID } from 'node:crypto';
 
@@ -67,7 +67,9 @@ const source = readFileSync(process.env.DM_SELECTOR_SOURCE || `${queryRoot}/serv
 const select = source.match(/(?:query_as\(|let sql = )"(SELECT cm.channel_id[^"\n]+)"/)?.[1];
 if (!select) throw new Error('DM selector extraction must match production SQL');
 const discovery = readFileSync(`${queryRoot}/server/src/channels/dms/discovery.rs`, 'utf8').match(/"((?:SELECT d.channel_id|WITH candidates AS MATERIALIZED)[^"\n]+)"/)?.[1].replaceAll('{column}', 'latest_position');
-const counts = readFileSync(`${queryRoot}/server/src/messages/unread.rs`, 'utf8').match(/LIST_COUNTS_SQL: &str = r#"([\s\S]+?)"#;/)?.[1];
+const countsPath = `${queryRoot}/server/src/messages/unread/counts.rs`;
+const counts = readFileSync(existsSync(countsPath) ? countsPath : `${queryRoot}/server/src/messages/unread.rs`, 'utf8')
+  .match(/LIST_COUNTS_SQL: &str = r#"([\s\S]+?)"#;/)?.[1];
 if (!discovery || !counts) throw new Error('Production SQL extraction failed');
 const ids = `ARRAY[${seed.ids!.map(id => `'${id}'::uuid`).join(',')}]`;
 const boundary = sql(`SELECT cm.channel_id FROM channel_members cm WHERE organization_id='${org}' AND member_id='${focal.id}' ORDER BY dm_created_at DESC,channel_id DESC LIMIT 1 OFFSET 4999;`);

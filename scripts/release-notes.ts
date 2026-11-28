@@ -1,14 +1,13 @@
 // Release notes header (#808): image digests, upgrade notes and rollback limits.
 // GitHub appends its generated change list below this text.
 import { execFileSync } from 'node:child_process'
-import { pathToFileURL } from 'node:url'
 import { imageRepository } from './release-oci.ts'
 
 export type Notes = { tag: string, version: string, tags: string[], index: string, platforms: Record<string, string>,
   previous?: string, migrations: string[], configChanges: string[] }
 
 // Files whose changes can need operator action on upgrade.
-export const configPaths = ['compose.yml', '.env.example', 'deploy']
+const configPaths = ['compose.yml', '.env.example', 'deploy']
 
 export function releaseNotes(notes: Notes): string {
   const pinned = `${notes.version}@${notes.index}`
@@ -47,7 +46,7 @@ function changed(from: string | undefined, to: string, paths: string[], filter?:
   return execFileSync('git', args, { encoding: 'utf8' }).split('\n').filter(Boolean)
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (import.meta.main) {
   const [tag, version, tags, index, amd64, arm64, previous] = process.argv.slice(2)
   if (!/^sha256:[a-f0-9]{64}$/.test(index ?? '')) throw new Error('usage: release-notes.ts <tag> <version> <tags> <index> <amd64> <arm64> [previous]')
   process.stdout.write(releaseNotes({ tag, version, tags: tags.split(','), index, platforms: { amd64, arm64 },

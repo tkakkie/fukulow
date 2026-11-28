@@ -3,28 +3,18 @@ use crate::{AppState, lock_ignoring_poison};
 use sqlx::PgPool;
 use std::{
     collections::{HashMap, HashSet},
+    ops::ControlFlow::{self, Break, Continue},
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
 use tokio::{sync::watch, time::Instant};
 use uuid::Uuid;
 
+use hooks::{ActivityHook, SubscriptionHook};
+pub use hooks::{SubscriptionRecheck, SubscriptionScope};
+
 const RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-#[derive(Clone, Copy)]
-pub enum SubscriptionScope {
-    All,
-    Channel(Uuid, Uuid),
-    Member(Uuid, Uuid),
-}
-pub trait SubscriptionRecheck: Send + Sync {
-    fn check<'a>(
-        &'a self,
-        pool: &'a PgPool,
-        scope: SubscriptionScope,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
-    fn failed(&self, scope: SubscriptionScope);
-}
 
 type SessionKey = (Uuid, Vec<u8>);
 
@@ -48,17 +38,17 @@ struct Sessions {
 /// Only connected sessions retain a signal; sign-out never wakes unrelated sessions.
 #[derive(Clone)]
 pub struct SessionChanges {
-    activity: Arc<Mutex<Option<super::activity::Hook>>>,
+    activity: ActivityHook,
     sessions: Arc<Mutex<Sessions>>,
     worker: Arc<Once>,
     interval: Duration,
     timeout: Duration,
     on_fatal: Arc<dyn Fn() + Send + Sync>,
-    subscriptions: Arc<Mutex<Option<Arc<dyn SubscriptionRecheck>>>>,
+    subscriptions: SubscriptionHook,
     #[cfg(test)]
     default_fatal_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     #[cfg(test)]
-    gate: Arc<Mutex<Option<Arc<tests::Gate>>>>,
+    gate: Arc<tests::SessionGates>,
 }
 impl Default for SessionChanges {
     fn default() -> Self {
@@ -89,61 +79,9 @@ impl Default for SessionChanges {
 }
 
 impl SessionChanges {
-    pub(crate) fn set_activity(&self, hook: super::activity::Hook) {
-        *lock_ignoring_poison(&self.activity) = Some(hook);
-    }
-    pub(crate) async fn capture_activity(
-        &self,
-        connection: &mut sqlx::PgConnection,
-        organization: Uuid,
-        target: Uuid,
-        scope: super::activity::ChangeScope,
-    ) -> Result<Option<Box<dyn super::activity::ActivityChange>>, sqlx::Error> {
-        let hook = lock_ignoring_poison(&self.activity).clone();
-        match hook {
-            Some(hook) => hook
-                .capture(connection, organization, target, scope)
-                .await
-                .map(Some),
-            None => Ok(None),
-        }
-    }
-    pub(crate) fn channel_changed(
-        &self,
-        pool: PgPool,
-        organization: Uuid,
-        change: super::activity::ChannelChange,
-    ) {
-        let hook = lock_ignoring_poison(&self.activity).clone();
-        if let Some(hook) = hook {
-            hook.channel(pool, organization, change);
-        }
-    }
-    pub(crate) fn directory_changed(&self, pool: PgPool, organization: Uuid, target: Uuid) {
-        let hook = lock_ignoring_poison(&self.activity).clone();
-        if let Some(hook) = hook {
-            hook.directory(pool, organization, target);
-        }
-    }
     /// Not started is normal; reuse the supervisor's latched exit state.
     pub(crate) fn fallback_available(&self) -> bool {
         !lock_ignoring_poison(&self.sessions).unavailable
-    }
-
-    pub fn set_subscription_recheck(&self, check: Arc<dyn SubscriptionRecheck>) {
-        *lock_ignoring_poison(&self.subscriptions) = Some(check);
-    }
-
-    pub(crate) async fn recheck_subscriptions(&self, pool: &PgPool, scope: SubscriptionScope) {
-        let check = lock_ignoring_poison(&self.subscriptions).clone();
-        if let Some(check) = check
-            && !matches!(
-                tokio::time::timeout(CHECK_TIMEOUT, check.check(pool, scope)).await,
-                Ok(Ok(()))
-            )
-        {
-            check.failed(scope);
-        }
     }
 
     #[cfg(test)]
@@ -279,6 +217,29 @@ struct Registration {
     changed: watch::Receiver<SessionStatus>,
     guard: RegistrationGuard,
 }
+
+impl Registration {
+    fn check_status(
+        self,
+        membership_deadline: impl FnOnce() -> Option<Instant>,
+    ) -> ControlFlow<Result<Option<SessionWatch>, sqlx::Error>, Self> {
+        let status = *self.changed.borrow();
+        if status.revoked {
+            return Break(Ok(None));
+        }
+        if status.membership_revoked {
+            return Break(Ok(Some(SessionWatch {
+                registration: self,
+                deadline: membership_deadline(),
+            })));
+        }
+        if status.failed {
+            return Break(Err(sqlx::Error::PoolClosed));
+        }
+        Continue(self)
+    }
+}
+
 struct RegistrationGuard {
     registry: SessionChanges,
     key: SessionKey,
@@ -354,19 +315,10 @@ impl Auth {
             self.account_id,
             self.membership_revision,
         );
-        let status = *registration.changed.borrow();
-        if status.revoked {
-            return Ok(None);
-        }
-        if status.membership_revoked {
-            return Ok(Some(SessionWatch {
-                registration,
-                deadline: None,
-            }));
-        }
-        if status.failed {
-            return Err(sqlx::Error::PoolClosed);
-        }
+        let registration = match registration.check_status(|| None) {
+            Continue(registration) => registration,
+            Break(outcome) => return outcome,
+        };
         #[cfg(test)]
         state
             .session_changes
@@ -390,19 +342,12 @@ impl Auth {
             .session_changes
             .pause_check(tests::Phase::Checked)
             .await;
-        let status = *registration.changed.borrow();
-        if status.revoked {
-            return Ok(None);
-        }
-        if status.membership_revoked {
-            return Ok(Some(SessionWatch {
-                registration,
-                deadline: checked.as_ref().ok().and_then(|(deadline, _)| *deadline),
-            }));
-        }
-        if status.failed {
-            return Err(sqlx::Error::PoolClosed);
-        }
+        let registration = match registration
+            .check_status(|| checked.as_ref().ok().and_then(|(deadline, _)| *deadline))
+        {
+            Continue(registration) => registration,
+            Break(outcome) => return outcome,
+        };
         Ok(checked?.0.map(|deadline| SessionWatch {
             registration,
             deadline: Some(deadline),
@@ -431,6 +376,7 @@ impl SessionWatch {
     }
 }
 
+mod hooks;
 mod recheck;
 
 #[cfg(test)]

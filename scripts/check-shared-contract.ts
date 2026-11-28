@@ -22,7 +22,7 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
   channel_manager_private_only: ['web'],
   'channel name already exists': ['web'],
   'channel not found': ['web'],
-  channel_not_found: ['core', 'web'],
+  channel_not_found: ['core'],
   chain_too_large: ['web'],
   current_password_incorrect: ['web'],
   dm_channel_fixed: ['web'],
@@ -47,7 +47,7 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
   member_already_active: ['web'],
   member_not_found: ['web'],
   operation_conflict: ['web'],
-  organization_unavailable: ['web'],
+  organization_unavailable: ['core', 'web'],
   reply_chain_not_found: ['web'],
   search_query_too_short: ['web'],
   search_timeout: ['web'],
@@ -58,13 +58,13 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
   section_limit: ['web'],
   section_not_found: ['web'],
   snapshot_expired: ['core', 'web'],
-  subscription_limit: ['core', 'web'],
+  subscription_limit: ['core'],
   topic_not_found: ['web'],
   version_conflict: ['web'],
 }
 
 // Values web compares an `error` against that are not server codes.
-export const webOnlyCodes: Record<string, string> = {
+const webOnlyCodes: Record<string, string> = {
   incorrect: 'account-security.ts SecurityError, mapped from current_password_incorrect',
   invalid: 'account-security.ts SecurityError, mapped from any other 400',
   invalid_new: 'account-security.ts SecurityError, mapped from invalid_new_password',
@@ -78,16 +78,16 @@ type Limit = {
   web: { file: string, name: string },
 }
 
-export const textLimits: Record<string, Limit> = {
+const textLimits: Record<string, Limit> = {
   'message body': {
-    server: { file: 'server/src/messages.rs', pattern: /self\.body\.chars\(\)\.count\(\) > (\d+)/g },
+    server: { file: 'server/src/messages/send.rs', pattern: /self\.body\.chars\(\)\.count\(\) > (\d+)/g },
     openapi: ['SendMessageRequest/properties/body'],
-    web: { file: 'web/src/sync.ts', name: 'MESSAGE_BODY_MAX' },
+    web: { file: 'web/src/message-rules.ts', name: 'MESSAGE_BODY_MAX' },
   },
   'Topic name': {
     server: { file: 'server/src/messages/topics.rs', pattern: /name\.chars\(\)\.count\(\) <= (\d+)/g },
     openapi: ['SendMessageRequest/properties/topic_name', 'MoveChainRequest/allOf/0/properties/topic_name'],
-    web: { file: 'web/src/sync.ts', name: 'TOPIC_NAME_MAX' },
+    web: { file: 'web/src/message-rules.ts', name: 'TOPIC_NAME_MAX' },
   },
   'Channel name': {
     server: { file: 'server/src/channels.rs', pattern: /name\.chars\(\)\.count\(\) > (\d+)/g },
@@ -101,13 +101,13 @@ export const textLimits: Record<string, Limit> = {
   },
 }
 
-export const coreLimits = ['MAIN_MESSAGE_LIMIT', 'TOPIC_MESSAGE_LIMIT', 'REPLY_MESSAGE_LIMIT',
+const coreLimits = ['MAIN_MESSAGE_LIMIT', 'TOPIC_MESSAGE_LIMIT', 'REPLY_MESSAGE_LIMIT',
   'INACTIVE_CHANNEL_MESSAGE_LIMIT', 'INACTIVE_CHANNEL_LIMIT', 'TOTAL_MESSAGE_LIMIT', 'SYNC_MESSAGE_LIMIT']
 const coreFile = 'client-core/src/types.rs'
 const webCoreFile = 'web/src/protocol-types.ts'
 
 // Rust source with comments and string contents blanked, plus its string literals.
-export function lexRust(source: string): { code: string, strings: { value: string, start: number, end: number }[] } {
+function lexRust(source: string): { code: string, strings: { value: string, start: number, end: number }[] } {
   let code = ''
   const strings: { value: string, start: number, end: number }[] = []
   let i = 0
@@ -163,7 +163,7 @@ function moduleDir(path: string): string {
 const lexCache = new Map<string, ReturnType<typeof lexRust>>()
 
 // Non-test Rust files under `root` and the string literals outside `#[cfg(test)] mod` blocks.
-export function rustProduct(files: Record<string, string>, root: string) {
+function rustProduct(files: Record<string, string>, root: string) {
   const testDirs: string[] = []
   const lexed = new Map<string, ReturnType<typeof lexRust>>()
   for (const [path, source] of Object.entries(files)) {
@@ -201,7 +201,7 @@ export function serverCodes(repo: Repo): Set<string> {
   return codes
 }
 
-export function coreMatchedCodes(repo: Repo): Set<string> {
+function coreMatchedCodes(repo: Repo): Set<string> {
   const codes = new Set<string>()
   for (const { source, strings } of rustProduct(repo.files, 'client-core/src').values()) {
     for (const { value, start, end } of strings) {
@@ -216,7 +216,7 @@ export function coreMatchedCodes(repo: Repo): Set<string> {
 const webProduct = (path: string) => /^web\/src\/.*\.(?:ts|svelte)$/.test(path) &&
   !/\.test\.ts$|test-helpers|\.d\.ts$/.test(path)
 
-export function webMatchedCodes(repo: Repo): Set<string> {
+function webMatchedCodes(repo: Repo): Set<string> {
   const codes = new Set<string>()
   for (const [path, source] of Object.entries(repo.files)) {
     if (!webProduct(path)) continue

@@ -1,7 +1,9 @@
-use fukulow_server::AppState;
+use axum::serve::ListenerExt;
+use fukulow_server::{AppState, database::MigrationFailure};
 use sqlx::postgres::PgPoolOptions;
 
 mod init;
+mod measurement_listener;
 mod probe;
 
 const USAGE: &str = "Usage: fukulow-server [init --version TAG@sha256:DIGEST [--domain HOST] [--proxy caddy|nginx|none] | probe | migrate [roles] | rotate-history-generation <organization UUID | --all>]";
@@ -23,7 +25,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into()
         });
     }
-    server_main(command)
+    let trace = if command.is_empty() {
+        fukulow_server::observability::revocation_trace::start()?
+    } else {
+        None
+    };
+    let result = server_main(command);
+    if let Some(trace) = trace {
+        let drained = trace.finish();
+        result?;
+        return Ok(drained?);
+    }
+    result
 }
 
 #[tokio::main]
@@ -32,8 +45,16 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         [] => {}
         [command] if command == "migrate" => {
             let pool = migration_pool().await?;
-            fukulow_server::database::migrate_and_grant(&pool).await?;
-            return Ok(());
+            return fukulow_server::database::migrate_and_grant(&pool)
+                .await
+                .map_err(|failure| match failure {
+                    MigrationFailure::Precondition(error) => error,
+                    MigrationFailure::Database(operation, error) => {
+                        tracing::info_span!(target: "fukulow", "database", operation)
+                            .in_scope(|| fukulow_server::observability::database_failure(&error));
+                        "Database migration failed (diagnostics suppressed)".into()
+                    }
+                });
         }
         [command, action] if command == "migrate" && action == "roles" => {
             let password = std::env::var("POSTGRES_APP_PASSWORD")
@@ -63,6 +84,9 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         }
         _ => return Err(USAGE.into()),
     }
+    let send_buffer = measurement_listener::send_buffer(
+        optional_env(measurement_listener::SEND_BUFFER_ENV)?.as_deref(),
+    )?;
     fukulow_server::messages::reactions::ReactionEmojiSet::load_embedded()?;
     let setup_token = std::env::var("FUKULOW_SETUP_TOKEN")
         .ok()
@@ -134,7 +158,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
     let revocation_holds_sampler = fukulow_server::spawn_revocation_holds_sampler();
     let completed = fukulow_server::serve_with_search(
-        listener,
+        listener.tap_io(move |stream| measurement_listener::apply(stream, send_buffer)),
         AppState {
             pool,
             shutdown,

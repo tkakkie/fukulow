@@ -11,7 +11,7 @@ pub(crate) enum Source {
     Projection,
 }
 
-fn same_message(a: &Message, b: &Message) -> bool {
+pub(super) fn same_message(a: &Message, b: &Message) -> bool {
     a.id == b.id
         && a.channel_id == b.channel_id
         && a.created_seq == b.created_seq
@@ -27,33 +27,6 @@ fn same_message(a: &Message, b: &Message) -> bool {
         && a.mentions == b.mentions
 }
 impl Step<'_> {
-    pub fn settle(&mut self, id: Uuid, records: &[Message]) {
-        let self_id = self.core.session.self_id;
-        let settled: Vec<_> = records
-            .iter()
-            .filter(|m| m.channel_id == id && m.sender == self_id)
-            .map(|m| m.client_message_id)
-            .collect();
-        let pending = self.channel(id).pending.clone();
-        if pending
-            .iter()
-            .any(|p| settled.contains(&p.client_message_id))
-        {
-            for p in pending
-                .iter()
-                .filter(|p| settled.contains(&p.client_message_id))
-            {
-                self.cancel(p.retry_wait);
-            }
-            self.channel(id).pending = Rc::new(
-                pending
-                    .iter()
-                    .filter(|p| !settled.contains(&p.client_message_id))
-                    .cloned()
-                    .collect(),
-            );
-        }
-    }
     /// A Create's envelope position is its creation position; a mismatched Create is
     /// dropped rather than moving the cursor past a different event.
     pub(crate) fn envelope_consistent(
@@ -138,6 +111,20 @@ impl Step<'_> {
         source: Source,
         event_seq: Option<i64>,
     ) {
+        let Some((accepted, positions)) = self.admit(id, records, source, event_seq) else {
+            return;
+        };
+        self.emit_records(id, source, accepted);
+        self.advance_cursor(id, source, &positions);
+    }
+
+    fn admit(
+        &mut self,
+        id: Uuid,
+        records: Vec<Message>,
+        source: Source,
+        event_seq: Option<i64>,
+    ) -> Option<(Vec<Message>, Vec<i64>)> {
         let valid: Vec<_> = records
             .into_iter()
             .filter(|m| m.channel_id == id)
@@ -165,7 +152,7 @@ impl Step<'_> {
             })
         {
             self.settle(id, &valid);
-            return;
+            return None;
         }
         let mut positions: Vec<_> = if source == Source::Ack {
             valid.iter().map(|m| m.created_seq).collect()
@@ -302,6 +289,10 @@ impl Step<'_> {
             self.history(id, Page::Latest, None);
         }
         self.settle(id, &valid);
+        Some((accepted, positions))
+    }
+
+    fn emit_records(&mut self, id: Uuid, source: Source, mut accepted: Vec<Message>) {
         if source == Source::Projection {
             accepted.retain(|m| m.deleted || m.version > m.created_seq);
         }
@@ -323,6 +314,9 @@ impl Step<'_> {
                 self.out.records.push((id, accepted));
             }
         }
+    }
+
+    fn advance_cursor(&mut self, id: Uuid, source: Source, positions: &[i64]) {
         if source == Source::Window || source == Source::Projection {
             return;
         }
@@ -338,22 +332,17 @@ impl Step<'_> {
                     end: seq,
                 }),
         );
-        ranges.sort_by_key(|r| r.start);
-        let mut merged: Vec<Range> = Vec::new();
-        for range in ranges {
-            if let Some(last) = merged.last_mut()
-                && range.start <= last.end + 1
-            {
-                last.end = last.end.max(range.end);
-            } else {
-                merged.push(range);
-            }
-        }
+        let mut merged = coalesce(ranges);
         if (source == Source::Stream || source == Source::Events)
             && let Some(mut cursor) = c.cursor
-            && positions.contains(&(cursor + 1))
+            && cursor
+                .checked_add(1)
+                .is_some_and(|next| positions.contains(&next))
         {
-            while merged.first().is_some_and(|r| r.start <= cursor + 1) {
+            while merged
+                .first()
+                .is_some_and(|r| r.start <= cursor.saturating_add(1))
+            {
                 cursor = cursor.max(merged.remove(0).end);
             }
             c.cursor = Some(cursor);
@@ -376,171 +365,78 @@ impl Step<'_> {
             c.advancing = Rc::new(merged);
         }
     }
-    pub(crate) fn cap_moved_roots(&mut self, id: Uuid, limit: usize) {
-        let c = self.channel(id);
-        if c.moved_roots.len() <= limit {
-            return;
-        }
-        let roots = Rc::make_mut(&mut c.moved_roots);
-        while roots.len() > limit {
-            let Some((&root, &seq)) = roots.iter().min_by_key(|(_, seq)| *seq) else {
-                break;
-            };
-            roots.remove(&root);
-            c.retired_move_through = c.retired_move_through.max(seq);
-        }
-    }
-    pub(crate) fn cap_versions(&mut self, id: Uuid, limit: usize) {
-        let c = self.channel(id);
-        let mut retired = Vec::new();
-        while c.versions.len() > limit {
-            let oldest = c
-                .versions
-                .iter()
-                .min_by_key(|(id, (version, _, _))| (*version, **id))
-                .map(|(id, value)| (*id, *value));
-            if let Some((key, (_, _, created_seq))) = oldest {
-                Rc::make_mut(&mut c.versions).remove(&key);
-                retired.push(Range {
-                    start: created_seq,
-                    end: created_seq,
-                });
-            }
-        }
-        if !retired.is_empty() {
-            let ranges = Rc::make_mut(&mut c.retired_versions);
-            ranges.extend(retired);
-            ranges.sort_by_key(|r| r.start);
-            let mut merged: Vec<Range> = Vec::new();
-            for range in ranges.drain(..) {
-                if let Some(last) = merged.last_mut()
-                    && range.start <= last.end + 1
-                {
-                    last.end = last.end.max(range.end);
-                } else {
-                    merged.push(range);
-                }
-            }
-            let overflow = merged.len() > MAIN_MESSAGE_LIMIT;
-            if overflow || c.retired_through.is_some() {
-                c.retired_through = Some(
-                    c.retired_through
-                        .unwrap_or(0)
-                        .max(merged.last().map_or(0, |r| r.end)),
-                );
-                *ranges = Vec::new();
-                if overflow {
-                    c.messages = Rc::default();
-                    c.has_older = true;
-                }
-            } else {
-                *ranges = merged;
-            }
-            let recover_window = overflow || c.latest.is_some();
-            self.invalidate(id, false);
-            let epoch = self.token();
-            self.channel(id).version_epoch = epoch;
-            if recover_window && self.channel(id).watched {
-                self.history(id, Page::Latest, None);
-            }
+}
+
+/// Sorts by start and merges ranges that overlap or touch.
+pub(super) fn coalesce(mut ranges: Vec<Range>) -> Vec<Range> {
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end.saturating_add(1)
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
         }
     }
+    merged
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::responses::HistoryPage;
-    use serde_json::json;
+
+    fn r(start: i64, end: i64) -> Range {
+        Range { start, end }
+    }
 
     #[test]
-    fn retired_move_floor_fences_ack_and_delivers_unrelated_create_from_covering_gap_page() {
-        let channel = Uuid::from_u128(1);
-        let root = Uuid::from_u128(2);
-        let destination = Uuid::from_u128(3);
-        let mut core = Core::new(Uuid::from_u128(4));
-        core.session.connected = true;
-        let mut step = Step::new(&mut core);
-        let c = step.channel(channel);
-        c.watched = true;
-        c.cursor = Some(7);
-        c.subscription = Some(Rc::new(Subscription {
-            id: 0,
-            after: 7,
-            confirmed: true,
-            watermark: 7,
-        }));
-        step.history(channel, Page::After, Some(7));
-        let stale_request = step.channel(channel).fill.unwrap();
-        for (root_id, seq) in [(root, 10), (Uuid::from_u128(5), 11)] {
-            step.merge_move(
-                serde_json::from_value(json!({
-                    "type":"message","kind":"move","history_generation":Uuid::nil(),
-                    "channel_id":channel,"seq":seq,"version":seq,"root_id":root_id,
-                    "source_topic_id":null,"destination_topic_id":destination,"operation_id":root_id
-                }))
-                .unwrap(),
-                Source::Stream,
-            );
+    fn coalesce_merges_overlapping_and_touching_ranges_and_keeps_gaps() {
+        assert_eq!(coalesce(Vec::new()), Vec::new());
+        assert_eq!(coalesce(vec![r(1, 4), r(3, 6)]), vec![r(1, 6)]);
+        assert_eq!(coalesce(vec![r(1, 9), r(2, 3)]), vec![r(1, 9)]);
+        assert_eq!(coalesce(vec![r(1, 2), r(3, 3)]), vec![r(1, 3)]);
+        assert_eq!(coalesce(vec![r(1, 2), r(4, 4)]), vec![r(1, 2), r(4, 4)]);
+        assert_eq!(
+            coalesce(vec![r(10, 10), r(1, 1), r(5, 6), r(2, 2), r(7, 7)]),
+            vec![r(1, 2), r(5, 7), r(10, 10)]
+        );
+        assert_eq!(
+            coalesce(vec![r(i64::MAX, i64::MAX), r(i64::MAX - 1, i64::MAX - 1)]),
+            vec![r(i64::MAX - 1, i64::MAX)]
+        );
+        assert_eq!(
+            coalesce(vec![r(i64::MAX, i64::MAX), r(i64::MAX - 2, i64::MAX - 2)]),
+            vec![r(i64::MAX - 2, i64::MAX - 2), r(i64::MAX, i64::MAX)]
+        );
+    }
+
+    #[test]
+    fn coalesce_merges_overlap_after_maximum_end() {
+        assert_eq!(
+            coalesce(vec![r(i64::MAX - 1, i64::MAX), r(i64::MAX, i64::MAX)]),
+            vec![r(i64::MAX - 1, i64::MAX)]
+        );
+    }
+
+    #[test]
+    fn merge_event_advances_to_maximum_cursor_and_handles_duplicates() {
+        for source in [Source::Stream, Source::Events] {
+            let channel = Uuid::from_u128(1);
+            let mut core = Core::new(Uuid::from_u128(2));
+            let mut step = Step::new(&mut core);
+            step.channel(channel).cursor = Some(i64::MAX - 2);
+
+            step.merge_event(channel, Vec::new(), source, Some(i64::MAX));
+            assert_eq!(step.channel(channel).cursor, Some(i64::MAX - 2));
+            step.merge_event(channel, Vec::new(), source, Some(i64::MAX - 1));
+            assert_eq!(step.channel(channel).cursor, Some(i64::MAX));
+            assert!(step.channel(channel).advancing.is_empty());
+
+            step.merge_event(channel, Vec::new(), source, Some(i64::MAX));
+            assert_eq!(step.channel(channel).cursor, Some(i64::MAX));
+            assert!(step.channel(channel).advancing.is_empty());
         }
-        step.cap_moved_roots(channel, 1);
-        let c = step.channel(channel);
-        assert_eq!(c.retired_move_through, 10);
-        assert!(!c.moved_roots.contains_key(&root));
-
-        let stale: Message = serde_json::from_value(json!({
-            "history_generation":Uuid::nil(),"channel_id":channel,"id":Uuid::from_u128(6),
-            "created_seq":9,"version":9,"deleted":false,"client_message_id":Uuid::from_u128(7),
-            "sender":Uuid::from_u128(8),"body":"reply","created_at":"2026-01-01T00:00:00Z",
-            "topic_id":null,"reply_to":root,"reply_root_id":root,"mentions":[]
-        }))
-        .unwrap();
-        step.merge(channel, vec![stale.clone()], Source::Ack);
-        assert!(step.channel(channel).messages.is_empty());
-        assert!(step.out.records.is_empty());
-
-        let unrelated = Message {
-            id: Uuid::from_u128(9),
-            client_message_id: Uuid::from_u128(10),
-            created_seq: 8,
-            version: 8,
-            reply_to: None,
-            reply_root_id: None,
-            ..stale.clone()
-        };
-        step.merge_event(channel, vec![unrelated.clone()], Source::Stream, Some(8));
-        assert_eq!(step.channel(channel).cursor, Some(7));
-        assert!(step.out.records.is_empty());
-
-        let page = |messages: [Message; 2]| {
-            Ok(HistoryPage::Events(fukulow_api::ChannelEventPage {
-                history_generation: Uuid::nil(),
-                events: messages
-                    .into_iter()
-                    .map(|message| fukulow_api::ServerEvent::Message {
-                        seq: message.created_seq,
-                        kind: fukulow_api::MessageStateKind::Create,
-                        message,
-                    })
-                    .collect(),
-                has_more: true,
-            }))
-        };
-        step.history_response(stale_request, page([unrelated.clone(), stale.clone()]));
-        assert_eq!(step.channel(channel).cursor, Some(7));
-        assert!(step.out.records.is_empty());
-        let moved = Message {
-            version: 10,
-            topic_id: Some(destination),
-            ..stale
-        };
-        let request = step.channel(channel).fill.unwrap();
-        assert_ne!(stale_request, request);
-        step.history_response(request, page([unrelated.clone(), moved.clone()]));
-        assert_eq!(step.channel(channel).cursor, Some(11));
-        let delivered = &step.out.records[0].1;
-        assert_eq!(delivered.len(), 2);
-        assert!(same_message(&delivered[0], &unrelated));
-        assert!(same_message(&delivered[1], &moved));
     }
 }

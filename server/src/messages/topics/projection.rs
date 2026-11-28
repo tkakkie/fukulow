@@ -12,6 +12,18 @@ pub(in crate::messages) mod reference;
 // Bound both ends of the active Topic range so a Generic plan can index it.
 // The main range uses the NULL Topic key, which includes tombstones.
 pub(in crate::messages) fn page_sql() -> String {
+    page_sql_in_direction(false)
+}
+
+pub(in crate::messages) fn page_sql_in_direction(newer: bool) -> String {
+    let order = if newer { "ASC" } else { "DESC" };
+    let range = |position: &str, bigint: &str| {
+        if newer {
+            format!("{position} > $6{bigint} AND {position} <= $5{bigint}")
+        } else {
+            format!("{position} <= LEAST($5{bigint}, $6{bigint} - 1)")
+        }
+    };
     let sql = format!(
         r#"
 WITH access AS MATERIALIZED (SELECT ({}) AS visible),
@@ -23,9 +35,9 @@ unchanged_topics AS (
     SELECT t.id AS topic_id, t.first_seq, t.last_seq, t.last_seq AS current_last_seq, t.message_count, t.name
     FROM topics t
     WHERE t.organization_id = $1 AND t.channel_id = $4 AND $9::uuid IS NULL
-        AND t.last_seq <= LEAST($5::bigint, $6::bigint - 1)
+        AND {unchanged_range}
         AND (SELECT visible FROM access)
-    ORDER BY t.last_seq DESC LIMIT $7
+    ORDER BY t.last_seq {order} LIMIT $7
 ),
 topics_to_position AS (
     SELECT t.id, t.first_seq, t.last_seq, t.message_count, t.name
@@ -56,19 +68,19 @@ main_messages AS (
         m.seq AS current_last_seq, 1::bigint AS message_count, NULL::text AS name
     FROM messages m
     WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NULL
-        AND m.seq <= LEAST($5, $6 - 1)
+        AND {main_range}
         AND NOT $8 AND $9 IS NULL AND (SELECT visible FROM access)
-    ORDER BY m.seq DESC LIMIT $7
+    ORDER BY m.seq {order} LIMIT $7
 ),
 candidates AS (
     SELECT * FROM unchanged_topics
     UNION ALL
-    SELECT * FROM positioned_topics WHERE last_seq <= LEAST($5, $6 - 1)
+    SELECT * FROM positioned_topics WHERE {positioned_range}
     UNION ALL
     SELECT * FROM main_messages
 ),
 page AS (
-    SELECT * FROM candidates ORDER BY last_seq DESC LIMIT $7
+    SELECT * FROM candidates ORDER BY last_seq {order} LIMIT $7
 ),
 page_positions AS MATERIALIZED (
     SELECT p.*,
@@ -125,11 +137,14 @@ LEFT JOIN LATERAL (
     SELECT * FROM messages m WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.seq = p.last_seq
     OFFSET 0
 ) m ON true
-ORDER BY p.last_seq DESC
+ORDER BY p.last_seq {order}
 "#,
-        channels::member_visibility_sql(false)
+        channels::member_visibility_sql(false),
+        unchanged_range = range("t.last_seq", "::bigint"),
+        main_range = range("m.seq", ""),
+        positioned_range = range("last_seq", ""),
     );
-    mentions::page_sql(&sql, "p.last_seq DESC")
+    mentions::page_sql(&sql, &format!("p.last_seq {order}"))
 }
 
 struct Projection {
@@ -148,64 +163,46 @@ async fn read(
     topic: Option<Uuid>,
 ) -> Result<Projection, MessageError> {
     let limit = query.validate()?;
+    let newer = query.after_position.is_some();
     let organization = auth.identity.organization.organization_id;
-    // Cheap denial before watermark admission; reauthorize in the page snapshot.
-    require_visible_scoped(
-        &state.pool,
-        organization,
-        (auth.identity.member.id, auth.membership_revision),
+    let snapshot = history::prepare_snapshot(
+        state,
+        auth,
         channel,
+        query.history_generation,
+        query.as_of_seq,
+        async |_| Ok(()),
+        async |tx: &mut sqlx::PgConnection, history_generation, w| {
+            let sql = if newer {
+                page_sql_in_direction(true)
+            } else {
+                page_sql()
+            };
+            let rows = sqlx::query(&sql)
+                // Repeated reads otherwise select a much slower generic plan (#326).
+                .persistent(false)
+                .bind(organization)
+                .bind(auth.identity.member.id)
+                .bind(auth.membership_revision)
+                .bind(channel)
+                .bind(w)
+                .bind(query.after_position.or(query.before_position))
+                .bind(i64::from(limit) + 1)
+                .bind(topics_only)
+                .bind(topic)
+                .fetch_all(tx)
+                .await?;
+            Ok((history_generation, rows))
+        },
     )
     .await?;
     if topics_only || topic.is_some() {
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
-    tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        super::watermark(state, organization, channel).await?;
-        // Admission resolves prior ambiguous commits; W is selected in the page snapshot.
-        let (history_generation, rows) = crate::database::organization_read_only(
-            &state.pool,
-            organization,
-            async |tx: &mut sqlx::PgConnection| {
-                require_visible(
-                    &mut *tx,
-                    organization,
-                    (auth.identity.member.id, auth.membership_revision),
-                    channel,
-                )
-                .await?;
-                let (history_generation, w) = history::page(
-                    tx,
-                    organization,
-                    channel,
-                    query.history_generation,
-                    query.as_of_seq,
-                )
-                .await?;
-                let rows = sqlx::query(&page_sql())
-                    // Repeated reads otherwise select a much slower generic plan (#326).
-                    .persistent(false)
-                    .bind(organization)
-                    .bind(auth.identity.member.id)
-                    .bind(auth.membership_revision)
-                    .bind(channel)
-                    .bind(w)
-                    .bind(query.before_position)
-                    .bind(i64::from(limit) + 1)
-                    .bind(topics_only)
-                    .bind(topic)
-                    .fetch_all(tx)
-                    .await?;
-                Ok::<_, MessageError>((history_generation, rows))
-            },
-        )
-        .await?;
+    admission::within_work_deadline(async {
+        let (history_generation, rows) = snapshot.await?;
         let first = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        match first.try_get::<Option<bool>, _>("visible")? {
-            None => return Err(MessageError::OrganizationUnavailable),
-            Some(false) => return Err(MessageError::NotFound),
-            Some(true) => {}
-        }
+        check_visibility(first.try_get::<Option<bool>, _>("visible")?)?;
         let w: i64 = first.try_get("as_of_seq")?;
         let mut items = Vec::new();
         for row in &rows {
@@ -235,7 +232,9 @@ async fn read(
         }
         let has_more = items.len() > usize::from(limit);
         items.truncate(usize::from(limit));
-        items.reverse();
+        if !newer {
+            items.reverse();
+        }
         Ok(Projection {
             history_generation,
             w,
@@ -244,15 +243,14 @@ async fn read(
         })
     })
     .await
-    .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
 }
 
 /// Main timeline projection at a fixed W. Topic Messages are represented once by their summary.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels/{id}/timeline",
     params(("org" = Uuid, Path), ("id" = Uuid, Path), ListProjectionQuery),
     security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, description = "Ascending W-relative positions; initial page fixes W, exclusive older continuation uses as_of_seq and before_position; cursor-neutral", body = TimelinePage),
-        (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
+    responses((status = 200, description = "Ascending W-relative positions; initial page fixes W. Continue exclusively with as_of_seq and before_position (older) or after_position (newer); has_more follows the requested direction, older on the initial page; cursor-neutral", body = TimelinePage),
+        (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, conflicting boundaries, before_position below 1, after_position below 0 or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found; private and unknown Channels are identical", body = ErrorBody),
@@ -268,24 +266,20 @@ pub async fn list_timeline(
     let Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let p = read(&state, &auth, channel, query, false, None).await?;
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(TimelinePage {
-            history_generation: p.history_generation,
-            as_of_seq: p.w,
-            items: p.items,
-            has_more: p.has_more,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(TimelinePage {
+        history_generation: p.history_generation,
+        as_of_seq: p.w,
+        items: p.items,
+        has_more: p.has_more,
+    }))
 }
 
 /// Topic summaries as of W, ordered by their W-relative latest activity.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels/{id}/topics",
     params(("org" = Uuid, Path), ("id" = Uuid, Path), ListProjectionQuery),
     security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, description = "W-relative Topic summaries; default 50/max 200, ascending positions and exclusive older continuation; cursor-neutral", body = TopicPage),
-        (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
+    responses((status = 200, description = "Ascending W-relative Topic summaries; initial page fixes W. Continue exclusively with as_of_seq and before_position (older) or after_position (newer); has_more follows the requested direction, older on the initial page; cursor-neutral", body = TopicPage),
+        (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, conflicting boundaries, before_position below 1, after_position below 0, limit outside 1..=200, or Topics in a DM", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found", body = ErrorBody),
@@ -309,16 +303,12 @@ pub async fn list_topics(
             _ => None,
         })
         .collect();
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(TopicPage {
-            history_generation: p.history_generation,
-            as_of_seq: p.w,
-            topics,
-            has_more: p.has_more,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(TopicPage {
+        history_generation: p.history_generation,
+        as_of_seq: p.w,
+        topics,
+        has_more: p.has_more,
+    }))
 }
 
 /// Current bounded baseline for a Topic first encountered through live delivery.
@@ -349,6 +339,7 @@ pub async fn topic_summary(
             history_generation: query.history_generation,
             as_of_seq: None,
             before_position: None,
+            after_position: None,
             limit: Some(1),
         },
         true,
@@ -358,13 +349,9 @@ pub async fn topic_summary(
     let Some(TimelineItem::Topic { topic }) = p.items.into_iter().next() else {
         return Err(MessageError::TopicNotFound);
     };
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(TopicSummaryResponse {
-            history_generation: p.history_generation,
-            as_of_seq: p.w,
-            topic,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(TopicSummaryResponse {
+        history_generation: p.history_generation,
+        as_of_seq: p.w,
+        topic,
+    }))
 }

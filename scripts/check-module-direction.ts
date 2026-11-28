@@ -47,7 +47,7 @@ export function checkWorkspace(driver: string): void {
   })
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
   try {
     checkWorkspace(buildDriver())
     console.log('Module direction: production and test targets passed')

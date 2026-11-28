@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AcceptInviteRequest } from './api'
-  import type { inviteAcceptanceAdapter } from './members.svelte'
+  import type { inviteAcceptanceAdapter } from './invite-acceptance.svelte'
   import Button from './ui/Button.svelte'
   import Input from './ui/Input.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'

@@ -8,5 +8,6 @@ web/dist/
 .claude/worktrees/
 .claude/settings.local.json
 test-results/
+test-results-component/
 playwright-report/
 web/wasm/

@@ -17,9 +17,9 @@ use utoipa::{
         crate::channels::sections::write::create, crate::channels::sections::write::rename, crate::channels::sections::write::delete,
         crate::channels::sections::write::section_order, crate::channels::sections::write::move_channel, crate::channels::sections::write::channel_order,
         crate::messages::search::search,
-        crate::messages::dms::open, crate::messages::dms::list, crate::channels::dms::discovery::changes, crate::health, crate::ready, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::native_sign_in, crate::auth::sign_out, crate::auth::security::change_password, crate::auth::security::revoke_others, crate::auth::me, crate::auth::organization_me, crate::auth::members::list_members, crate::auth::members::change_role, crate::auth::members::deactivate, crate::auth::invites::management::list_invites, crate::auth::invites::management::revoke_invite, crate::auth::invites::create_invite, crate::auth::invites::accept_invite,
-        crate::messages::unread::list_channels, crate::messages::unread::mark_channel_read, crate::messages::unread::mark_topic_read, crate::channels::create_channel, crate::channels::archive::get_channel, crate::channels::archive::update_channel, crate::channels::members::list, crate::channels::members::add, crate::channels::members::remove, crate::channels::members::change_manager,
-        crate::messages::authors::lookup_authors, crate::messages::log::list_channel_events, crate::messages::list_messages, crate::messages::send_message, crate::messages::move_topic::move_chain, crate::messages::replies::reply_chain, crate::messages::replies::counts::reply_counts, crate::messages::topics::projection::list_timeline, crate::messages::topics::projection::list_topics, crate::messages::topics::projection::topic_summary, crate::messages::topics::topic_history, crate::realtime::upgrade),
+        crate::messages::dms::open, crate::messages::dms::list, crate::channels::dms::discovery::changes, crate::health::health, crate::health::ready, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::native_sign_in, crate::auth::sign_out, crate::auth::security::change_password, crate::auth::security::revoke_others, crate::auth::me, crate::auth::organization_me, crate::auth::members::list_members, crate::auth::members::change_role, crate::auth::members::deactivate, crate::auth::invites::management::list_invites, crate::auth::invites::management::revoke_invite, crate::auth::invites::create_invite, crate::auth::invites::accept_invite,
+        crate::messages::unread::handlers::list_channels, crate::messages::unread::handlers::mark_channel_read, crate::messages::unread::handlers::mark_topic_read, crate::channels::create_channel, crate::channels::archive::get_channel, crate::channels::archive::update_channel, crate::channels::members::list, crate::channels::members::add, crate::channels::members::remove, crate::channels::members::change_manager,
+        crate::messages::authors::lookup_authors, crate::messages::log::handlers::list_channel_events, crate::messages::list::list_messages, crate::messages::send::send_message, crate::messages::move_topic::move_chain, crate::messages::replies::reply_chain, crate::messages::replies::counts::reply_counts, crate::messages::topics::projection::list_timeline, crate::messages::topics::projection::list_topics, crate::messages::topics::projection::topic_summary, crate::messages::topics::topic_history, crate::realtime::upgrade),
     components(schemas(
         crate::channels::ChannelKind, crate::messages::search::SearchPage, crate::messages::search::SearchHit,
         crate::channels::sections::Section, crate::channels::sections::SectionLayout, crate::channels::sections::SectionSnapshot,
@@ -160,16 +160,7 @@ impl Modify for SectionResponseHeaders {
             {
                 continue;
             }
-            for operation in [
-                &mut item.get,
-                &mut item.post,
-                &mut item.patch,
-                &mut item.delete,
-                &mut item.put,
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for operation in operations_mut(item) {
                 for response in operation.responses.responses.values_mut() {
                     if let RefOr::T(response) = response {
                         response.headers.insert(
@@ -368,6 +359,36 @@ impl Modify for WebSocketDiscriminators {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use utoipa::openapi::path::HttpMethod;
+
+    #[test]
+    fn operations_mut_visits_each_operation_once() {
+        let operation = |id| Operation::builder().operation_id(Some(id)).build();
+        let mut item = PathItem::builder()
+            .operation(HttpMethod::Get, operation("get"))
+            .operation(HttpMethod::Put, operation("put"))
+            .operation(HttpMethod::Post, operation("post"))
+            .operation(HttpMethod::Delete, operation("delete"))
+            .operation(HttpMethod::Options, operation("options"))
+            .operation(HttpMethod::Head, operation("head"))
+            .operation(HttpMethod::Patch, operation("patch"))
+            .operation(HttpMethod::Trace, operation("trace"))
+            .query(Some(operation("query")))
+            .additional_operation("connect", operation("connect"))
+            .build();
+
+        let mut visited: Vec<_> = operations_mut(&mut item)
+            .map(|operation| operation.operation_id.as_deref().unwrap())
+            .collect();
+        visited.sort_unstable();
+        assert_eq!(
+            visited,
+            [
+                "connect", "delete", "get", "head", "options", "patch", "post", "put", "query",
+                "trace",
+            ]
+        );
+    }
 
     #[test]
     #[should_panic(expected = "Invalid OpenAPI domain crate::health for /api/v1/health")]

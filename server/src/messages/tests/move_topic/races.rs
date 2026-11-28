@@ -1,12 +1,5 @@
 use super::*;
-
-async fn entered(gate: &PublicationGate) {
-    tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-}
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 #[fukulow_test::test]
 async fn reply_waiting_on_move_rereads_parent_and_inherits_destination(pool: PgPool) {
@@ -18,21 +11,19 @@ async fn reply_waiting_on_move_rereads_parent_and_inherits_destination(pool: PgP
         let (app, token, channel, root) = (f.app.clone(), f.token.clone(), f.channel, id(&root));
         tokio::spawn(async move { move_request(&app, &token, channel, root, operation).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     // Independent admission lets the Reply read the old committed parent while
     // Move holds the database writer barrier.
     let reply_app = router(&pool).await;
     let key = Uuid::new_v4();
-    let (read_parent, release_reply) = history::pause_reply_parent(key);
+    let parent = history::pause_reply_parent(key);
     let reply_task = {
         let (token, channel) = (f.token.clone(), f.channel);
         tokio::spawn(async move { sent(&reply_app, &token, channel, reply(key, &root)).await })
     };
-    tokio::time::timeout(Duration::from_secs(3), read_parent)
-        .await
-        .unwrap();
-    release_reply();
-    gate.release.add_permits(1);
+    parent.entered_within(Duration::from_secs(3)).await;
+    parent.release();
+    gate.release();
     let outcome = moved(move_task.await.unwrap()).await;
     let reply = reply_task.await.unwrap();
     assert_eq!(outcome.move_seq, Some(2));
@@ -52,7 +43,7 @@ async fn move_waiting_on_reply_includes_committed_reply(pool: PgPool) {
             (f.app.clone(), f.token.clone(), f.channel, reply(key, &root));
         tokio::spawn(async move { sent(&app, &token, channel, input).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     let move_app = router(&pool).await;
     let task = {
         let (token, channel, anchor) = (f.token.clone(), f.channel, id(&root));
@@ -61,7 +52,7 @@ async fn move_waiting_on_reply_includes_committed_reply(pool: PgPool) {
         })
     };
     wait_for_lock(&pool, "%pg_advisory_xact_lock(hashtextextended%135)%").await;
-    gate.release.add_permits(1);
+    gate.release();
     let reply = reply_task.await.unwrap();
     assert!(reply["topic_id"].is_null());
     let result = moved(task.await.unwrap()).await;
@@ -109,29 +100,20 @@ async fn move_ambiguous_commit_recovers_by_same_key_without_reallocating(pool: P
         Some(2)
     );
     let after = state(&pool, f.org, f.channel).await;
-    assert_eq!(after[3].as_array().unwrap().len(), 2);
+    assert_eq!(after[0]["seq"], 2);
+    assert_eq!(after[3].as_array().unwrap().len(), 1);
+    assert_eq!(after[3][0]["event_seq"], 2);
     assert_eq!(after[4].as_array().unwrap().len(), 1);
 }
 
 pub(super) async fn wait_for_lock(pool: &PgPool, query: &str) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-                 AND wait_event_type='Lock' AND query LIKE $1)",
-            )
-            .bind(query)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-            if waiting {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery(query),
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 #[fukulow_test::test]
@@ -151,7 +133,7 @@ async fn move_holds_manager_grant_until_commit_and_rechecks_before_retry(pool: P
             (f.app.clone(), token.clone(), id(&root), intent.clone());
         tokio::spawn(async move { move_request(&app, &token, private, anchor, intent).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     let revoke = {
         let (pool, org) = (pool.clone(), f.org);
         tokio::spawn(async move {
@@ -160,7 +142,7 @@ async fn move_holds_manager_grant_until_commit_and_rechecks_before_retry(pool: P
         })
     };
     wait_for_lock(&pool, "DELETE FROM channel_members%").await;
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(moved(task.await.unwrap()).await.move_seq, Some(2));
     assert_eq!(revoke.await.unwrap().rows_affected(), 1);
     let before = state(&pool, f.org, private).await;
@@ -193,7 +175,7 @@ async fn concurrent_move_operation_key_across_channels_leaves_loser_unchanged(po
         );
         tokio::spawn(async move { move_request(&app, &token, channel, anchor, input).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     let loser = {
         let (app, token, anchor) = (f.app.clone(), f.token.clone(), id(&second));
         tokio::spawn(async move { move_request(&app, &token, another, anchor, input).await })
@@ -208,7 +190,7 @@ async fn concurrent_move_operation_key_across_channels_leaves_loser_unchanged(po
     .await
     .unwrap();
     assert_eq!(untouched_counter, 1);
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(moved(winner.await.unwrap()).await.move_seq, Some(2));
     error(
         loser.await.unwrap(),

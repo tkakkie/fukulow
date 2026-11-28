@@ -1,11 +1,14 @@
 //! Organization notices are invalidations, never Message delivery or authorization grants.
 use super::*;
-use crate::{get_mut_ignoring_poison, lock_ignoring_poison};
+use crate::lock_ignoring_poison;
+use crate::observability::notice_permits::NoticeCaller;
 use auth::activity::ChangeScope;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::HashMap,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -14,13 +17,34 @@ use tokio::{
     sync::{Notify, Semaphore},
     time::Instant,
 };
+mod authorize;
+mod buffer;
 mod dms;
+mod fallback_trace;
 mod holds;
+mod notice_budget;
+mod publish;
+mod recheck;
 mod revocations;
+mod target_change;
+#[cfg(test)]
+mod test_hooks;
+#[cfg(test)]
+use authorize::directory_guests;
+use authorize::{Authorization, authorize_batch};
+#[cfg(test)]
+use buffer::Proof;
+use buffer::{Buffer, Epoch, Pending, QueryToken, Recovery, enqueue};
 pub(crate) use dms::DmPublication;
-use holds::Holds;
 pub(crate) use holds::revocation_hold_counts;
+use notice_budget::{NoticeBudget, notice_query_slot};
+use publish::ActivityBatch;
+pub(super) use publish::SectionsPublication;
 use revocations::{Capture, Check, Revocations};
+#[cfg(test)]
+use test_hooks::test_fault;
+#[cfg(test)]
+pub(crate) use test_hooks::{TestFault, fail, pause, pause_member, test_pause};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -89,222 +113,17 @@ impl Notice {
         )
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Proof {
-    role: Role,
-    grant: Option<Uuid>,
-}
-#[derive(Default)]
-struct Recovery {
-    state: Mutex<RecoveryState>,
-}
-#[derive(Default)]
-struct RecoveryState {
-    live: usize,
-    settled: bool,
-}
-impl Recovery {
-    fn valid(&self) -> bool {
-        let state = lock_ignoring_poison(&self.state);
-        state.settled || state.live != 0
-    }
-}
-struct QueryToken {
-    valid: AtomicBool,
-    recovery: Mutex<Option<Arc<Recovery>>>,
-}
-impl QueryToken {
-    fn new() -> Self {
-        Self {
-            valid: AtomicBool::new(true),
-            recovery: Mutex::new(None),
-        }
-    }
-    fn valid(&self) -> bool {
-        self.valid.load(Ordering::Relaxed)
-    }
-    fn contribute(&self, recovery: &Arc<Recovery>) {
-        // Each recipient query enqueues one contribution. Coalescing attaches its
-        // token once; subsequent merges keep the same recovery accumulator.
-        let mut contribution = lock_ignoring_poison(&self.recovery);
-        if contribution.is_none() && self.valid() {
-            lock_ignoring_poison(&recovery.state).live += 1;
-            *contribution = Some(recovery.clone());
-        }
-    }
-    fn retire(&self) {
-        let contribution = lock_ignoring_poison(&self.recovery);
-        if self.valid.swap(false, Ordering::Relaxed)
-            && let Some(recovery) = contribution.as_ref()
-        {
-            lock_ignoring_poison(&recovery.state).live -= 1;
-        }
-    }
-}
-impl Drop for QueryToken {
-    fn drop(&mut self) {
-        if self.valid()
-            && let Some(recovery) = get_mut_ignoring_poison(&mut self.recovery).as_ref()
-        {
-            // No query guard, fallback snapshot or frame can fence this token
-            // after its last owner drops. Retain its reset authority as one bit,
-            // rather than retaining a growing list of completed query tokens.
-            let mut state = lock_ignoring_poison(&recovery.state);
-            state.settled = true;
-            state.live -= 1;
-        }
-    }
-}
-#[derive(Clone)]
-enum Epoch {
-    Notice(u64),
-    Revocation(Arc<Capture>),
-}
-impl Epoch {
-    fn retained(&self, b: &Buffer) -> bool {
-        match self {
-            Self::Notice(epoch) => b.epoch == *epoch,
-            Self::Revocation(capture) => capture.check().is_some(),
-        }
-    }
-}
-#[cfg_attr(test, derive(Clone))]
-struct Pending {
-    notice: Notice,
-    // Payload-free DM invalidations still retain the causing access lifetime.
-    channel: Option<Uuid>,
-    epoch: Epoch,
-    directory_epoch: Option<u64>,
-    proof: Option<Proof>,
-    valid: Arc<QueryToken>,
-    recovery: Option<Arc<Recovery>>,
-}
-impl Pending {
-    fn recoverable(&self) -> bool {
-        self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid())
-    }
-}
-struct InFlight {
-    channel: Option<Uuid>,
-    proof: Option<Proof>,
-    valid: Arc<QueryToken>,
-}
-#[derive(Default)]
-struct Buffer {
-    epoch: u64,
-    revocations: Revocations,
-    holds: Holds,
-    directory_epoch: u64,
-    pending: VecDeque<Pending>,
-    reset: bool,
-    proofs: HashMap<Option<Uuid>, Proof>,
-    in_flight: HashMap<Uuid, InFlight>,
-}
 enum Retirement<'a> {
     Notices,
     Mutation(&'a HashMap<Uuid, Capture>),
     MembershipLost(i64),
-}
-impl Buffer {
-    fn retire_notices(&mut self) {
-        self.holds.prune(&self.revocations, Instant::now());
-        self.epoch = self.epoch.wrapping_add(1);
-        let mut pending = std::mem::take(&mut self.pending);
-        pending.retain(|p| p.epoch.retained(self));
-        self.pending = pending;
-        self.in_flight.clear();
-        self.proofs.clear();
-        self.reset &= !self.pending.is_empty();
-    }
-
-    fn apply_revocation(&mut self, check: Check, identity: Option<&Proof>, access: Option<bool>) {
-        // A fallback or publication can still fence a hold. Only its scheduled
-        // handoff recheck can supply authority to deliver it.
-        let access =
-            access.filter(|&accessible| accessible || self.holds.deadline(check.id).is_none());
-        self.apply_revocation_proof(check, identity, access);
-    }
-
-    fn apply_revocation_proof(
-        &mut self,
-        check: Check,
-        identity: Option<&Proof>,
-        access: Option<bool>,
-    ) {
-        if self
-            .revocations
-            .apply(check, identity.map(|proof| proof.role), access)
-        {
-            self.retire_notices();
-        }
-    }
-}
-struct Authorization {
-    entry: Arc<Entry>,
-    epoch: u64,
-    directory_epoch: Option<u64>,
-    id: Uuid,
-    valid: Arc<QueryToken>,
-}
-impl Authorization {
-    fn new(
-        entry: Arc<Entry>,
-        epoch: u64,
-        channel: Option<Uuid>,
-        directory: bool,
-        expected_directory_epoch: Option<u64>,
-    ) -> Self {
-        let id = Uuid::new_v4();
-        let valid = Arc::new(QueryToken::new());
-        let directory_epoch = {
-            let mut b = lock_ignoring_poison(&entry.buffer);
-            let directory_epoch =
-                directory.then_some(expected_directory_epoch.unwrap_or(b.directory_epoch));
-            if epoch == b.epoch {
-                b.in_flight.insert(
-                    id,
-                    InFlight {
-                        channel,
-                        proof: None,
-                        valid: valid.clone(),
-                    },
-                );
-            }
-            directory_epoch
-        };
-        Self {
-            entry,
-            epoch,
-            directory_epoch,
-            id,
-            valid,
-        }
-    }
-    fn proved(&self, proof: &Option<Proof>) {
-        let mut b = lock_ignoring_poison(&self.entry.buffer);
-        if self.epoch == b.epoch
-            && (proof.as_ref().is_none_or(|proof| proof.role != Role::Guest)
-                || self
-                    .directory_epoch
-                    .is_none_or(|epoch| b.directory_epoch == epoch))
-            && let Some(captured) = b.in_flight.get_mut(&self.id)
-        {
-            captured.proof = proof.clone();
-        }
-    }
-}
-impl Drop for Authorization {
-    fn drop(&mut self) {
-        lock_ignoring_poison(&self.entry.buffer)
-            .in_flight
-            .remove(&self.id);
-    }
 }
 struct Entry {
     id: Uuid,
     organization: Uuid,
     member: (Uuid, i64),
     hash: Vec<u8>,
+    notice_queries: Arc<OnceLock<NoticeBudget>>,
     buffer: Mutex<Buffer>,
     wake: Notify,
 }
@@ -318,6 +137,7 @@ pub struct Activity {
     directory_member: Option<Uuid>,
     directory_channels: Vec<Uuid>,
     capacity: Arc<Semaphore>,
+    notice_queries: Arc<OnceLock<NoticeBudget>>,
     batches: Arc<Mutex<HashMap<(Uuid, Uuid), ActivityBatch>>>,
     #[cfg(test)]
     tasks: Arc<Mutex<HashMap<(Uuid, Uuid), tokio::task::AbortHandle>>>,
@@ -334,42 +154,13 @@ impl Default for Activity {
             directory_member: None,
             directory_channels: Vec::new(),
             capacity: Arc::new(Semaphore::new(40)),
+            notice_queries: Default::default(),
             batches: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
             #[cfg(test)]
             queries: Default::default(),
         }
-    }
-}
-#[derive(Clone, Default)]
-pub(crate) struct ActivityBatch {
-    senders: Vec<(Uuid, i64)>,
-    everyone: Option<i64>,
-}
-impl ActivityBatch {
-    fn add(&mut self, sender: Option<Uuid>, seq: i64) {
-        let Some(sender) = sender else {
-            self.everyone = self.everyone.max(Some(seq));
-            return;
-        };
-        if let Some(row) = self.senders.iter_mut().find(|r| r.0 == sender) {
-            row.1 = row.1.max(seq);
-        } else {
-            self.senders.push((sender, seq));
-        }
-        self.senders
-            .sort_unstable_by_key(|r| std::cmp::Reverse(r.1));
-        self.senders.truncate(2);
-    }
-
-    fn eligible(&self, member: Uuid) -> Option<i64> {
-        self.everyone
-            .max(self.senders.iter().find(|r| r.0 != member).map(|r| r.1))
-    }
-
-    fn is_empty(&self) -> bool {
-        self.everyone.is_none() && self.senders.is_empty()
     }
 }
 pub(crate) struct Registration {
@@ -390,19 +181,6 @@ impl Drop for Registration {
     }
 }
 impl Activity {
-    #[cfg(test)]
-    pub(crate) async fn drained(&self) {
-        self.drained_except(0).await;
-    }
-    #[cfg(test)]
-    pub(crate) async fn drained_except(&self, active: u32) {
-        let _permits = self
-            .capacity
-            .clone()
-            .acquire_many_owned(40 - active)
-            .await
-            .unwrap();
-    }
     pub(crate) fn register(&self, auth: &Auth) -> Registration {
         let id = Uuid::new_v4();
         let entry = Arc::new(Entry {
@@ -410,6 +188,7 @@ impl Activity {
             organization: auth.identity.organization.organization_id,
             member: (auth.identity.member.id, auth.membership_revision),
             hash: auth.session_hash(),
+            notice_queries: self.notice_queries.clone(),
             buffer: Default::default(),
             wake: Notify::new(),
         });
@@ -463,421 +242,8 @@ impl Activity {
             b.retire_notices();
         }
     }
-    fn advance_directory_epochs(&self, organization: Uuid) -> HashMap<Uuid, u64> {
-        let mut epochs = HashMap::new();
-        let entries = lock_ignoring_poison(&self.entries);
-        for entry in entries
-            .values()
-            .filter(|entry| entry.organization == organization)
-        {
-            let mut b = lock_ignoring_poison(&entry.buffer);
-            b.directory_epoch = b.directory_epoch.wrapping_add(1);
-            b.pending
-                .retain(|pending| pending.directory_epoch.is_none());
-            if b.pending.is_empty() {
-                b.reset = false;
-            }
-            epochs.insert(entry.id, b.directory_epoch);
-        }
-        epochs
-    }
-    pub(crate) fn message(
-        &self,
-        pool: sqlx::PgPool,
-        organization: Uuid,
-        channel: Uuid,
-        sender: Uuid,
-        seq: i64,
-    ) {
-        self.channel_activity(pool, organization, channel, Some(sender), seq);
-    }
-
-    pub(crate) fn message_moved(
-        &self,
-        pool: sqlx::PgPool,
-        organization: Uuid,
-        channel: Uuid,
-        seq: i64,
-    ) {
-        self.channel_activity(pool, organization, channel, None, seq);
-    }
-
-    fn channel_activity(
-        &self,
-        pool: sqlx::PgPool,
-        organization: Uuid,
-        channel: Uuid,
-        sender: Option<Uuid>,
-        seq: i64,
-    ) {
-        let key = (organization, channel);
-        let mut batches = lock_ignoring_poison(&self.batches);
-        if let Some(batch) = batches.get_mut(&key) {
-            batch.add(sender, seq);
-            return;
-        }
-        let Ok(slot) = self.capacity.clone().try_acquire_owned() else {
-            return;
-        };
-        let mut batch = ActivityBatch::default();
-        batch.add(sender, seq);
-        batches.insert(key, batch);
-        let this = self.clone();
-        let lease = BatchLease {
-            batches: self.batches.clone(),
-            key,
-            finished: false,
-        };
-        let task = tokio::spawn(async move {
-            let mut _lease = lease;
-            let _slot = slot;
-            loop {
-                // Freeze sender maxima before starting authorization. New commits form the next batch.
-                let batch = {
-                    let mut batches = lock_ignoring_poison(&this.batches);
-                    std::mem::take(batches.entry(key).or_default())
-                };
-                let work = this.publish(
-                    &pool,
-                    organization,
-                    Notice::ChannelActivity {
-                        channel_id: channel,
-                        seq: 1,
-                    },
-                    None,
-                    Some(&batch),
-                );
-                let _ = tokio::time::timeout(Duration::from_secs(10), work).await;
-                let mut batches = lock_ignoring_poison(&this.batches);
-                if batches.get(&key).is_none_or(ActivityBatch::is_empty) {
-                    batches.remove(&key);
-                    _lease.finished = true;
-                    break;
-                }
-            }
-        });
-        #[cfg(test)]
-        self.tasks.lock().unwrap().insert(key, task.abort_handle());
-        #[cfg(not(test))]
-        drop(task);
-    }
-    pub(crate) async fn publish(
-        &self,
-        pool: &sqlx::PgPool,
-        organization: Uuid,
-        notice: Notice,
-        target: Option<Uuid>,
-        senders: Option<&ActivityBatch>,
-    ) -> Result<(), sqlx::Error> {
-        let channel = notice.channel();
-        self.publish_scoped(pool, organization, notice, channel, target, senders)
-            .await
-    }
-
-    async fn publish_scoped(
-        &self,
-        pool: &sqlx::PgPool,
-        organization: Uuid,
-        notice: Notice,
-        channel: Option<Uuid>,
-        target: Option<Uuid>,
-        senders: Option<&ActivityBatch>,
-    ) -> Result<(), sqlx::Error> {
-        let captured: Vec<_> = self
-            .snapshot(organization)
-            .into_iter()
-            .filter(|(e, _)| {
-                target.is_none_or(|t| e.member.0 == t)
-                    && (!matches!(notice, Notice::MembersChanged)
-                        || self
-                            .directory_epochs
-                            .as_ref()
-                            .is_none_or(|epochs| epochs.contains_key(&e.id)))
-            })
-            .collect();
-        #[cfg(test)]
-        test_pause(
-            organization,
-            channel.unwrap_or(Uuid::nil()),
-            "snapshot",
-            target,
-        )
-        .await;
-        let authorizations: Vec<_> = captured
-            .iter()
-            .map(|(e, epoch)| {
-                Authorization::new(
-                    e.clone(),
-                    *epoch,
-                    channel,
-                    matches!(notice, Notice::MembersChanged),
-                    self.directory_epochs
-                        .as_ref()
-                        .and_then(|epochs| epochs.get(&e.id).copied()),
-                )
-            })
-            .collect();
-        let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
-        #[cfg(test)]
-        if matches!(notice, Notice::ChannelMembersChanged { .. }) {
-            test_pause(
-                organization,
-                channel.unwrap_or(Uuid::nil()),
-                "members_query",
-                None,
-            )
-            .await;
-        }
-        #[cfg(test)]
-        test_pause(organization, channel.unwrap_or(Uuid::nil()), "query", None).await;
-        #[cfg(test)]
-        test_fault(organization, channel.unwrap_or(Uuid::nil()))?;
-        #[cfg(test)]
-        self.queries
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let proofs = authorize_notices(pool, &entries, channel).await?;
-        let shared_guests =
-            if matches!(notice, Notice::MembersChanged) && !self.directory_channels.is_empty() {
-                directory_guests(pool, organization, &entries, &self.directory_channels).await?
-            } else {
-                HashSet::new()
-            };
-        for (authorization, proof) in authorizations.iter().zip(&proofs) {
-            authorization.proved(proof);
-        }
-        #[cfg(test)]
-        test_pause(
-            organization,
-            channel.unwrap_or(Uuid::nil()),
-            "authorized",
-            None,
-        )
-        .await;
-        #[cfg(test)]
-        if matches!(notice, Notice::MembersChanged) {
-            test_pause(organization, Uuid::nil(), "directory_authorized", None).await;
-        }
-        for (((entry, epoch), authorization), proof) in
-            captured.iter().zip(&authorizations).zip(proofs)
-        {
-            let Some(proof) = proof else {
-                continue;
-            };
-            if self.exclude_guests && proof.role == Role::Guest {
-                continue;
-            }
-            if matches!(notice, Notice::MembersChanged)
-                && proof.role == Role::Guest
-                && target != Some(entry.member.0)
-                && self.directory_member != Some(entry.member.0)
-                && !shared_guests.contains(&entry.member.0)
-            {
-                continue;
-            }
-            let mut event = notice.clone();
-            if let Some(senders) = senders {
-                let Some(seq) = senders.eligible(entry.member.0) else {
-                    continue;
-                };
-                event = Notice::ChannelActivity {
-                    channel_id: notice.channel().ok_or(sqlx::Error::RowNotFound)?,
-                    seq,
-                };
-            }
-            enqueue(
-                entry,
-                Pending {
-                    notice: event,
-                    channel,
-                    epoch: Epoch::Notice(*epoch),
-                    directory_epoch: (proof.role == Role::Guest)
-                        .then_some(authorization.directory_epoch)
-                        .flatten(),
-                    proof: Some(proof),
-                    valid: authorization.valid.clone(),
-                    recovery: None,
-                },
-            );
-        }
-        Ok(())
-    }
-    pub(crate) fn spawn(
-        &self,
-        pool: sqlx::PgPool,
-        organization: Uuid,
-        notice: Notice,
-        target: Option<Uuid>,
-    ) {
-        let channel = notice.channel();
-        self.spawn_scoped(pool, organization, notice, channel, target);
-    }
-
-    fn spawn_scoped(
-        &self,
-        pool: sqlx::PgPool,
-        organization: Uuid,
-        notice: Notice,
-        channel: Option<Uuid>,
-        target: Option<Uuid>,
-    ) {
-        let Ok(slot) = self.capacity.clone().try_acquire_owned() else {
-            return;
-        };
-        let this = self.clone();
-        #[cfg(test)]
-        let key = (organization, channel.unwrap_or(Uuid::nil()));
-        let task = tokio::spawn(async move {
-            let _slot = slot;
-            this.publish_with_deadline(&pool, organization, notice, channel, target)
-                .await;
-        });
-        #[cfg(test)]
-        self.tasks.lock().unwrap().insert(key, task.abort_handle());
-        #[cfg(not(test))]
-        drop(task);
-    }
-
-    async fn publish_with_deadline(
-        &self,
-        pool: &sqlx::PgPool,
-        organization: Uuid,
-        notice: Notice,
-        channel: Option<Uuid>,
-        target: Option<Uuid>,
-    ) {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.publish_scoped(pool, organization, notice, channel, target, None),
-        )
-        .await;
-    }
-
-    pub(super) fn arm_sections(
-        &self,
-        organization: Uuid,
-        member: Uuid,
-        generation: i64,
-    ) -> SectionsPublication {
-        SectionsPublication {
-            activity: self.clone(),
-            organization,
-            member,
-            generation,
-        }
-    }
-}
-
-// Construct inside the write transaction and consume after confirmed COMMIT.
-// Unconfirmed outcomes and failures without recipient proof recover through O5.
-pub(super) struct SectionsPublication {
-    activity: Activity,
-    organization: Uuid,
-    member: Uuid,
-    generation: i64,
-}
-
-impl SectionsPublication {
-    pub(super) fn committed(self, pool: sqlx::PgPool) {
-        self.activity.spawn(
-            pool,
-            self.organization,
-            Notice::SectionsChanged {
-                generation: self.generation,
-            },
-            Some(self.member),
-        );
-    }
-}
-fn enqueue(entry: &Entry, mut pending: Pending) {
-    let mut b = lock_ignoring_poison(&entry.buffer);
-    if !pending.valid.valid()
-        || !pending.epoch.retained(&b)
-        || pending
-            .directory_epoch
-            .is_some_and(|epoch| b.directory_epoch != epoch)
-    {
-        return;
-    }
-    b.pending.retain(Pending::recoverable);
-    if b.pending.is_empty() {
-        b.reset = false;
-    }
-    let channel = pending.channel;
-    if let Some(proof) = &pending.proof {
-        let conflict = b.proofs.get(&channel).is_some_and(|old| old != proof);
-        let identity_changed = channel.is_none() && b.revocations.observe_identity(proof.role);
-        if conflict
-            || identity_changed
-            || (b.proofs.len() == 256 && !b.proofs.contains_key(&channel))
-        {
-            b.retire_notices();
-            return;
-        }
-        b.proofs.insert(channel, proof.clone());
-    }
-    if matches!(
-        pending.notice,
-        Notice::ChannelAccessGained { .. } | Notice::ChannelAccessRevoked { .. }
-    ) && let Some(index) = b
-        .pending
-        .iter()
-        .position(|p| p.notice.key() == pending.notice.key())
-    {
-        b.pending.remove(index);
-        b.pending.push_back(pending);
-        entry.wake.notify_one();
-        return;
-    }
-    if let Some(old) = b.pending.iter_mut().find(|p| {
-        p.notice.key() == pending.notice.key()
-            && (!matches!(pending.notice, Notice::ChannelListChanged) || p.channel == channel)
-    }) {
-        let recovery = old.recovery.get_or_insert_with(Default::default).clone();
-        old.valid.contribute(&recovery);
-        pending.valid.contribute(&recovery);
-        pending.recovery = Some(recovery);
-        match (&mut old.notice, &pending.notice) {
-            (Notice::ChannelActivity { seq, .. }, Notice::ChannelActivity { seq: new, .. })
-                if *seq >= *new => {}
-            (
-                Notice::ReadPositionChanged { read_seq, .. },
-                Notice::ReadPositionChanged { read_seq: new, .. },
-            ) if *read_seq >= *new => {}
-            (
-                Notice::SectionsChanged { generation },
-                Notice::SectionsChanged { generation: new },
-            ) if *generation >= *new => {}
-            _ => *old = pending,
-        }
-    } else if b.pending.len() == 256 {
-        // Retain one proven contribution. Its lifetime is rechecked before reset handoff.
-        b.pending.clear();
-        b.reset = true;
-        b.pending.push_back(pending);
-    } else if !b.reset {
-        b.pending.push_back(pending);
-    }
-    entry.wake.notify_one();
 }
 impl Registration {
-    #[cfg(test)]
-    pub(crate) fn isolate_revocation_metrics(
-        &self,
-    ) -> Arc<crate::observability::RevocationMetrics> {
-        self.entry.buffer.lock().unwrap().holds.isolate_metrics()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn buffered(&self, notice: &Notice) -> bool {
-        let b = self.entry.buffer.lock().unwrap();
-        b.pending.iter().any(|pending| &pending.notice == notice)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn revocation_tracking(&self) -> (usize, usize) {
-        self.entry.buffer.lock().unwrap().revocations.counts()
-    }
-
     pub(crate) async fn next(&self) -> Option<NoticeFrame> {
         loop {
             let notified = self.entry.wake.notified();
@@ -957,7 +323,7 @@ pub(crate) struct NoticeFrame {
 
 enum RecheckFailure {
     Database,
-    Deadline,
+    Deadline { caller: NoticeCaller, granted: bool },
 }
 
 impl NoticeFrame {
@@ -1088,7 +454,14 @@ impl NoticeFrame {
                         .await
                     {
                         Ok(()) => {}
-                        Err(RecheckFailure::Deadline) => break None,
+                        Err(RecheckFailure::Deadline { caller, granted }) => {
+                            if let Some(gauges) =
+                                NoticeBudget::measurement(&self.entry.notice_queries)
+                            {
+                                gauges.deadline_exit(caller, granted);
+                            }
+                            break None;
+                        }
                         Err(RecheckFailure::Database) => {
                             if self.retry {
                                 let b = lock_ignoring_poison(&self.entry.buffer);
@@ -1141,6 +514,12 @@ impl NoticeFrame {
             (self.entry.clone(), None),
             (self.entry.clone(), Some(check.channel)),
         ];
+        let caller = if self.retry {
+            NoticeCaller::Retry
+        } else {
+            NoticeCaller::Handoff
+        };
+        let granted = AtomicBool::new(false);
         let proofs = tokio::time::timeout_at(deadline, async {
             #[cfg(test)]
             test_pause(
@@ -1150,13 +529,20 @@ impl NoticeFrame {
                 Some(self.entry.member.0),
             )
             .await;
+            let slot = notice_query_slot(&self.entry.notice_queries, pool, caller).await?;
+            if slot.recording() {
+                granted.store(true, Ordering::Relaxed);
+            }
             if let Some(capacity) = retry_measurement {
                 capacity.count_retry_attempt();
             }
-            authorize_batch(pool, &selected).await
+            authorize_batch(pool, &selected, Some(&slot)).await
         })
         .await
-        .map_err(|_| RecheckFailure::Deadline)?
+        .map_err(|_| RecheckFailure::Deadline {
+            caller,
+            granted: granted.load(Ordering::Relaxed),
+        })?
         .map_err(|_| RecheckFailure::Database)?;
         let mut b = lock_ignoring_poison(&self.entry.buffer);
         if self.retry {
@@ -1165,726 +551,6 @@ impl NoticeFrame {
             b.apply_revocation(check, proofs[0].as_ref(), Some(proofs[1].is_some()));
         }
         Ok(())
-    }
-}
-async fn authorize_notices(
-    pool: &sqlx::PgPool,
-    entries: &[Arc<Entry>],
-    channel: Option<Uuid>,
-) -> Result<Vec<Option<Proof>>, sqlx::Error> {
-    let selected: Vec<_> = entries
-        .iter()
-        .map(|entry| (entry.clone(), channel))
-        .collect();
-    authorize_batch(pool, &selected).await
-}
-async fn directory_guests(
-    pool: &sqlx::PgPool,
-    organization: Uuid,
-    entries: &[Arc<Entry>],
-    channels: &[Uuid],
-) -> Result<HashSet<Uuid>, sqlx::Error> {
-    let guests: Vec<_> = entries.iter().map(|entry| entry.member.0).collect();
-    let rows: Vec<Uuid> = crate::database::organization_statement(
-        pool,
-        "SELECT DISTINCT cm.member_id FROM channel_members cm \
-         JOIN users u ON u.organization_id=cm.organization_id AND u.id=cm.member_id \
-         AND u.membership_revision=cm.membership_revision \
-         JOIN channels c ON c.organization_id=cm.organization_id AND c.id=cm.channel_id \
-         WHERE cm.organization_id=$1 AND cm.channel_id=ANY($2) AND cm.member_id=ANY($3) \
-         AND u.deactivated_at IS NULL AND u.role='guest'",
-        async |tx: &mut sqlx::PgConnection, sql: &str| {
-            sqlx::query_scalar(sql)
-                .bind(organization)
-                .bind(channels)
-                .bind(guests)
-                .fetch_all(tx)
-                .await
-        },
-    )
-    .await?;
-    Ok(rows.into_iter().collect())
-}
-async fn authorize_batch(
-    pool: &sqlx::PgPool,
-    selected: &[(Arc<Entry>, Option<Uuid>)],
-) -> Result<Vec<Option<Proof>>, sqlx::Error> {
-    let entries: Vec<_> = selected.iter().map(|(entry, _)| entry.clone()).collect();
-    let Some(first) = entries.first() else {
-        return Ok(Vec::new());
-    };
-    let public_roles = auth::authorization::channel_roles_sql(false);
-    let explicit_roles = auth::authorization::channel_roles_sql(true);
-    // Keep generic plans correlated to supplied Session keys rather than
-    // materializing unrelated Sessions before matching the notice recipients.
-    let sql = format!("SELECT u.role, CASE WHEN c.visibility='public' AND u.role IN ({public_roles}) THEN NULL ELSE cm.grant_id END AS grant_id, r.n
-        FROM unnest($2::uuid[], $3::bigint[], $4::bytea[], $5::uuid[]) WITH ORDINALITY r(member_id,revision,hash,channel,n)
-        LEFT JOIN LATERAL (SELECT * FROM ({}) candidate WHERE candidate.organization_id=$1 AND candidate.id=r.member_id AND candidate.membership_revision=r.revision AND candidate.token_hash=r.hash OFFSET 0) u ON true
-        LEFT JOIN channels c ON c.organization_id=$1 AND c.id=r.channel
-        LEFT JOIN channel_members cm ON cm.organization_id=$1 AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision
-        WHERE r.channel IS NULL OR ((c.kind='channel' AND c.visibility='public' AND u.role IN ({public_roles})) OR (u.role IN ({explicit_roles}) AND cm.grant_id IS NOT NULL AND (c.kind='channel' OR u.id IN(c.lower_member_id,c.higher_member_id)))) ORDER BY r.n", auth::notice_members_sql());
-    let rows: Vec<(Option<Role>, Option<Uuid>, i64)> = crate::database::organization_statement(
-        pool,
-        &sql,
-        async |tx: &mut sqlx::PgConnection, sql: &str| {
-            sqlx::query_as(sql)
-                .bind(first.organization)
-                .bind(entries.iter().map(|e| e.member.0).collect::<Vec<_>>())
-                .bind(entries.iter().map(|e| e.member.1).collect::<Vec<_>>())
-                .bind(entries.iter().map(|e| e.hash.clone()).collect::<Vec<_>>())
-                .bind(
-                    selected
-                        .iter()
-                        .map(|(_, channel)| *channel)
-                        .collect::<Vec<_>>(),
-                )
-                .fetch_all(tx)
-                .await
-        },
-    )
-    .await?;
-    let mut result = vec![None; entries.len()];
-    for (role, grant, index) in rows {
-        if let Some(role) = role {
-            result[(index - 1) as usize] = Some(Proof { role, grant });
-        }
-    }
-    Ok(result)
-}
-
-#[derive(Default, PartialEq, Eq)]
-struct TargetState {
-    identity: Option<(Role, i64)>,
-    peer_identity: Option<(String, bool)>,
-    dm_grants: HashSet<Uuid>,
-    visible: HashMap<Uuid, (Option<Uuid>, bool, bool)>,
-}
-async fn target_state(
-    tx: &mut sqlx::PgConnection,
-    organization: Uuid,
-    target: Uuid,
-) -> Result<TargetState, sqlx::Error> {
-    let identity = auth::activity::notice_target(tx, organization, target).await?;
-    let peer_identity = auth::members::participants(tx, organization, &[target], false)
-        .await?
-        .into_iter()
-        .next()
-        .map(|m| (m.name, m.active));
-    let Some((role, revision)) = identity else {
-        return Ok(TargetState {
-            peer_identity,
-            ..Default::default()
-        });
-    };
-    let public = auth::authorization::channel_roles_sql(false);
-    let dm_grants = sqlx::query_scalar("SELECT c.id FROM channels c JOIN channel_members cm ON cm.organization_id=c.organization_id AND cm.channel_id=c.id WHERE c.organization_id=$1 AND c.kind='dm' AND cm.member_id=$2 AND cm.membership_revision=$3 AND $2 IN(c.lower_member_id,c.higher_member_id)")
-        .bind(organization).bind(target).bind(revision).fetch_all(&mut *tx).await?;
-    let sql = format!(
-        "SELECT c.id,cm.grant_id,COALESCE(cm.manager,false),c.visibility='public' FROM channels c LEFT JOIN channel_members cm ON cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=$2 AND cm.membership_revision=$3 WHERE c.organization_id=$1 AND c.kind='channel' AND ((c.visibility='public' AND $4::text IN ({public})) OR cm.grant_id IS NOT NULL)"
-    );
-    let rows: Vec<(Uuid, Option<Uuid>, bool, bool)> = sqlx::query_as(&sql)
-        .bind(organization)
-        .bind(target)
-        .bind(revision)
-        .bind(role)
-        .fetch_all(tx)
-        .await?;
-    Ok(TargetState {
-        identity,
-        peer_identity,
-        dm_grants: dm_grants.into_iter().collect(),
-        visible: rows
-            .into_iter()
-            .map(|(id, grant, manager, public)| (id, (grant, manager, public)))
-            .collect(),
-    })
-}
-struct TargetChange {
-    activity: Activity,
-    organization: Uuid,
-    target: Uuid,
-    before: TargetState,
-    registrations: HashMap<Uuid, Capture>,
-    channel: Option<Uuid>,
-    dm_peers: Vec<(Uuid, Uuid, bool)>,
-    retired: bool,
-}
-impl auth::activity::ActivityChanges for Activity {
-    fn channel(
-        &self,
-        pool: sqlx::PgPool,
-        organization: Uuid,
-        change: auth::activity::ChannelChange,
-    ) {
-        match change {
-            auth::activity::ChannelChange::Metadata { channel } => {
-                // The wire notice carries no id, but its proof and handoff are Channel-scoped.
-                self.spawn_scoped(
-                    pool,
-                    organization,
-                    Notice::ChannelListChanged,
-                    Some(channel),
-                    None,
-                );
-            }
-            auth::activity::ChannelChange::Created {
-                channel,
-                creator,
-                public,
-            } => {
-                let mut publisher = self.clone();
-                publisher.exclude_guests = true;
-                publisher.spawn(
-                    pool,
-                    organization,
-                    Notice::ChannelAccessGained {
-                        channel_id: channel,
-                    },
-                    if public { None } else { Some(creator) },
-                );
-            }
-            auth::activity::ChannelChange::Members { channel } => self.spawn(
-                pool,
-                organization,
-                Notice::ChannelMembersChanged {
-                    channel_id: channel,
-                },
-                None,
-            ),
-        }
-    }
-    fn capture<'a>(
-        &'a self,
-        tx: &'a mut sqlx::PgConnection,
-        organization: Uuid,
-        target: Uuid,
-        scope: ChangeScope,
-    ) -> auth::activity::Capture<'a> {
-        Box::pin(async move {
-            let entries = self
-                .snapshot(organization)
-                .into_iter()
-                .filter(|(entry, _)| entry.member.0 == target)
-                .collect::<Vec<_>>();
-            let before = target_state(tx, organization, target).await?;
-            let registrations = entries
-                .into_iter()
-                .map(|(entry, _)| {
-                    let mut b = lock_ignoring_poison(&entry.buffer);
-                    (entry.id, b.revocations.capture(scope))
-                })
-                .collect();
-            Ok(Box::new(TargetChange {
-                activity: self.clone(),
-                organization,
-                target,
-                before,
-                registrations,
-                channel: match scope {
-                    ChangeScope::Channel(channel) => Some(channel),
-                    _ => None,
-                },
-                dm_peers: dms::peer_changes(tx, organization, target).await?,
-                retired: false,
-            }) as Box<dyn auth::activity::ActivityChange>)
-        })
-    }
-    fn directory(&self, pool: sqlx::PgPool, organization: Uuid, target: Uuid) {
-        let mut publisher = self.clone();
-        publisher.directory_member = Some(target);
-        publisher.spawn(pool, organization, Notice::MembersChanged, None);
-    }
-}
-impl auth::activity::ActivityChange for TargetChange {
-    fn retire(&mut self) {
-        if self.retired {
-            return;
-        }
-        self.retired = true;
-        // Retire old work synchronously with observed transition, before starting another snapshot.
-        self.activity.retire_inner(
-            self.organization,
-            self.target,
-            Retirement::Mutation(&self.registrations),
-        );
-        self.activity.directory_epochs = Some(Arc::new(
-            self.activity.advance_directory_epochs(self.organization),
-        ));
-    }
-    fn committed(mut self: Box<Self>, pool: sqlx::PgPool) {
-        self.retire();
-        self.activity.epochs = Some(Arc::new(
-            self.activity
-                .snapshot(self.organization)
-                .iter()
-                .map(|(entry, epoch)| (entry.id, *epoch))
-                .collect(),
-        ));
-        let Ok(slot) = self.activity.capacity.clone().try_acquire_owned() else {
-            return;
-        };
-        tokio::spawn(async move {
-            let _slot = slot;
-            let work = async {
-                #[cfg(test)]
-                test_pause(
-                    self.organization,
-                    Uuid::nil(),
-                    "target_state",
-                    Some(self.target),
-                )
-                .await;
-                let after = crate::database::organization_read_only(
-                    &pool,
-                    self.organization,
-                    async |tx: &mut sqlx::PgConnection| {
-                        target_state(tx, self.organization, self.target).await
-                    },
-                )
-                .await?;
-                if self.before.peer_identity != after.peer_identity {
-                    self.activity
-                        .publish_dm(&pool, self.organization, &self.dm_peers)
-                        .await?;
-                }
-                if self.before.identity.is_none() {
-                    let mut directory = self.activity.clone();
-                    directory.directory_member = Some(self.target);
-                    directory
-                        .publish(&pool, self.organization, Notice::MembersChanged, None, None)
-                        .await?;
-                    return Ok::<_, sqlx::Error>(());
-                }
-                let before_grants: HashSet<_> = self
-                    .before
-                    .visible
-                    .iter()
-                    .filter(|(_, (grant, _, _))| grant.is_some())
-                    .map(|(channel, _)| *channel)
-                    .chain(self.before.dm_grants.iter().copied())
-                    .collect();
-                let after_grants: HashSet<_> = after
-                    .visible
-                    .iter()
-                    .filter(|(_, (grant, _, _))| grant.is_some())
-                    .map(|(channel, _)| *channel)
-                    .chain(after.dm_grants.iter().copied())
-                    .collect();
-                let grants_changed = before_grants != after_grants;
-                if let Some((role, revision)) = after.identity
-                    && self
-                        .before
-                        .identity
-                        .is_some_and(|(_, before)| before == revision)
-                {
-                    for (&channel, &(_, _, public)) in &self.before.visible {
-                        if self.channel.is_none_or(|changed| changed == channel)
-                            && !after.visible.contains_key(&channel)
-                        {
-                            self.activity
-                                .revoked(&pool, &self, channel, public, role)
-                                .await?;
-                        }
-                    }
-                    for channel in after
-                        .visible
-                        .keys()
-                        .filter(|id| !self.before.visible.contains_key(id))
-                    {
-                        self.activity
-                            .publish(
-                                &pool,
-                                self.organization,
-                                Notice::ChannelAccessGained {
-                                    channel_id: *channel,
-                                },
-                                Some(self.target),
-                                None,
-                            )
-                            .await?;
-                    }
-                    self.activity
-                        .publish(
-                            &pool,
-                            self.organization,
-                            Notice::ChannelListChanged,
-                            Some(self.target),
-                            None,
-                        )
-                        .await?;
-                    if after.identity.is_some_and(|r| r.0 == Role::Guest) {
-                        self.activity
-                            .publish(
-                                &pool,
-                                self.organization,
-                                Notice::MembersChanged,
-                                Some(self.target),
-                                None,
-                            )
-                            .await?;
-                    }
-                }
-                if self.before.identity != after.identity || grants_changed {
-                    let mut directory = self.activity.clone();
-                    directory.directory_member = Some(self.target);
-                    directory.directory_channels =
-                        before_grants.union(&after_grants).copied().collect();
-                    directory
-                        .publish(&pool, self.organization, Notice::MembersChanged, None, None)
-                        .await?;
-                }
-                if self.before.identity != after.identity {
-                    for channel in self
-                        .before
-                        .visible
-                        .iter()
-                        .filter(|(_, (grant, _, _))| grant.is_some())
-                        .map(|(id, _)| *id)
-                    {
-                        self.activity
-                            .publish(
-                                &pool,
-                                self.organization,
-                                Notice::ChannelMembersChanged {
-                                    channel_id: channel,
-                                },
-                                None,
-                                None,
-                            )
-                            .await?;
-                    }
-                }
-                Ok::<_, sqlx::Error>(())
-            };
-            let _ = tokio::time::timeout(Duration::from_secs(10), work).await;
-        });
-    }
-}
-impl Activity {
-    async fn revoked(
-        &self,
-        pool: &sqlx::PgPool,
-        change: &TargetChange,
-        channel: Uuid,
-        public: bool,
-        role: Role,
-    ) -> Result<(), sqlx::Error> {
-        let (organization, target) = (change.organization, change.target);
-        #[cfg(test)]
-        test_pause(organization, channel, "revocation", Some(target)).await;
-        let captured: Vec<_> = {
-            let entries = lock_ignoring_poison(&self.entries);
-            change
-                .registrations
-                .iter()
-                .filter_map(|(id, capture)| {
-                    let entry = entries.get(id)?;
-                    if entry.organization != organization || entry.member.0 != target {
-                        return None;
-                    }
-                    let _gate = lock_ignoring_poison(&entry.buffer);
-                    let capture = capture.notice(channel, public, role)?;
-                    let check = capture.check()?;
-                    Some((entry.clone(), capture, check))
-                })
-                .collect()
-        };
-        #[cfg(test)]
-        test_pause(organization, channel, "snapshot", Some(target)).await;
-        // The before/after state proved loss. Recheck live identity and absence
-        // of access in one snapshot before this revocation can be enqueued.
-        #[cfg(test)]
-        test_pause(organization, channel, "revoked", Some(target)).await;
-        let selected: Vec<_> = captured
-            .iter()
-            .flat_map(|(entry, _, _)| [(entry.clone(), None), (entry.clone(), Some(channel))])
-            .collect();
-        let proofs = authorize_batch(pool, &selected).await?;
-        #[cfg(test)]
-        test_pause(organization, channel, "revocation_authorized", Some(target)).await;
-        let (proofs, _) = proofs.as_chunks::<2>();
-        for ((entry, capture, check), [identity, access]) in captured.into_iter().zip(proofs) {
-            {
-                let mut b = lock_ignoring_poison(&entry.buffer);
-                b.apply_revocation(check, identity.as_ref(), Some(access.is_some()));
-            }
-            if identity.is_none() {
-                continue;
-            }
-            enqueue(
-                &entry,
-                Pending {
-                    notice: Notice::ChannelAccessRevoked {
-                        channel_id: channel,
-                    },
-                    channel: None,
-                    epoch: Epoch::Revocation(capture),
-                    directory_epoch: None,
-                    proof: None,
-                    valid: Arc::new(QueryToken::new()),
-                    recovery: None,
-                },
-            );
-        }
-        Ok(())
-    }
-}
-
-struct NoticeRecheck {
-    channel: Option<Uuid>,
-    epoch: u64,
-    proof: Option<Proof>,
-    valid: Option<Arc<QueryToken>>,
-}
-impl NoticeRecheck {
-    fn apply(&self, b: &mut Buffer, current: Option<&Proof>) {
-        if b.epoch != self.epoch
-            || self
-                .proof
-                .as_ref()
-                .is_some_and(|proof| current == Some(proof))
-        {
-            return;
-        }
-        // Unknown provenance fences only that query. The query may already
-        // have completed since this fallback's snapshot.
-        if self.proof.is_none()
-            && current.is_some()
-            && let Some(valid) = &self.valid
-        {
-            let changed = b
-                .proofs
-                .get(&self.channel)
-                .is_some_and(|known| current != Some(known))
-                || b.in_flight.values().any(|authorization| {
-                    authorization.channel == self.channel
-                        && authorization
-                            .proof
-                            .as_ref()
-                            .is_some_and(|known| current != Some(known))
-                });
-            if !changed {
-                valid.retire();
-                for authorization in b.in_flight.values().filter(|authorization| {
-                    authorization.channel == self.channel && authorization.proof.is_none()
-                }) {
-                    authorization.valid.retire();
-                }
-                return;
-            }
-        }
-        if self.channel.is_none() && current.is_none() {
-            b.revocations.retire_member();
-        }
-        b.retire_notices();
-    }
-}
-
-enum Recheck {
-    Notice(NoticeRecheck),
-    Revocation(Check),
-}
-impl Activity {
-    pub(crate) async fn check(&self, pool: &sqlx::PgPool, scope: auth::SubscriptionScope) {
-        let entries: Vec<_> = lock_ignoring_poison(&self.entries)
-            .values()
-            .filter(|e| match scope {
-                auth::SubscriptionScope::All => true,
-                auth::SubscriptionScope::Member(org, member) => {
-                    e.organization == org && e.member.0 == member
-                }
-                auth::SubscriptionScope::Channel(org, _) => e.organization == org,
-            })
-            .cloned()
-            .collect();
-        let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
-        let mut revocation_cutoffs = HashMap::new();
-        for entry in entries {
-            let b = lock_ignoring_poison(&entry.buffer);
-            let rows = organizations.entry(entry.organization).or_default();
-            rows.extend(b.proofs.iter().map(|(&channel, proof)| {
-                (
-                    entry.clone(),
-                    Recheck::Notice(NoticeRecheck {
-                        channel,
-                        epoch: b.epoch,
-                        proof: Some(proof.clone()),
-                        valid: None,
-                    }),
-                )
-            }));
-            rows.extend(b.in_flight.values().filter(|a| a.valid.valid()).map(|a| {
-                (
-                    entry.clone(),
-                    Recheck::Notice(NoticeRecheck {
-                        channel: a.channel,
-                        epoch: b.epoch,
-                        proof: a.proof.clone(),
-                        valid: Some(a.valid.clone()),
-                    }),
-                )
-            }));
-            let checks = b.revocations.checks();
-            if let Some(last) = checks.last() {
-                revocation_cutoffs.insert(entry.id, last.id);
-            }
-            rows.extend(
-                checks
-                    .into_iter()
-                    .map(|check| (entry.clone(), Recheck::Revocation(check))),
-            );
-        }
-        for rows in organizations.values() {
-            let mut remaining = rows.as_slice();
-            while !remaining.is_empty() {
-                let mut selected = Vec::new();
-                let mut offsets = Vec::new();
-                for (entry, row) in remaining {
-                    let (channel, revocation_channel) = match row {
-                        Recheck::Notice(notice) => (notice.channel, None),
-                        Recheck::Revocation(check) => (
-                            None,
-                            Some(check.channel).filter(|checked| !matches!(scope, auth::SubscriptionScope::Channel(_, channel) if channel != *checked)),
-                        ),
-                    };
-                    // Read both proofs in one snapshot without expanding the SQL batch.
-                    let index = selected.len();
-                    if index + 1 + usize::from(revocation_channel.is_some()) > 1000 {
-                        break;
-                    }
-                    selected.push((entry.clone(), channel));
-                    let access = revocation_channel.map(|channel| {
-                        selected.push((entry.clone(), Some(channel)));
-                        index + 1
-                    });
-                    offsets.push((index, access));
-                }
-                let (chunk, rest) = remaining.split_at(offsets.len());
-                remaining = rest;
-                #[cfg(test)]
-                for (entry, channel) in &selected {
-                    test_pause(
-                        entry.organization,
-                        channel.unwrap_or(Uuid::nil()),
-                        "fallback_snapshot",
-                        Some(entry.member.0),
-                    )
-                    .await;
-                }
-                let Ok(proofs) = authorize_batch(pool, &selected).await else {
-                    if let Some((entry, _)) = chunk.first() {
-                        lock_ignoring_poison(&entry.buffer).holds.recheck_error();
-                    }
-                    let mut seen = HashSet::new();
-                    for (entry, row) in chunk {
-                        let mut b = if let Some(&cutoff) = revocation_cutoffs.get(&entry.id)
-                            && seen.insert(entry.id)
-                        {
-                            let (mut b, now) = holds::lock_for_admission(entry);
-                            let Buffer {
-                                holds, revocations, ..
-                            } = &mut *b;
-                            let mut checks = revocations
-                                .checks()
-                                .into_iter()
-                                .take_while(|check| check.id <= cutoff)
-                                .peekable();
-                            if checks.peek().is_some() {
-                                for check in checks {
-                                    holds.start(entry, revocations, check.id, now);
-                                }
-                                b.retire_notices();
-                                entry.wake.notify_one();
-                            }
-                            b
-                        } else {
-                            lock_ignoring_poison(&entry.buffer)
-                        };
-                        if let Recheck::Notice(notice) = row
-                            && b.epoch == notice.epoch
-                        {
-                            b.retire_notices();
-                        }
-                    }
-                    continue;
-                };
-                let proof = |index: usize| proofs[index].as_ref();
-                for ((entry, row), (index, access)) in chunk.iter().zip(offsets) {
-                    let current = proof(index);
-                    let mut b = lock_ignoring_poison(&entry.buffer);
-                    match row {
-                        Recheck::Notice(notice) => notice.apply(&mut b, current),
-                        Recheck::Revocation(check) => {
-                            b.apply_revocation(*check, current, access.map(|i| proof(i).is_some()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct BatchLease {
-    batches: Arc<Mutex<HashMap<(Uuid, Uuid), ActivityBatch>>>,
-    key: (Uuid, Uuid),
-    finished: bool,
-}
-impl Drop for BatchLease {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        lock_ignoring_poison(&self.batches).remove(&self.key);
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct TestGate {
-    pub entered: Semaphore,
-    pub release: Semaphore,
-}
-#[cfg(test)]
-type TestGates = Mutex<HashMap<(Uuid, Uuid, &'static str, Option<Uuid>), Arc<TestGate>>>;
-#[cfg(test)]
-static TEST_GATES: std::sync::LazyLock<TestGates> = std::sync::LazyLock::new(Mutex::default);
-#[cfg(test)]
-pub(crate) fn pause(organization: Uuid, channel: Uuid, phase: &'static str) -> Arc<TestGate> {
-    pause_member(organization, channel, phase, None)
-}
-#[cfg(test)]
-pub(crate) fn pause_member(
-    organization: Uuid,
-    channel: Uuid,
-    phase: &'static str,
-    member: Option<Uuid>,
-) -> Arc<TestGate> {
-    let gate = Arc::new(TestGate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    TEST_GATES
-        .lock()
-        .unwrap()
-        .insert((organization, channel, phase, member), gate.clone());
-    gate
-}
-#[cfg(test)]
-pub(crate) async fn test_pause(
-    organization: Uuid,
-    channel: Uuid,
-    phase: &'static str,
-    member: Option<Uuid>,
-) {
-    let gate = {
-        let mut gates = TEST_GATES.lock().unwrap();
-        // Independent socket gates must not replace each other at the same boundary.
-        gates
-            .remove(&(organization, channel, phase, member))
-            .or_else(|| gates.remove(&(organization, channel, phase, None)))
-    };
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
     }
 }
 #[cfg(test)]
@@ -1974,6 +640,86 @@ mod tests {
     }
 
     #[fukulow_test::test]
+    async fn directory_guests_require_active_current_guest_grants_in_the_organization(
+        pool: sqlx::PgPool,
+    ) {
+        use crate::channels::tests::{member, organization};
+
+        let org = organization(&pool).await;
+        let other = organization(&pool).await;
+        let channel = Uuid::new_v4();
+        for scope in [org, other] {
+            sqlx::query("INSERT INTO channels(organization_id,id,name,visibility) VALUES($1,$2,'Public','public')")
+                .bind(scope).bind(channel).execute(&pool).await.unwrap();
+        }
+
+        let guest = Uuid::new_v4();
+        let inactive = Uuid::new_v4();
+        let stale = Uuid::new_v4();
+        let non_guest = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        let candidates = [
+            (org, guest, "guest", 0_i64),
+            (org, inactive, "guest", 1),
+            (org, stale, "guest", 0),
+            (org, non_guest, "member", 0),
+            (other, foreign, "guest", 0),
+        ];
+        // A foreign Guest with the same Member id cannot supply the local Member's Role.
+        member(&pool, other, non_guest, "guest").await;
+        let mut entries = Vec::new();
+        for (scope, id, role, grant_revision) in candidates {
+            member(&pool, scope, id, role).await;
+            if id == inactive || id == stale {
+                sqlx::query(
+                    "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2",
+                )
+                .bind(scope)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            if id == stale {
+                sqlx::query(
+                    "UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2",
+                )
+                .bind(scope)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            // The inactive grant deliberately matches its Member's bumped revision.
+            sqlx::query("INSERT INTO channel_members(organization_id,channel_id,member_id,membership_revision) VALUES($1,$2,$3,$4)")
+                .bind(scope).bind(channel).bind(id).bind(grant_revision).execute(&pool).await.unwrap();
+            entries.push(Arc::new(Entry {
+                id: Uuid::new_v4(),
+                organization: scope,
+                member: (id, i64::from(id == inactive || id == stale)),
+                hash: Vec::new(),
+                notice_queries: Default::default(),
+                buffer: Default::default(),
+                wake: Notify::new(),
+            }));
+        }
+
+        // Use the fixture owner so RLS cannot hide a missing Organization predicate.
+        assert_eq!(
+            directory_guests(&pool, org, &entries, &[channel])
+                .await
+                .unwrap(),
+            HashSet::from([guest])
+        );
+        assert_eq!(
+            directory_guests(&pool, other, &entries, &[channel])
+                .await
+                .unwrap(),
+            HashSet::from([foreign])
+        );
+    }
+
+    #[fukulow_test::test]
     async fn notice_batch_matches_join_and_bounds_session_lookups(pool: sqlx::PgPool) {
         let org = Uuid::new_v4();
         let channel = Uuid::new_v4();
@@ -2027,6 +773,7 @@ mod tests {
                         } else {
                             hashes[n].clone()
                         },
+                        notice_queries: Default::default(),
                         buffer: Default::default(),
                         wake: Notify::new(),
                     }),
@@ -2045,7 +792,7 @@ mod tests {
             .execute(&app)
             .await
             .unwrap();
-        let proofs = authorize_batch(&app, &selected).await.unwrap();
+        let proofs = authorize_batch(&app, &selected, None).await.unwrap();
         assert!(proofs[..5].iter().all(Option::is_none));
         assert!(proofs[5..].iter().all(Option::is_some));
         let sql: String = sqlx::query_scalar("SELECT statement FROM pg_prepared_statements WHERE statement LIKE 'WITH fukulow_context%' AND statement LIKE '%WITH ORDINALITY r(member_id,revision,hash,channel,n)%' ORDER BY prepare_time DESC LIMIT 1")
@@ -2107,6 +854,7 @@ mod tests {
             organization: Uuid::new_v4(),
             member: (Uuid::new_v4(), 0),
             hash: vec![],
+            notice_queries: Default::default(),
             buffer: Default::default(),
             wake: Notify::new(),
         })
@@ -2522,11 +1270,10 @@ mod tests {
             assert_eq!(buffer.proofs.len(), 1);
             let pending = buffer.pending.front().unwrap();
             let recovery = pending.recovery.as_ref().unwrap();
-            let state = recovery.state.lock().unwrap();
-            assert!(state.settled);
-            assert_eq!(state.live, 1);
+            let (live, settled) = recovery.snapshot();
+            assert!(settled);
+            assert_eq!(live, 1);
             assert_eq!(Arc::strong_count(recovery), 2);
-            drop(state);
             pending.valid.retire();
         }
         // A later smaller value must not hide recovery for an earlier valid
@@ -2560,53 +1307,12 @@ mod tests {
         ] {
             let mut senders = ActivityBatch::default();
             for (sender, seq) in rows {
-                senders.add(Some(sender), seq);
+                senders.add_for_test(Some(sender), seq);
             }
-            assert_eq!(senders.eligible(alice), Some(2));
-            assert_eq!(senders.eligible(bob), Some(3));
-            assert_eq!(senders.eligible(third), Some(3));
-            assert!(senders.senders.len() <= 2);
+            assert_eq!(senders.eligible_for_test(alice), Some(2));
+            assert_eq!(senders.eligible_for_test(bob), Some(3));
+            assert_eq!(senders.eligible_for_test(third), Some(3));
+            assert!(senders.sender_count() <= 2);
         }
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy)]
-pub(crate) enum TestFault {
-    Database,
-    Panic,
-}
-#[cfg(test)]
-static TEST_FAULTS: std::sync::LazyLock<Mutex<HashMap<(Uuid, Uuid), TestFault>>> =
-    std::sync::LazyLock::new(Mutex::default);
-#[cfg(test)]
-pub(crate) fn fail(organization: Uuid, channel: Uuid, fault: TestFault) {
-    TEST_FAULTS
-        .lock()
-        .unwrap()
-        .insert((organization, channel), fault);
-}
-#[cfg(test)]
-fn test_fault(organization: Uuid, channel: Uuid) -> Result<(), sqlx::Error> {
-    let fault = TEST_FAULTS.lock().unwrap().remove(&(organization, channel));
-    match fault {
-        Some(TestFault::Database) => Err(sqlx::Error::PoolClosed),
-        Some(TestFault::Panic) => panic!("injected notice publisher panic"),
-        None => Ok(()),
-    }
-}
-#[cfg(test)]
-impl Activity {
-    pub(crate) async fn saturate(&self) -> tokio::sync::OwnedSemaphorePermit {
-        self.capacity.clone().acquire_many_owned(40).await.unwrap()
-    }
-    // One abort handle per key: this aborts the most recent spawn for (organization, channel).
-    pub(crate) fn cancel(&self, organization: Uuid, channel: Uuid) {
-        self.tasks
-            .lock()
-            .unwrap()
-            .remove(&(organization, channel))
-            .unwrap()
-            .abort();
     }
 }

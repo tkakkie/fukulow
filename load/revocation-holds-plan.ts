@@ -60,7 +60,8 @@ export const potentialHolds = (cell: Cell) => targetSockets(cell) * CELLS[cell].
 export const socketAccount = (socket: number) => Math.floor(socket / SOCKETS_PER_ACCOUNT);
 
 export type Stall = { senders: number; messages: number; chars: number };
-export const STALL_DEFAULT: Stall = { senders: 8, messages: 10, chars: MAX_BODY_CHARS };
+export const STALL_MESSAGES = 120;
+export const STALL_DEFAULT: Stall = { senders: 12, messages: 10, chars: MAX_BODY_CHARS };
 export function checkStall(stall: Stall) {
   if (![stall.senders, stall.messages, stall.chars].every(n => Number.isInteger(n) && n > 0)) throw new Error('stall options must be positive integers');
   if (stall.messages > SEND_BURST) throw new Error(`at most ${SEND_BURST} stall Messages per sender (send limit burst)`);
@@ -74,6 +75,7 @@ export const stallBody = (chars: number) => '\u{1F989}'.repeat(chars);
 
 export type PlannedRun = { kind: 'fault'; cell: Cell; duration: Duration; repeat: number } | { kind: 'control'; cell: Cell; repeat: number };
 export const runId = (run: PlannedRun) => run.kind === 'fault' ? `${run.cell}-${run.duration}-r${run.repeat}` : `${run.cell}-control-r${run.repeat}`;
+const shape = (run: PlannedRun) => run.kind === 'fault' ? `${run.cell}/${run.duration}` : `${run.cell}/control`;
 
 /** Interleaved order: each repeat visits every cell, alternating direction so host drift affects all alike. */
 export function planRuns(cells: readonly Cell[], durations: readonly Duration[], repeats: number, controls: boolean): PlannedRun[] {
@@ -89,8 +91,39 @@ export function planRuns(cells: readonly Cell[], durations: readonly Duration[],
   return runs;
 }
 
+/** Retry a setup abort in place, then stop the session if that retry also aborts. */
+export function setupQueue<T>(runs: T[], identify: (run: T) => string) {
+  let setupAborts = 0;
+  function* attempts() {
+    for (const run of runs) {
+      setupAborts = 0;
+      const id = identify(run);
+      yield { run, id };
+      if (setupAborts === 1) yield { run, id: `${id}-setup-retry` };
+      if (setupAborts === 2) return;
+    }
+  }
+  return { attempts, abort: () => ++setupAborts < 2 };
+}
+
+/** Append up to three replacements per shape. Setup aborts do not count as runs. */
+export function replacementQueue(initial: PlannedRun[]) {
+  const runs = [...initial];
+  const queue = setupQueue(runs, runId);
+  const record = (run: PlannedRun, outcome: 'setup abort' | 'INVALID' | 'PASS' | 'FAIL' | 'CONTROL') => {
+    if (outcome === 'setup abort') return queue.abort();
+    if (outcome === 'INVALID') {
+      const key = shape(run);
+      const scheduled = runs.filter(r => shape(r) === key).length;
+      if (scheduled < 2 * REPEATS) runs.push({ ...run, repeat: scheduled + 1 });
+    }
+    return true;
+  };
+  return { attempts: queue.attempts, record };
+}
+
 // A rehearsal reports counts only. A formal run is the registered 3 repeats with controls.
-export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; rehearsal: boolean; stall: Stall };
+export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; rehearsal: boolean; e6ObserveMs: number; stall: Stall; overheadSummary?: string };
 export function parseOptions(args: readonly string[]): Options {
   const option = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
   const out = option('--out');
@@ -104,13 +137,25 @@ export function parseOptions(args: readonly string[]): Options {
   if (!Number.isInteger(repeats) || repeats < 1) throw new Error('--repeats must be a positive integer');
   const controls = option('--controls') ?? 'on';
   if (controls !== 'on' && controls !== 'off') throw new Error('--controls accepts on,off');
+  const rehearsal = args.includes('--rehearsal');
+  if (!rehearsal && args.some(arg => arg.startsWith('--stall-'))) throw new Error('--stall-* options require --rehearsal');
+  const observe = option('--e6-observe-ms');
+  const e6ObserveMs = Number(observe ?? 0);
+  if (args.includes('--e6-observe-ms') && (!observe?.trim() || !Number.isSafeInteger(e6ObserveMs) || e6ObserveMs < 0)) {
+    throw new Error('--e6-observe-ms requires a non-negative integer');
+  }
+  if (e6ObserveMs > 0 && !rehearsal) throw new Error('--e6-observe-ms > 0 requires --rehearsal');
+  const overheadSummary = option('--overhead-summary');
+  if (args.includes('--overhead-summary') && (rehearsal || !overheadSummary || overheadSummary.startsWith('--'))) {
+    throw new Error('--overhead-summary requires a saved overhead summary file and a formal run');
+  }
   const number = (name: string, fallback: number) => Number(option(name) ?? fallback);
   const stall = checkStall({
     senders: number('--stall-senders', STALL_DEFAULT.senders),
     messages: number('--stall-messages', STALL_DEFAULT.messages),
     chars: number('--stall-chars', STALL_DEFAULT.chars),
   });
-  const rehearsal = args.includes('--rehearsal');
   if (!rehearsal && (repeats !== REPEATS || controls !== 'on')) throw new Error(`a formal run needs --repeats ${REPEATS} and --controls on; use --rehearsal for anything else`);
-  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', rehearsal, stall };
+  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', rehearsal, e6ObserveMs, stall,
+    ...(overheadSummary ? { overheadSummary } : {}) };
 }

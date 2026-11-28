@@ -347,11 +347,17 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     expect(appSrc).toContain('{#if session && organization}')
     expect(appSrc).not.toContain("auth.organizationStatus !== 'unavailable' && auth.organizationStatus !== 'error'")
     expect(appSrc).toContain('{#key pageAnnouncement.id}')
-    expect(appSrc).toContain('actionLabel="メンバー資格を再確認"')
+    expect(appSrc).toMatch(/<OrganizationUnavailableBanner\s+onrecheckmembership=\{\(\) => void auth\.selectOrganization\(auth\.selectedOrganizationId\)\}/)
     expect(appSrc).toContain('<InviteAccept')
 
     const timelineSrc = readFileSync(join(webDir, 'src/Timeline.svelte'), 'utf8')
-    expect(timelineSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?この組織は利用できません。[\s\S]*?メンバー資格を再確認[\s\S]*?\{:else if s\.status === 'unavailable'\}/)
+    const timelineFrameTag = extractOpeningTag(timelineSrc, 'TimelineFrame')
+    expect(timelineFrameTag).toContain('{organizationUnavailable}')
+    expect(timelineFrameTag).toContain("channelUnavailable={s.status === 'unavailable'}")
+    expect(timelineFrameTag).toMatch(/(?:^|\s)(?:\{onrecheckmembership\}|onrecheckmembership=\{)/)
+
+    const timelineFrameSrc = readFileSync(join(webDir, 'src/TimelineFrame.svelte'), 'utf8')
+    expect(timelineFrameSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?<OrganizationUnavailableBanner \{onrecheckmembership\}[\s\S]*?\{:else if channelUnavailable\}/)
 
     const workspaceSrc = readFileSync(join(webDir, 'src/Workspace.svelte'), 'utf8')
     expect(workspaceSrc).toContain('session.sync.hasUnsavedChanges()')
@@ -362,10 +368,38 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     expect(channelColumnSrc).toContain('<Members')
 
     const mainViewSrc = readFileSync(join(webDir, 'src/WorkspaceMainView.svelte'), 'utf8')
-    expect(mainViewSrc).toContain('メンバー資格を再確認')
+    expect(mainViewSrc).toContain('<OrganizationUnavailableBanner')
+
+    const orgBannerSrc = readFileSync(join(webDir, 'src/ui/OrganizationUnavailableBanner.svelte'), 'utf8')
+    expect(orgBannerSrc).toContain('この組織は利用できません。')
+    expect(orgBannerSrc).toContain('メンバー資格を再確認')
   })
 })
 
 function msgFor(seq: number, sender: string, body: string) {
   return { id: `m-${seq}`, created_seq: seq, sender, body }
+}
+
+function extractOpeningTag(src: string, tagName: string): string {
+  const withoutComments = src.replace(/<!--[\s\S]*?-->/g, '')
+  const start = withoutComments.indexOf(`<${tagName}`)
+  if (start === -1) return ''
+  let depth = 0
+  let quote: '"' | "'" | null = null
+  for (let i = start + tagName.length + 1; i < withoutComments.length; i++) {
+    const ch = withoutComments[i]
+    if (quote) {
+      if (ch === '\\') i++
+      else if (ch === quote) quote = null
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (ch === '{') {
+      depth++
+    } else if (ch === '}') {
+      depth = Math.max(0, depth - 1)
+    } else if (ch === '>' && depth === 0) {
+      return withoutComments.slice(start, i + 1)
+    }
+  }
+  return ''
 }

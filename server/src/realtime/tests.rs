@@ -1,5 +1,9 @@
 use super::*;
-use crate::messages;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
+use crate::{
+    messages::{self, LIVE_QUEUE_CAPACITY},
+    test_support::Gate,
+};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -9,435 +13,52 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::sync::{Arc, LazyLock, Mutex};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::Semaphore,
-    task::JoinHandle,
-};
+use std::{collections::HashMap, sync::Arc};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{self, client::IntoClientRequest},
 };
 use tower::ServiceExt;
 
-type Client = WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+mod access_loss;
+mod account_security;
+mod activity;
+mod commit;
+mod contract;
+mod dms;
+mod fanout;
+mod history;
+pub(super) mod hooks;
+mod isolated_test;
+mod keepalive;
+mod lifecycle;
+mod limits;
+mod load_fixture;
+mod measurement;
+mod mentions;
+mod move_topic;
+mod notification;
+mod observability;
+mod replies;
+mod roles;
+mod round_trips;
+mod session;
+mod shared_frame;
+mod shutdown;
+mod socket_client;
+mod socket_server;
+mod topics;
+mod watermark;
 
-// Test-only pause after registration and the history snapshot, before replay/handoff.
-struct Gate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-static GATES: LazyLock<Mutex<HashMap<Uuid, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-fn pause(channel: Uuid) -> Arc<Gate> {
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    GATES.lock().unwrap().insert(channel, gate.clone());
-    gate
-}
-pub(super) async fn replay_gate(channel: Uuid) {
-    let gate = GATES.lock().unwrap().remove(&channel);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
-}
-async fn entered(gate: &Gate) {
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-}
-
-/// A socket to a server whose `Server` handle another task owns.
-async fn connect_at(address: std::net::SocketAddr, token: &str) -> Client {
-    try_connect_at(address, token).await.unwrap()
-}
-async fn try_connect_at(
-    address: std::net::SocketAddr,
-    token: &str,
-) -> Result<Client, tungstenite::Error> {
-    let mut request = format!("ws://{address}{}", scoped_path("/api/v1/ws", token))
-        .into_client_request()
-        .unwrap();
-    request.headers_mut().insert(
-        header::AUTHORIZATION,
-        format!("Bearer {token}").parse().unwrap(),
-    );
-    Ok(tokio_tungstenite::connect_async(request).await?.0)
-}
-const UNMETERED: Budget = Budget {
-    burst: 1 << 40,
-    per_second: 1,
+use socket_client::{
+    Client, closed, connect_at, control, delivery_frame, delivery_next, denied, event, frame,
+    message_next, read_event, ready, rejected, resubscribe, silent, subscribe, try_connect_at,
 };
-
-struct Server {
-    address: std::net::SocketAddr,
-    task: JoinHandle<()>,
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-impl Server {
-    async fn start(router: Router) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        Self { address, task }
-    }
-    async fn connect(&self, token: &str) -> Client {
-        self.handshake(Some(token), None, None).await.unwrap()
-    }
-    async fn handshake(
-        &self,
-        bearer: Option<&str>,
-        cookie: Option<&str>,
-        origin: Option<&str>,
-    ) -> Result<Client, tungstenite::Error> {
-        let mut request = format!(
-            "ws://{}{}",
-            self.address,
-            bearer
-                .or(cookie)
-                .filter(|token| token.contains('.'))
-                .map(|token| scoped_path("/api/v1/ws", token))
-                .unwrap_or_else(|| format!("/api/v1/orgs/{}/ws", Uuid::nil()))
-        )
-        .into_client_request()
-        .unwrap();
-        if let Some(token) = bearer {
-            request.headers_mut().insert(
-                header::AUTHORIZATION,
-                format!("Bearer {token}").parse().unwrap(),
-            );
-        }
-        if let Some(token) = cookie {
-            request.headers_mut().insert(
-                header::COOKIE,
-                format!("fukulow_session={token}").parse().unwrap(),
-            );
-        }
-        if let Some(origin) = origin {
-            request
-                .headers_mut()
-                .insert(header::ORIGIN, origin.parse().unwrap());
-        }
-        tokio_tungstenite::connect_async(request)
-            .await
-            .map(|(client, _)| client)
-    }
-}
-async fn state(pool: &PgPool) -> AppState {
-    state_with_test_pool(crate::test_app_pool(pool.clone()).await)
-}
-
-/// `state` over `pool` as given (e.g. a pool that never connects).
-fn state_with_test_pool(pool: PgPool) -> AppState {
-    AppState {
-        pool,
-        cookie_secure: false,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-        // Caps and budgets are exercised in tests/limits.rs; other tests and the
-        // manual measurements open many sockets and subscriptions for one Account.
-        socket_gate: SocketGate::new(SocketLimits {
-            per_account: 100_000,
-            global: 100_000,
-            connection_frames: UNMETERED,
-            account_frames: UNMETERED,
-            ..SocketLimits::default()
-        }),
-    }
-}
-struct Fixture {
-    app: Router,
-    server: Server,
-    state: AppState,
-    organization: Uuid,
-    member: Uuid,
-    channel: Uuid,
-    token: String,
-}
-async fn organization(pool: &PgPool) -> Uuid {
-    let organization = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Organization')")
-        .bind(organization)
-        .execute(pool)
-        .await
-        .unwrap();
-    organization
-}
-async fn member(pool: &PgPool, organization_id: Uuid) -> (Uuid, String) {
-    let id = Uuid::new_v4();
-    let account_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO accounts (id, email, password_hash) VALUES ($1, $2, 'unused')")
-        .bind(account_id)
-        .bind(format!("{account_id}@example.com"))
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $2, $3, 'Member', $4)")
-        .bind(organization_id).bind(id).bind(account_id).bind("member").execute(pool).await.unwrap();
-    // The prefix is fixture metadata for explicit Organization route construction.
-    let token = format!(
-        "{organization_id}.{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    );
-    sqlx::query("INSERT INTO account_sessions (token_hash, account_id) VALUES ($1, $2)")
-        .bind(Sha256::digest(token.as_bytes()).to_vec())
-        .bind(account_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    (id, token)
-}
-
-async fn channel(pool: &PgPool, organization: Uuid, member: Uuid, private: bool) -> Uuid {
-    let channel = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(organization)
-    .bind(channel)
-    .bind(format!("Channel {channel}"))
-    .bind(if private { "private" } else { "public" })
-    .execute(pool)
-    .await
-    .unwrap();
-    if private {
-        sqlx::query("INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $2, $3)")
-            .bind(organization).bind(channel).bind(member).execute(pool).await.unwrap();
-    }
-    channel
-}
-async fn fixture(pool: &PgPool) -> Fixture {
-    fixture_with_app_pool(pool, pool).await
-}
-async fn fixture_with_configured_pool(pool: &PgPool, size: &str) -> Fixture {
-    let restricted = crate::test_app_pool(pool.clone()).await;
-    let configured = crate::database::PoolConfig::configured(Some(size), None)
-        .unwrap()
-        .connect_with(restricted.connect_options().as_ref().clone())
-        .await
-        .unwrap();
-    fixture_with_app_pool(pool, &configured).await
-}
-async fn fixture_with_app_pool(admin: &PgPool, app_pool: &PgPool) -> Fixture {
-    let organization = organization(admin).await;
-    let (member, token) = member(admin, organization).await;
-    let channel = channel(admin, organization, member, false).await;
-    let state = state(app_pool).await;
-    let app = crate::app(state.clone());
-    let server = Server::start(app.clone()).await;
-    Fixture {
-        app,
-        server,
-        state,
-        organization,
-        member,
-        channel,
-        token,
-    }
-}
-async fn request(app: &Router, method: &str, path: &str, token: &str, input: Value) -> Response {
-    let path = scoped_path(path, token);
-    app.clone()
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(&path)
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(input.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-}
-async fn send(f: &Fixture, token: &str, channel: Uuid, key: Uuid, body: &str) -> Value {
-    let response = request(
-        &f.app,
-        "POST",
-        &format!("/api/v1/channels/{channel}/messages"),
-        token,
-        json!({"client_message_id":key,"body":body}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap()
-}
-async fn post(f: &Fixture, channel: Uuid) -> Value {
-    send(f, &f.token, channel, Uuid::new_v4(), "hello").await
-}
-async fn control(
-    client: &mut (impl futures_util::Sink<tungstenite::Message, Error = tungstenite::Error> + Unpin),
-    control: ClientMessage,
-) -> Result<(), tungstenite::Error> {
-    client
-        .send(tungstenite::Message::text(
-            serde_json::to_string(&control).unwrap(),
-        ))
-        .await
-}
-async fn subscribe(client: &mut Client, channel: Uuid, after: i64) {
-    control(
-        client,
-        ClientMessage::Subscribe {
-            history_generation: None,
-            channel_id: channel,
-            after_seq: after,
-        },
-    )
-    .await
-    .unwrap();
-}
-/// A fresh subscription on a subscribed Channel: a duplicate subscribe is a no-op (#196).
-async fn resubscribe(client: &mut Client, channel: Uuid, after: i64) {
-    control(
-        client,
-        ClientMessage::Unsubscribe {
-            channel_id: channel,
-        },
-    )
-    .await
-    .unwrap();
-    subscribe(client, channel, after).await;
-}
-fn is_notice(frame: &tungstenite::Message) -> bool {
-    let tungstenite::Message::Text(text) = frame else {
-        return false;
-    };
-    serde_json::from_str::<crate::channels::activity::Notice>(text).is_ok()
-}
-async fn message_next(
-    client: &mut Client,
-) -> Option<Result<tungstenite::Message, tungstenite::Error>> {
-    loop {
-        let result = client.next().await?;
-        if result.as_ref().is_ok_and(is_notice) {
-            continue;
-        }
-        return Some(result);
-    }
-}
-async fn frame(client: &mut Client) -> tungstenite::Message {
-    tokio::time::timeout(Duration::from_secs(5), message_next(client))
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
-}
-async fn delivery_next<S>(
-    client: &mut WebSocketStream<S>,
-    expected_pong: Option<&[u8]>,
-) -> Option<Result<tungstenite::Message, tungstenite::Error>>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    loop {
-        let result =
-            crate::websocket_test_support::websocket_delivery_next(client, expected_pong).await?;
-        if result.as_ref().is_ok_and(is_notice) {
-            continue;
-        }
-        return Some(result);
-    }
-}
-async fn delivery_frame(client: &mut Client) -> tungstenite::Message {
-    tokio::time::timeout(Duration::from_secs(5), delivery_next(client, None))
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
-}
-async fn event(client: &mut Client) -> Value {
-    tokio::time::timeout(Duration::from_secs(5), read_event(client))
-        .await
-        .unwrap()
-}
-async fn read_event(client: &mut Client) -> Value {
-    loop {
-        match message_next(client).await.unwrap().unwrap() {
-            tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
-            tungstenite::Message::Text(text) => {
-                return serde_json::from_str(&text).unwrap_or_else(|error| {
-                    panic!("expected JSON event, got Text({text:?}): {error}")
-                });
-            }
-            tungstenite::Message::Close(Some(close)) => panic!(
-                "expected JSON event, got Close(code={}, reason={:?})",
-                u16::from(close.code),
-                close.reason.as_str()
-            ),
-            frame => panic!("expected JSON event, got {frame:?}"),
-        }
-    }
-}
-async fn ready(client: &mut Client, channel: Uuid, seq: i64) {
-    let mut subscribed = event(client).await;
-    assert!(Uuid::parse_str(subscribed["history_generation"].as_str().unwrap()).is_ok());
-    subscribed
-        .as_object_mut()
-        .unwrap()
-        .remove("history_generation");
-    assert_eq!(
-        subscribed,
-        json!({"type":"subscribed", "channel_id":channel, "caught_up_seq":seq})
-    );
-}
-async fn denied(client: &mut Client, channel: Uuid) {
-    assert_eq!(
-        event(client).await,
-        json!({"type":"error", "channel_id":channel, "code":"channel_not_found"})
-    );
-}
-async fn silent<S>(client: &mut WebSocketStream<S>)
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let result =
-        tokio::time::timeout(Duration::from_millis(100), delivery_next(client, None)).await;
-    assert!(result.is_err(), "expected delivery silence, got {result:?}");
-}
-async fn closed(client: &mut Client, code: u16) {
-    let frame = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match frame(client).await {
-                tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
-                frame => break frame,
-            }
-        }
-    })
-    .await
-    .unwrap();
-    let tungstenite::Message::Close(Some(close)) = &frame else {
-        panic!("expected Close(code={code}), got {frame:?}");
-    };
-    assert_eq!(u16::from(close.code), code, "got {frame:?}");
-}
-fn rejected(result: Result<Client, tungstenite::Error>, status: u16) {
-    let Err(tungstenite::Error::Http(response)) = result else {
-        panic!("expected HTTP denial");
-    };
-    assert_eq!(response.status(), status);
-    let body: Value = serde_json::from_slice(response.body().as_ref().unwrap()).unwrap();
-    assert!(body["error"].is_string());
-}
+use socket_server::{
+    Fixture, Server, channel, fixture, fixture_with_app_pool, fixture_with_configured_pool, member,
+    organization, post, request, scoped_path, send, state, state_with_test_pool,
+};
 
 #[tokio::test]
 async fn unauthenticated_websocket_upgrade_rejects_cookie_bearer_and_query_tokens_without_database()
@@ -697,12 +318,7 @@ async fn replay_missing_message_state_closes_without_hiding_log_position(pool: P
     let f = fixture(&pool).await;
     post(&f, f.channel).await;
     post(&f, f.channel).await;
-    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=1")
-        .bind(f.organization)
-        .bind(f.channel)
-        .execute(&pool)
-        .await
-        .unwrap();
+    crate::messages::log::inject_missing_message(&pool, f.organization, f.channel, 1).await;
     let mut socket = f.server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
     closed(&mut socket, 1011).await;
@@ -725,14 +341,14 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
         post(&f, second).await;
     }
     let mut socket = f.server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut socket, f.channel, 7).await;
-    entered(&gate).await;
+    gate.entered().await;
     // These commit after the history high-water mark and must survive the handoff.
     for _ in 0..5 {
         post(&f, f.channel).await;
     }
-    gate.release.add_permits(1);
+    gate.release();
     for seq in 8..=125 {
         let value = event(&mut socket).await;
         assert_eq!(value["type"], "message");
@@ -804,9 +420,9 @@ async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(po
     let f = fixture(&pool).await;
     post(&f, f.channel).await;
     let mut socket = f.server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut socket, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     for _ in 0..257 {
         post(&f, f.channel).await;
     }
@@ -831,9 +447,9 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
     let mut replay = f.server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     let mut other = f.server.connect(&other_token).await;
     subscribe(&mut other, f.channel, 0).await;
     ready(&mut other, f.channel, 0).await;
@@ -900,9 +516,9 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
         subscribe(&mut idle, f.channel, 0).await;
         ready(&mut idle, f.channel, 0).await;
         let mut replay = f.server.connect(&f.token).await;
-        let gate = pause(f.channel);
+        let gate = hooks::register_replay(f.channel);
         subscribe(&mut replay, f.channel, 0).await;
-        entered(&gate).await;
+        gate.entered().await;
         fallback.entered().await;
         let remaining: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 FROM account_sessions WHERE token_hash = $1")
             .bind(Sha256::digest(f.token.as_bytes()).to_vec())
@@ -945,8 +561,13 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
                         {
                             let work = state.shutdown.sockets.enter();
                             let permit = state.socket_gate.admit(auth.account_id).unwrap();
+                            let activity = state
+                                .message_delivery
+                                .channel_access
+                                .activity
+                                .register(&auth);
                             ws.on_upgrade(move |socket| {
-                                connected(socket, state, auth, permit, work)
+                                connected(socket, state, auth, permit, activity, work)
                             })
                         }
                     }
@@ -956,7 +577,7 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
         .with_state(f.state.clone());
     let server = Server::start(router).await;
     let mut socket = server.connect(&f.token).await;
-    closed(&mut socket, 1011).await;
+    activity::raw_closed(&mut socket, 1011).await;
     drop(held);
     exhausted.close().await;
 }
@@ -1084,13 +705,17 @@ async fn publication_waits_for_commit_even_when_http_request_is_cancelled(pool: 
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = 1818 AND NOT granted)").fetch_one(&pool).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Advisory(Advisory::Key {
+            class_id: Some(0),
+            object_id: 1818,
+            current_database: false,
+        }),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
     assert!(
         queue.events.try_recv().is_err(),
         "nothing may publish while commit is blocked"
@@ -1134,11 +759,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let second = post(&f, f.channel).await;
     assert_eq!(second["created_seq"], 2);
     // seq 2 publishes first; fan-out recovers the prefix once for all subscribers.
@@ -1155,7 +776,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
     f.state.message_delivery.flush().await;
     let mut silence = tokio::task::JoinSet::new();
@@ -1166,29 +787,6 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
     }
     while let Some(result) = silence.join_next().await {
         result.unwrap();
-    }
-}
-
-mod commit;
-mod contract;
-mod history;
-mod keepalive;
-mod lifecycle;
-mod limits;
-mod load_fixture;
-mod notification;
-mod session;
-mod watermark;
-
-fn scoped_path(path: &str, token: &str) -> String {
-    if path.starts_with("/api/v1/channels") || path.starts_with("/api/v1/ws") {
-        let organization = token
-            .split_once('.')
-            .map(|(id, _)| id)
-            .expect("test token must carry its Organization scope");
-        path.replacen("/api/v1/", &format!("/api/v1/orgs/{organization}/"), 1)
-    } else {
-        path.to_owned()
     }
 }
 
@@ -1220,28 +818,6 @@ async fn cookie_origin_is_checked_before_auth_and_organization_without_database(
         }
     }
 }
-
-mod fanout;
-mod measurement;
-
-mod shutdown;
-mod topics;
-
-mod dms;
-mod roles;
-
-mod replies;
-
-pub(super) mod access_loss;
-
-mod account_security;
-mod mentions;
-mod move_topic;
-mod observability;
-mod round_trips;
-mod shared_frame;
-
-mod activity;
 
 #[fukulow_test::test]
 async fn create_envelope_keeps_log_position_when_replay_hydrates_a_newer_version(pool: PgPool) {

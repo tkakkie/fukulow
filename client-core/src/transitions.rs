@@ -1,4 +1,7 @@
-use crate::{engine::Step, merge::Source, *};
+use crate::{
+    engine::Step, history_generation::is_generation_conflict, merge::Source, socket_replies::Route,
+    *,
+};
 use fukulow_api::ServerEvent;
 use std::rc::Rc;
 
@@ -19,6 +22,8 @@ impl Step<'_> {
                 self.core.requests.clear();
                 self.core.timers.clear();
                 self.connect();
+                // This token survives ordinary reconnects. Only a Session or history reset replaces it.
+                self.core.organization_history_issue = self.core.session.connection;
                 self.direct = true;
                 self.force_changed = true;
             }
@@ -28,11 +33,15 @@ impl Step<'_> {
                 self.force_changed = true;
             }
             Input::OrganizationUnavailable => self.organization_unavailable(),
-            Input::SocketClosed {
-                connection,
-                code: 4003,
-            } if self.core.session.connection == Some(connection) => {
-                self.organization_unavailable()
+            Input::ObserveHistoryGeneration {
+                issue,
+                lifetime,
+                result,
+            } => {
+                let decision = self.observe_history_generation(issue, lifetime, result);
+                // A non-reset observation only reads or updates generation metadata.
+                self.direct = decision != HistoryObservationResult::Reset;
+                self.out.history_observation = Some(decision);
             }
             Input::UserDiscard {
                 channel,
@@ -40,75 +49,40 @@ impl Step<'_> {
             } if self.core.session.running
                 || self.core.session.organization == Organization::Unavailable =>
             {
-                if let Some(c) = self.core.channel(channel)
-                    && c.pending.iter().any(|p| {
-                        p.client_message_id == client_message_id && p.state != PendingState::Sending
-                    })
-                {
-                    let pending = c.pending.clone();
-                    for p in pending
-                        .iter()
-                        .filter(|p| p.client_message_id == client_message_id)
-                    {
-                        self.cancel(p.retry_wait);
-                    }
-                    self.channel(channel).pending = Rc::new(
-                        pending
-                            .iter()
-                            .filter(|p| {
-                                p.client_message_id != client_message_id
-                                    || p.state == PendingState::Sending
-                            })
-                            .cloned()
-                            .collect(),
-                    );
-                }
+                self.user_discard(channel, client_message_id)
             }
             input if self.core.session.running => self.running(input),
             _ => {}
         }
         self.finish()
     }
-    fn organization_unavailable(&mut self) {
+    pub(super) fn organization_unavailable(&mut self) {
         if !self.core.session.running {
             return;
         }
-        let timers: Vec<_> = self.core.timers.keys().copied().collect();
-        for id in timers {
-            self.cancel(Some(id));
-        }
+        self.teardown();
         self.core.session.organization = Organization::Unavailable;
-        self.core.session.running = false;
-        self.core.session.connected = false;
-        self.core.session.connection = None;
-        self.core.requests.clear();
-        self.metadata_changed = true;
         for id in self.ids() {
             let c = self.channel(id);
             c.state = Availability::Unavailable;
             c.subscription = None;
-            c.pending = Rc::new(
-                c.pending
-                    .iter()
-                    .map(|p| {
-                        let mut p = p.clone();
-                        p.state = PendingState::Failed;
-                        p.retry_wait = None;
-                        p
-                    })
-                    .collect(),
-            );
+            let pending = c.pending.clone();
+            self.channel(id).pending = self.fail_pending_sends(&pending);
         }
-        self.out.effects.push(Effect::Close);
     }
     fn running(&mut self, input: Input) {
         match input {
             Input::HistoryGeneration { generation } => {
-                if let Some(generation) = generation {
-                    self.accept_generation(generation);
-                } else {
-                    self.reset_history(None);
-                }
+                self.out.history_observation = Some(match generation {
+                    Some(generation) if self.accept_generation(generation) => {
+                        HistoryObservationResult::Accepted
+                    }
+                    Some(_) => HistoryObservationResult::Reset,
+                    None => {
+                        self.reset_history(None);
+                        HistoryObservationResult::Reset
+                    }
+                });
             }
             Input::SettleHistory { channel, messages } => {
                 if self
@@ -134,30 +108,34 @@ impl Step<'_> {
                     self.subscribe(id);
                 }
             }
-            Input::SocketClosed { connection, code } => {
+            Input::SocketClosed { connection, code } => self.socket_closed(connection, code, false),
+            Input::SocketDisconnected {
+                connection,
+                code,
+                opened,
+                opaque,
+            } => {
                 if self.core.session.connection != Some(connection) {
                     return;
                 }
-                self.core.session.connection = None;
-                self.core.session.connected = false;
-                for id in self.ids() {
-                    if self
-                        .core
-                        .channel(id)
-                        .is_some_and(|c| c.subscription.is_some())
-                    {
-                        self.channel(id).subscription = None;
-                    }
+                if !opened && opaque {
+                    self.core.membership_probe_pending = true;
+                    self.out
+                        .effects
+                        .push(Effect::CheckMembership { connection });
+                } else {
+                    self.socket_closed(connection, code, true);
                 }
-                if code == 4001 {
-                    self.stop(true);
-                    return;
-                }
-                let attempt = self.core.session.reconnect_attempt;
-                self.core.session.reconnect_attempt += 1;
-                let n = self.wait(Purpose::ReconnectBackoff, None, attempt);
-                self.core.session.reconnect_wait = Some(n);
             }
+            Input::MembershipChecked {
+                connection,
+                status,
+                error,
+            } => self.membership_checked(
+                connection,
+                status.as_ref().and_then(Failure::http_status),
+                error.as_deref(),
+            ),
             Input::Watch { channel: id } => {
                 let c = self.channel(id);
                 if c.watched && c.state != Availability::Unavailable {
@@ -172,10 +150,12 @@ impl Step<'_> {
                     c.state = Availability::Loading;
                     c.subscription = None;
                 }
-                if c.cursor.is_none() {
+                let needs_history = c.cursor.is_none();
+                let empty = c.messages.is_empty();
+                if needs_history {
                     self.history(id, Page::Latest, None);
                 } else {
-                    if c.messages.is_empty() {
+                    if empty {
                         self.history(id, Page::Latest, None);
                     }
                     self.subscribe(id);
@@ -219,73 +199,24 @@ impl Step<'_> {
                 reply_to,
                 topic_name,
                 reply_root_id,
-            } => {
-                // ECMAScript trim includes BOM and excludes Unicode NEL.
-                if body
-                    .trim_matches(|ch: char| {
-                        ch == '\u{feff}' || (ch.is_whitespace() && ch != '\u{85}')
-                    })
-                    .is_empty()
-                    || (reply_to.is_some() && topic_name.as_ref().is_some_and(|s| !s.is_empty()))
-                {
-                    return;
-                }
-                let c = self.channel(id);
-                if c.state == Availability::Unavailable
-                    || c.pending
-                        .iter()
-                        .any(|p| p.client_message_id == client_message_id)
-                {
-                    return;
-                }
-                let reply_root_id = reply_to.map(|parent| {
-                    reply_root_id
-                        .or_else(|| {
-                            c.messages
-                                .iter()
-                                .find(|m| m.id == parent)
-                                .and_then(|m| m.reply_root_id)
-                        })
-                        .unwrap_or(parent)
-                });
-                self.attempt(
-                    id,
-                    Pending {
-                        client_message_id,
-                        body,
-                        state: PendingState::Sending,
-                        request: 0,
-                        retry_wait: None,
-                        failure_code: None,
-                        reply_to,
-                        topic_name: topic_name.filter(|s| !s.is_empty()),
-                        reply_root_id,
-                    },
-                );
-            }
+            } => self.user_send(
+                id,
+                client_message_id,
+                body,
+                reply_to,
+                topic_name,
+                reply_root_id,
+            ),
             Input::UserRetry {
                 channel: id,
                 client_message_id,
-            } => {
-                let c = self.channel(id);
-                if c.state != Availability::Unavailable
-                    && let Some(p) = c
-                        .pending
-                        .iter()
-                        .find(|p| {
-                            p.client_message_id == client_message_id
-                                && p.state == PendingState::Unknown
-                        })
-                        .cloned()
-                {
-                    self.attempt(id, p);
-                }
-            }
+            } => self.user_retry(id, client_message_id),
             Input::Event {
                 connection,
                 event,
                 subscription,
             } => self.event(connection, event, subscription),
+            Input::SocketFrame { connection, event } => self.socket_frame(connection, event),
             Input::HistoryResult { request, page } => {
                 self.history_response(request, Ok(crate::responses::HistoryPage::Messages(page)))
             }
@@ -297,26 +228,24 @@ impl Step<'_> {
                 status,
                 error,
             } => {
-                if self.core.requests.get(&request).is_some_and(|r| !r.stale())
-                    && status == Failure::Status(409)
-                    && error.as_deref() == Some("history_generation_changed")
-                {
-                    self.core.requests.remove(&request);
-                    self.reset_history(None);
-                } else if self.core.requests.get(&request).is_some_and(|r| !r.stale())
-                    && status == Failure::Status(409)
-                    && error.as_deref() == Some("snapshot_expired")
-                {
-                    let r = self.core.requests.remove(&request);
-                    if let Some(Request::History {
-                        channel: id, page, ..
-                    }) = r
-                    {
-                        self.expire_window(id, page != Page::Latest);
+                if self.core.requests.get(&request).is_some_and(|r| !r.stale()) {
+                    if is_generation_conflict(status.http_status(), error.as_deref()) {
+                        self.core.requests.remove(&request);
+                        self.reset_history(None);
+                        return;
                     }
-                } else {
-                    self.history_response(request, Err(status));
+                    if status == Failure::Status(409)
+                        && error.as_deref() == Some("snapshot_expired")
+                    {
+                        if let Some(Request::History { channel, page, .. }) =
+                            self.core.requests.remove(&request)
+                        {
+                            self.expire_window(channel, page != Page::Latest);
+                        }
+                        return;
+                    }
                 }
+                self.history_response(request, Err((status, error.as_deref())));
             }
             Input::Ack { request, message } => self.send_response(request, Ok(message)),
             Input::SendFailed {
@@ -329,6 +258,94 @@ impl Step<'_> {
             _ => {}
         }
     }
+    fn socket_closed(&mut self, connection: Token, code: u16, report_organization: bool) {
+        if self.core.session.connection != Some(connection) {
+            return;
+        }
+        if code == 4003 {
+            if report_organization {
+                self.out
+                    .effects
+                    .push(Effect::ReportOrganizationUnavailable {
+                        socket: Some(ClosedSocket { connection, code }),
+                    });
+            } else {
+                self.organization_unavailable();
+            }
+            return;
+        }
+        self.finish_socket_close(code == 4001);
+    }
+
+    fn membership_checked(&mut self, connection: Token, status: Option<u16>, error: Option<&str>) {
+        if self.core.session.connection != Some(connection) || !self.core.membership_probe_pending {
+            return;
+        }
+        self.core.membership_probe_pending = false;
+        match access_outcome(
+            AccessEndpoint::Organization,
+            AccessLifetime::Current,
+            status,
+            error,
+        ) {
+            AccessOutcome::OrganizationUnavailable => {
+                self.out
+                    .effects
+                    .push(Effect::ReportOrganizationUnavailable { socket: None });
+            }
+            AccessOutcome::AccountEnded => self.finish_socket_close(true),
+            _ => self.finish_socket_close(false),
+        }
+    }
+
+    fn finish_socket_close(&mut self, account_ended: bool) {
+        self.core.session.connection = None;
+        self.core.session.connected = false;
+        self.core.membership_probe_pending = false;
+        self.core.socket_replies.clear();
+        for id in self.ids() {
+            if self
+                .core
+                .channel(id)
+                .is_some_and(|c| c.subscription.is_some())
+            {
+                self.channel(id).subscription = None;
+            }
+        }
+        if account_ended {
+            self.stop(true);
+            return;
+        }
+        let attempt = self.core.session.reconnect_attempt;
+        self.core.session.reconnect_attempt += 1;
+        let n = self.wait(Purpose::ReconnectBackoff, None, attempt);
+        self.core.session.reconnect_wait = Some(n);
+    }
+
+    fn socket_frame(&mut self, connection: Token, event: ServerEvent) {
+        if self.core.session.connection != Some(connection) {
+            self.direct = true;
+            return;
+        }
+        match self.core.socket_replies.route(&event, &self.core.channels) {
+            Route::Sync(subscription) => {
+                self.event(connection, event, subscription);
+                self.out.socket_delivery = Some(SocketDelivery::Sync { subscription });
+            }
+            Route::Activity => {
+                self.direct = true;
+                self.out.socket_delivery = Some(SocketDelivery::Activity);
+            }
+            Route::Reconnect if self.core.session.connected => {
+                self.finish_socket_close(false);
+                self.out
+                    .effects
+                    .push(Effect::CloseConnection { connection });
+            }
+            _ => self.direct = true,
+        }
+    }
+
     fn event(&mut self, connection: Token, event: ServerEvent, subscription: Option<Token>) {
         if self.core.session.connection != Some(connection) || !self.core.session.connected {
             return;
@@ -394,23 +411,7 @@ impl Step<'_> {
                     return;
                 }
                 if caught_up_seq < sub.after {
-                    self.out.effects.push(Effect::Unsubscribe { channel: id });
-                    self.invalidate(id, true);
-                    let pending = self.channel(id).pending.clone();
-                    let mut pending = (*pending).clone();
-                    for p in &mut pending {
-                        self.cancel(p.retry_wait);
-                        if matches!(p.state, PendingState::Sending | PendingState::Throttled) {
-                            p.state = PendingState::Unknown;
-                            p.retry_wait = None;
-                        }
-                    }
-                    *self.channel(id) = ChannelView {
-                        watched: true,
-                        pending: Rc::new(pending),
-                        ..ChannelView::default()
-                    };
-                    self.history(id, Page::Latest, None);
+                    self.restart_channel_history(id);
                 } else {
                     let c = self.channel(id);
                     if !sub.confirmed || sub.watermark != caught_up_seq {
@@ -427,6 +428,56 @@ impl Step<'_> {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unhandled_history_conflicts_use_the_ordinary_failure_path() {
+        let channel = Uuid::from_u128(1);
+        let self_id = Uuid::from_u128(2);
+        let step = |core: &mut Core, input| {
+            core.step(StepInput {
+                input,
+                refresh_mention_names: false,
+            })
+        };
+
+        for (stale, error) in [
+            (true, Some("history_generation_changed")),
+            (true, Some("snapshot_expired")),
+            (false, Some("unknown_conflict")),
+            (false, None),
+        ] {
+            let mut core = Core::new(self_id);
+            step(&mut core, Input::SessionStart { self_id });
+            step(&mut core, Input::Watch { channel });
+            let request = core.channel(channel).unwrap().latest.unwrap();
+            if stale {
+                step(&mut core, Input::Unwatch { channel });
+            }
+            assert_eq!(core.request(request).unwrap().stale(), stale);
+
+            let result = step(
+                &mut core,
+                Input::HistoryFailed {
+                    request,
+                    status: Failure::Status(409),
+                    error: error.map(str::to_owned),
+                },
+            );
+
+            let case = format!("stale={stale}, error={error:?}");
+            assert!(core.request(request).is_none(), "{case}");
+            assert_eq!(core.session().history_epoch, 0, "{case}");
+            assert!(result.effects.is_empty(), "{case}");
+            let view = core.channel(channel).unwrap();
+            assert_eq!(view.latest, None, "{case}");
+            assert_eq!(view.history_error, !stale, "{case}");
         }
     }
 }

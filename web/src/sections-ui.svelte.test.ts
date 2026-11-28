@@ -255,7 +255,7 @@ describe('personal sections adapter & UI', () => {
     // Open move dialog for Channel A before revoking access.
     host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
     await settle()
-    expect(host.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(host.querySelector('dialog:modal')).not.toBeNull()
     expect(host.textContent).toContain('secret')
     expect(buttonsByText(host, '移動する')).toHaveLength(1)
 
@@ -265,7 +265,7 @@ describe('personal sections adapter & UI', () => {
     await vi.advanceTimersByTimeAsync(200)
     await settle()
 
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(host.querySelector('[data-channel-id="A"]')).toBeNull()
     expect(host.textContent).not.toContain('secret')
     expect(buttonsByText(host, '移動する')).toHaveLength(0)
@@ -512,10 +512,10 @@ describe('personal sections adapter & UI', () => {
     createBtn.focus()
     createBtn.click()
     await settle()
-    const dialog = host.querySelector('[role="dialog"]')!
+    const dialog = host.querySelector('dialog:modal')!
     dialog.dispatchEvent(Object.assign(new MiniDomEvent('keydown', { bubbles: true, cancelable: true }), { key: 'Escape' }))
     await settle()
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(c.sectionsApi.create).not.toHaveBeenCalled()
 
     // Open Rename dialog on s2 and submit with Enter.
@@ -535,7 +535,7 @@ describe('personal sections adapter & UI', () => {
     input.dispatchEvent(Object.assign(new MiniDomEvent('keydown', { bubbles: true, cancelable: true }), { key: 'Enter' }))
     await vi.advanceTimersByTimeAsync(200)
     await settle()
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(host.querySelector('[data-section-heading="s2"]')?.textContent).toContain('末尾改')
 
     // Delete last custom section s2 while Other Channels is empty -> focuses previous section heading s1.

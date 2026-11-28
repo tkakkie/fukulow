@@ -21,8 +21,7 @@
  * desktop/other container activity. Wait for idle; do not stop others' containers.
  * Metadata records host/Docker allocation, versions, settings, source hashes and
  * competing containers; inspect them before comparing. Run alone tomorrow.
- * Checks: node --test load/unread-init/*.test.ts;
- *   load/node_modules/.bin/tsc -p load/unread-init/tsconfig.json
+ * Checks: npm --prefix load run check && npm --prefix load test (both cover unread-init).
  * SQLx is passed --no-dotenv. No secrets or environment files are loaded.
  * SIGINT/SIGTERM stop at the next safe boundary; finally removes only our own
  * container and anonymous volume. On hard kill: docker rm -fv <printed name>.
@@ -36,8 +35,8 @@ import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { Database,docker,image } from './database.ts';
 import { matrix,integers,estimate,equal,oracleDigest,summary,type Sample } from './model.ts';
-import { fixture } from './sql.ts';
-import { measure } from './measure.ts';
+import { fixture,projectionSources,readQueries } from './sql.ts';
+import { measure, senderBaselineMethod } from './measure.ts';
 const argv=process.argv.slice(2);
 const flag=(s:string)=>argv.includes(s);
 const option=(key:string,fallback:string)=>{const i=argv.indexOf(key);if(i<0)return fallback;if(!argv[i+1]||argv[i+1].startsWith('--'))throw new Error(`missing ${key}`);return argv[i+1];};
@@ -51,6 +50,8 @@ if(pilot&&(topics.some(n=>n>1000)||members.some(n=>n>100)||repeats>3||channels>1
 const points=matrix(topics,members),prediction=estimate(points,repeats,channels);
 console.log(JSON.stringify({pilot,topics,members,repeats,channels,points:points.length,estimate:prediction}));
 if(flag('--estimate'))process.exit(0);
+// Fail on SQL source drift for both arms before Postgres starts.
+readQueries(false);readQueries(true);
 const root=realpathSync(process.cwd());
 const out=resolve(flag('--out')?option('--out',''):process.env.UNREAD_INIT_OUT??mkdtempSync(resolve(tmpdir(),'fukulow-403-')));
 if(out===root||out.startsWith(root+sep))throw new Error('output must be outside repository');
@@ -78,7 +79,7 @@ const started=Date.now();
 try {
   console.log(`Artifacts: ${out}; owned container: ${db.name}`);
   db.start();await db.ready();db.migrate();
-  const metadata={startedAt:new Date().toISOString(),commit:command('git','rev-parse','HEAD'),dirty:command('git','status','--short'),
+  const metadata={startedAt:new Date().toISOString(),commit:command('git','rev-parse','HEAD'),dirty:command('git','status','--short'),senderBaselineMethod,
     host:{platform:platform(),release:release(),arch:arch(),cpu:cpus()[0]?.model,cpus:cpus().length,memory:totalmem()},
     node:process.version,pinnedNode:readFileSync('.node-version','utf8').trim(),sqlx:command('sqlx','--version'),image,
     imageID:docker('inspect','--format','{{.Image}}',db.name),docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
@@ -86,7 +87,7 @@ try {
     competingContainers:docker('ps','--format','{{.Names}}\t{{.Image}}\t{{.Status}}'),
     postgres:db.sql('SELECT version();'),settings:JSON.parse(db.sql(`SELECT json_object_agg(name,setting) FROM pg_settings WHERE name IN ('shared_buffers','work_mem','jit','synchronous_commit','fsync','full_page_writes','max_connections','wal_level')`)),
     migrations:JSON.parse(db.sql('SELECT json_agg(t) FROM (SELECT version,encode(checksum,\'hex\') checksum FROM _sqlx_migrations ORDER BY version)t','base')),
-    sourceHashes:Object.fromEntries([...readdirSync('load/unread-init').filter(n=>/\.(ts|sql)$/.test(n)).map(n=>'load/unread-init/'+n),...readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).map(n=>'server/migrations/'+n),'server/src/messages/unread.rs','server/src/messages/topics/projection.rs'].map(n=>[n,createHash('sha256').update(readFileSync(n)).digest('hex')]))};
+    sourceHashes:Object.fromEntries([...readdirSync('load/unread-init').filter(n=>/\.(ts|sql)$/.test(n)).map(n=>'load/unread-init/'+n),...readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).map(n=>'server/migrations/'+n),'server/src/messages/unread/counts.rs',...projectionSources.map(n=>'server/src/'+n)].map(n=>[n,createHash('sha256').update(readFileSync(n)).digest('hex')]))};
   save('metadata.json',metadata);
   for(let index=0;index<points.length;index++) {
     check();const p=points[index];console.log(`Point ${index+1}/${points.length}: ${JSON.stringify(p)}`);
@@ -106,6 +107,6 @@ try {
   }
   check();result.complete=true;save('results.json',result);
   const conditions=`Conditions: ${new Date().toISOString()}, source ${metadata.commit} (dirty state/hashes in metadata.json); ${metadata.host.cpu}, ${metadata.host.cpus} CPUs, ${(metadata.host.memory/2**30).toFixed(1)} GiB, ${metadata.host.platform}/${metadata.host.arch}; Docker ${metadata.docker.version}, ${metadata.docker.cpus} CPUs / ${(metadata.docker.memory/2**30).toFixed(2)} GiB; ${image}; shared_buffers 128MB/work_mem 4MB/default JIT, synchronous commit on. Node ${metadata.node} (repo ${metadata.pinnedNode}); sqlx ${metadata.sqlx}. Topics ${topics}; public affected Members ${members}; ${channels} public Channels for join/reactivate; ${repeats} repeats. Elapsed ${((Date.now()-started)/60000).toFixed(1)} min. Host idle status requires operator assessment of uptime/process/container snapshots recorded in metadata. Equality checks: ${result.equalityChecks}, all passed.`;
-  const md=summary(samples,pilot,conditions);writeFileSync(resolve(out,'summary.md'),md);console.log(md);
+  const md=summary(samples,pilot,`${conditions}\n\n${senderBaselineMethod}`);writeFileSync(resolve(out,'summary.md'),md);console.log(md);
 } catch(error) {save('failure.json',{error:String(error),elapsedSeconds:(Date.now()-started)/1000});save('results.json',result);throw error;}
 finally {db.cleanup();}

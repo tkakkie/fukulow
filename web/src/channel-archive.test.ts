@@ -68,7 +68,7 @@ it('refreshes held Channel reads on notices and reconciliations without reading 
   try {
     c.channels.selectHint('A')
     await vi.advanceTimersByTimeAsync(200)
-    for (const type of ['channel_list_changed', 'activity_ready', 'activity_reset', 'channel_access_gained', 'channel_access_revoked'] as const) {
+    for (const type of ['activity_ready', 'channel_list_changed', 'activity_reset', 'channel_access_gained', 'channel_access_revoked'] as const) {
       const before = [c.listChannels, c.listArchivedChannels, c.getChannel].map(mock => mock.mock.calls.length)
       if (type === 'channel_access_gained' || type === 'channel_access_revoked') c.net.event({ type, channel_id: 'B' })
       else c.net.event({ type })

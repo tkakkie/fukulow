@@ -2,16 +2,25 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { createGunzip } from 'node:zlib';
 import { command, docker, type Stack } from '../slice5/stack.ts';
 import { appEvidence, cgroupSample, dbEvidence, dbSampleIntervalMs, k6Evidence, parseDbSample, parseStatements,
-  statementGroupSql, type DbSample, type Organizations } from './diagnostic-evidence.ts';
+  statementGroupSql, type DbSample, type Organizations, type Window } from './diagnostic-evidence.ts';
+import { timestamp } from './diagnostic-stream.ts';
 import { diagnosticLabel } from './diagnostic-mode.ts';
 
 const exec = promisify(execFile);
 const topStatementTexts = 25;
+
+export const diagnosticK6Sources = ['load/move/k6-diagnostic.Dockerfile', 'load/move/k6-exact-arrivals.patch'];
+
+export async function buildDiagnosticK6(repo: string, base: string, tag: string, signal: AbortSignal) {
+  await exec('docker', ['buildx', 'build', '--load', '--tag', tag, '--build-arg', `K6_IMAGE=${base}`,
+    '-f', join(repo, diagnosticK6Sources[0]), join(repo, 'load/move')], { signal, maxBuffer: 16 * 1024 * 1024 });
+}
 
 export async function diagnosticImage(repo: string, scratch: string, tag: string, signal: AbortSignal,
   target: { commit: string; patch: string }) {
@@ -108,13 +117,17 @@ function sampleContainers(stack: Stack, k6: string) {
   };
   tick();
   const timer = setInterval(tick, 1000);
-  return { async stop() {
+  const pause = async () => {
     clearInterval(timer);
     await pending;
+  };
+  return { pause, async stop(window: Window) {
+    await pause();
+    const scoped = samples.filter(sample => sample.at >= window.start && sample.at <= window.end);
     const summary = Object.fromEntries(names.map(name => {
-      const present = samples.flatMap(s => s.containers[name] ?? []);
+      const present = scoped.flatMap(s => s.containers[name] ?? []);
       const first = present[0], last = present.at(-1);
-      return [name, { samples: present.length, missing: samples.length - present.length,
+      return [name, { samples: present.length, missing: scoped.length - present.length,
         peakMemoryBytes: first ? Math.max(...present.map(s => s.memoryBytes)) : null,
         nrThrottledDelta: first && last && present.length > 1 ? last.nr_throttled - first.nr_throttled : null,
         throttledUsecDelta: first && last && present.length > 1 ? last.throttled_usec - first.throttled_usec : null }];
@@ -130,31 +143,124 @@ export function diagnosticOutput(dir: string) {
     file: join(metricsDir, 'k6.json.gz') };
 }
 
-export function captureDiagnostic(stack: Stack, name: string, metricsFile: string, organizations: Organizations) {
+export function appLogAnchor(stdout: string, stderr: string) {
+  return [stdout.trimEnd().split('\n').at(-1), stderr.trimEnd().split('\n').at(-1)]
+    .flatMap(line => {
+      const at = timestamp(line?.split(' ', 1)[0]);
+      return line && Number.isFinite(at) ? [{ line, at }] : [];
+    }).sort((a, b) => b.at - a.at)[0];
+}
+
+export function retainedAppLog(log: string, anchor: ReturnType<typeof appLogAnchor>, window: Window, organizations: Organizations) {
+  const lines = log.split('\n');
+  const anchorRetained = anchor !== undefined && lines.includes(anchor.line);
+  const body = lines.flatMap(line => {
+    const split = line.indexOf(' ');
+    const at = timestamp(line.slice(0, split));
+    return at >= window.start ? [line.slice(split + 1)] : [];
+  });
+  const truncationSigns = lines.filter(line => {
+    const split = line.indexOf(' ');
+    const prefixed = Number.isFinite(timestamp(line.slice(0, split)));
+    const message = prefixed ? line.slice(split + 1) : line;
+    return (!prefixed || !message.startsWith('{')) &&
+      /move_diag_|http_completed|truncat|error (?:from daemon|while reading)|error grabbing logs|corrupt/i.test(message);
+  }).length;
+  return { ...appEvidence(body.join('\n'), organizations, window), anchorRetained, truncationSigns };
+}
+
+function collectorFailure(name: string, error: unknown) {
+  // Preserve the failure class without Docker stderr, SQL arguments or request data.
+  const { code, killed } = (error ?? {}) as { code?: unknown; killed?: boolean };
+  const reason = code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'output buffer limit'
+    : killed ? 'timeout or termination'
+    : typeof code === 'number' ? `exit ${code}`
+    : error instanceof Error ? error.name : 'unknown error';
+  return `${name}: ${reason}`;
+}
+
+type VmClockReading = { hostBeforeMs: number; hostAfterMs: number; vmMs: number };
+
+export function selectVmClockReading(readings: readonly VmClockReading[]) {
+  const roundTrip = (reading: VmClockReading) => reading.hostAfterMs - reading.hostBeforeMs;
+  let best = readings[0];
+  if (!best) return null;
+  for (const reading of readings.slice(1)) {
+    if (roundTrip(reading) < roundTrip(best)) best = reading;
+  }
+  const roundTripMs = roundTrip(best);
+  return { ...best, offsetMs: best.vmMs - (best.hostBeforeMs + roundTripMs / 2),
+    roundTripMs, readingCount: readings.length };
+}
+
+async function sampleVmClock(app: string, boundary: 'start' | 'end', failures: string[]) {
+  const readings: VmClockReading[] = [];
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const hostBeforeMs = Date.now();
+      const { stdout } = await exec('docker', ['exec', app, 'date', '+%s%3N'], { timeout: 5000 });
+      const hostAfterMs = Date.now();
+      const raw = stdout.trim();
+      const vmMs = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(vmMs) || hostAfterMs < hostBeforeMs) {
+        failures.push(`Docker VM clock at arm ${boundary}: invalid clock reading`);
+        return null;
+      }
+      readings.push({ hostBeforeMs, hostAfterMs, vmMs });
+    }
+    return selectVmClockReading(readings);
+  } catch (error) {
+    failures.push(collectorFailure(`Docker VM clock at arm ${boundary}`, error));
+    return null;
+  }
+}
+
+export async function captureDiagnostic(stack: Stack, name: string, metricsFile: string, organizations: Organizations, fusedRank: boolean) {
   stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT pg_stat_statements_reset();');
-  const since = new Date().toISOString();
+  let anchor: ReturnType<typeof appLogAnchor>;
+  const failures: string[] = [];
+  try {
+    const { stdout, stderr } = await exec('docker', ['logs', '--timestamps', '--tail', '1', stack.app], { timeout: 5000 });
+    anchor = appLogAnchor(stdout, stderr);
+  } catch (error) {
+    failures.push(collectorFailure('Docker log anchor', error));
+  }
+  const start = await sampleVmClock(stack.app, 'start', failures);
   const db = samplePostgres(stack);
   const resources = sampleContainers(stack, name);
-  return { async finish() {
-    const [postgres, containers] = await Promise.all([db.stop(), resources.stop()]);
+  return { async finish(window: Window, monotonicMs: number, steady?: Window) {
+    // Let any in-flight cgroup docker exec finish before timing the clock commands.
+    await resources.pause();
+    const end = await sampleVmClock(stack.app, 'end', failures);
+    const [postgres, containers] = await Promise.all([db.stop(), resources.stop(window)]);
+    const since = new Date((anchor?.at ?? window.start) - 1000).toISOString();
     const [app, generator, statements] = await Promise.allSettled([
-      exec('docker', ['logs', '--since', since, stack.app], { timeout: 15000, maxBuffer: 128 * 1024 * 1024 })
-        .then(result => appEvidence(result.stderr, organizations)),
-      readK6(metricsFile),
+      exec('docker', ['logs', '--timestamps', '--since', since, stack.app], { timeout: 15000, maxBuffer: 128 * 1024 * 1024 })
+        .then(({ stdout, stderr }) => retainedAppLog(stdout + '\n' + stderr, anchor, window, organizations)),
+      readK6(metricsFile, fusedRank),
       exec('docker', ['exec', stack.db, 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-U', 'fukulow', '-d', 'fukulow',
         '-c', statementsSql], { timeout: 5000 }).then(result => parseStatements(result.stdout.trim())),
     ]);
-    const value = <T>(result: PromiseSettledResult<T>) => result.status === 'fulfilled' ? result.value : null;
-    return { since, app: value(app), k6: value(generator), containers, postgres: {
-      ...postgres, ...dbEvidence(postgres.samples, value(statements) ?? []), statementsAvailable: statements.status === 'fulfilled',
-    } };
+    const value = <T>(result: PromiseSettledResult<T>, name: string) => {
+      if (result.status === 'fulfilled') return result.value;
+      failures.push(collectorFailure(name, result.reason));
+      return null;
+    };
+    const statementRows = value(statements, 'PostgreSQL statements') ?? [];
+    const waited = steady ? postgres.samples.filter(sample => sample.at >= steady.start && sample.at <= steady.end) : [];
+    // Keep analyzed waits on the same scope as the statement totals (startup through drain).
+    const armSamples = postgres.samples.filter(sample => sample.at >= window.start && sample.at <= window.end);
+    const wallMs = window.end - window.start;
+    return { since, window, clock: { wallMs, monotonicMs, driftMs: wallMs - monotonicMs, start, end },
+      app: value(app, 'Docker app logs'), k6: value(generator, 'k6 stream'), failures, containers, postgres: {
+        ...postgres, ...dbEvidence(armSamples, statementRows), steadyCoverageMs: dbEvidence(waited, []).coveredMs,
+        statementsAvailable: statementRows.some(row => row.calls > 0),
+      } };
   } };
 }
 
-async function readK6(file: string) {
-  // Propagate errors from the source through the decompressor to the line reader.
-  const input = createReadStream(file);
-  const gz = createGunzip();
-  input.on('error', error => gz.destroy(error));
-  return k6Evidence(createInterface({ input: input.pipe(gz), crlfDelay: Infinity }));
+async function readK6(file: string, fusedRank: boolean) {
+  // Pipeline also validates the gzip trailer, even if the parsed points looked complete.
+  return pipeline(createReadStream(file), createGunzip(), source =>
+    k6Evidence(createInterface({ input: source, crlfDelay: Infinity }), fusedRank));
 }

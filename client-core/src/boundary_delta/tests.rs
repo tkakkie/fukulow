@@ -1,25 +1,11 @@
 use super::*;
+use crate::test_support::message as message_fixture;
 use serde_json::{Value, json};
 use std::error::Error;
 
 fn message(seq: usize, version: usize) -> Rc<Message> {
-    let id = Uuid::from_u128(seq as u128);
-    Rc::new(Message {
-        history_generation: Uuid::nil(),
-        id,
-        channel_id: Uuid::nil(),
-        created_seq: seq as i64,
-        version: version as i64,
-        deleted: false,
-        client_message_id: id,
-        sender: Uuid::nil(),
-        body: Some("shared body".into()),
-        created_at: "2026-01-01T00:00:00Z".into(),
-        topic_id: None,
-        reply_to: None,
-        reply_root_id: None,
-        mentions: None,
-    })
+    serde_json::from_value(message_fixture(seq as u128, version as u128))
+        .expect("valid Message fixture")
 }
 
 #[test]
@@ -319,9 +305,12 @@ fn deltas_omit_unchanged_arrays_reuse_messages_and_intern_bodies_once() -> Resul
     step(json!({"type":"connection_ready", "connection":1}))?;
     step(json!({"type":"watch", "channel":id}))?;
     let message = |seq| {
-        json!({"history_generation":Uuid::nil(),"id":Uuid::from_u128(seq), "channel_id":id, "created_seq":seq,"version":seq,"deleted":false,
-        "sender":id,"client_message_id":Uuid::from_u128(seq), "body":"one body",
-        "created_at":"2026-01-01T00:00:00Z", "topic_id":null, "reply_to":null, "reply_root_id":null, "mentions":[]})
+        let mut message = message_fixture(seq, seq);
+        message["channel_id"] = json!(id);
+        message["sender"] = json!(id);
+        message["body"] = json!("one body");
+        message["mentions"] = json!([]);
+        message
     };
     let history = step(
         json!({"type":"history_result", "request":3, "page":{"history_generation":Uuid::nil(),"as_of_seq":1,"messages":[message(1)], "has_more":false}}),

@@ -2,6 +2,7 @@ import { createReplyCountCore } from '#sync-core'
 import * as api from './api'
 import type { Message, ReplyCountPage, ReplyCountRequest, Result } from './api'
 import type { CountCore, CountInput, CountTicket, CountView } from './reply-count-core'
+import { observeGeneration } from './observe-generation'
 import { backoffCap } from './reconnect'
 import type { createSync } from './sync'
 import type { Replies } from './replies'
@@ -15,7 +16,7 @@ const empty: Readonly<Record<string, number | null>> = Object.freeze({})
 
 /** I/O only: Rust owns authority, deduplication, floors and per-root generations. */
 export function createReplyCounts(sync: Sync, sources: { replies: Replies; topics?: Pick<Topics, 'countMessages' | 'subscribe'> }, options: {
-  api: ReplyCountsApi; onSessionEnded?: () => void; requestTimeoutMs?: number; random?: () => number
+  api: ReplyCountsApi; requestTimeoutMs?: number; random?: () => number
 }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
@@ -106,11 +107,12 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       .then(result => {
         // C6: cancellation/timeout/unwatch does not hide a same-Account-Session late 401.
         if (account !== session) return
-        if (!result.ok && result.kind === 'http' && result.status === 401) { void sync.close(); options.onSessionEnded?.(); return }
-        if (!closed && api.isOrganizationUnavailable(result)) { void sync.unavailable(); return }
+        if (!result.ok && result.kind === 'http' && (api.isSessionEnded(result) || (!closed && api.isOrganizationUnavailable(result)))) {
+          sync.reportAccess(result, sync)
+          return
+        }
         if (!current()) return
-        if (result.ok && !sync.observeHistoryGeneration(result.data.history_generation)) return
-        if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
+        if (observeGeneration(sync, result, data => ({ generation: data.history_generation })) === 'stale') return
         clearTimeout(batch.timeout); c.batch = undefined
         update(c, { type: 'failed', tickets })
         if (result.ok && result.data.as_of_seq < (sync.get().channels[id]?.moveSeq ?? 0)) {
@@ -140,7 +142,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
             c.expired.add(t.root)
           }
           recover(c, false)
-        } else if (result.kind === 'http' && [403, 404].includes(result.status)) {
+        } else if (api.isChannelDenial(result, { statuses: [403, 404] })) {
           void sync.channelUnavailable(id)
         } else if (result.kind === 'network' || (result.kind === 'http' && (result.status >= 500 || result.status === 429))) backoff(c, result.retryAfterMs)
         else c.stopped = true

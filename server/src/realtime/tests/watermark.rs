@@ -1,18 +1,7 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, poll_until, wait_blocked};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-async fn lock_waiters(pool: &PgPool, holder: i32) -> i64 {
-    sqlx::query_scalar(
-        "SELECT count(*) FROM pg_locks waiter JOIN pg_locks holder \
-         USING (locktype, database, classid, objid, objsubid) \
-         WHERE holder.pid = $1 AND holder.granted AND waiter.mode = 'ShareLock' \
-         AND NOT waiter.granted AND waiter.locktype = 'advisory'",
-    )
-    .bind(holder)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
+use tokio::sync::Semaphore;
 
 async fn http_json(
     address: std::net::SocketAddr,
@@ -100,13 +89,13 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     for count in 1..=4 {
         let mut socket = f.server.connect(&f.token).await;
         subscribe(&mut socket, f.channel, 0).await;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while lock_waiters(&pool, pid).await != count {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::Advisory(Advisory::SharedBehind(pid)),
+            Count::Exactly(count),
+            Duration::from_secs(2),
+        )
+        .await;
         waiting.push(socket);
     }
 
@@ -219,7 +208,12 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         "fault phase must finish within 8s since FIRST admission, before any 10s waiter deadline: {:?}",
         first_admission.elapsed()
     );
-    assert_eq!(lock_waiters(&pool, pid).await, 4);
+    assert_eq!(
+        Blocked::Advisory(Advisory::SharedBehind(pid))
+            .count(&pool)
+            .await,
+        4
+    );
     assert!(
         sending.try_join_next().is_none(),
         "send waiters must remain queued until COMMIT resolves"
@@ -376,10 +370,10 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
             .take_watermark_events(&f.state.pool);
         let target = channel(&pool, f.organization, f.member, false).await;
         let mut socket = f.server.connect(&f.token).await;
-        let gate = confirmation.then(|| pause(target));
+        let gate = confirmation.then(|| hooks::register_replay(target));
         if let Some(gate) = &gate {
             subscribe(&mut socket, target, 0).await;
-            entered(gate).await;
+            gate.entered().await;
         }
         let mut held = Vec::new();
         for index in 0..if global { 8 } else { 4 } {
@@ -400,7 +394,7 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
         // No SQL or COMMIT is blocked: only admission can reject this socket.
         // Keep every permit until after Close, so host speed cannot release it.
         if let Some(gate) = gate {
-            gate.release.add_permits(1);
+            gate.release();
         } else {
             subscribe(&mut socket, target, 0).await;
         }
@@ -506,10 +500,8 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
             });
         }
         if round == 0 {
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while sleeping_commits(&pool).await.is_empty() {
-                    tokio::task::yield_now().await;
-                }
+            poll_until(Duration::from_secs(2), async || {
+                (!sleeping_commits(&pool).await.is_empty()).then_some(())
             })
             .await
             .unwrap();
@@ -716,23 +708,16 @@ async fn sixteen_concurrent_sends_leave_reserved_capacity_for_new_subscription(p
         });
     }
     barrier.wait().await;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let committing: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
-                 AND query = 'COMMIT' AND wait_event = 'PgSleep'",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            if committing >= 8 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::EventQuery {
+            event: "PgSleep",
+            query: "COMMIT",
+        },
+        Count::AtLeast(8),
+        Duration::from_secs(2),
+    )
+    .await;
     assert!(sends.try_join_next().is_none());
     // With the former shared budget all 16 slots stay occupied for >1 s,
     // so this subscription closes with 1011 instead of confirming.

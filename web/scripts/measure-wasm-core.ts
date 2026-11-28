@@ -12,12 +12,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { components } from '../src/api-schema.d.ts'
 import {
   MAIN_MESSAGE_LIMIT, REPLY_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT, TOTAL_MESSAGE_LIMIT,
-  type Effect, type Input, type State,
+  type Input, type SyncCore, type SyncView,
 } from '../src/protocol-types.ts'
-import { aggregateDirectory, nearestRank, olsSlope, type Arm } from './aggregate-wasm-core.ts'
-import { fixtureUuid, normalizeInput } from './client-core-ids.ts'
-import { loadClientScenarios, makeProtocolClient } from './measure-fixture-client.ts'
-import { partitionScenarios, runClientScenario } from './realtime-fixtures.ts'
+import { aggregateDirectory, type Arm } from './aggregate-wasm-core.ts'
+import { FIXTURE_GENERATION, fixtureUuid } from './client-core-ids.ts'
+import { measureReceivePath, type BulkTimer, type ReplayRuntime } from './measure-receive-path.ts'
+import { nearestRank, olsSlope, summarizeSamples } from './measure-stats.ts'
+import { buildMixedTraces } from './mixed-traces.ts'
+import { BULK_CASES, type BulkCase } from './receive-cases.ts'
+
+export type { SyncCore } from '../src/protocol-types.ts'
 
 type Message = components['schemas']['Message']
 type MessagePage = components['schemas']['MessagePage']
@@ -27,15 +31,6 @@ type TopicSummaryResponse = components['schemas']['TopicSummaryResponse']
 type ReplyChainPage = components['schemas']['ReplyChainPage']
 type SendMessageRequest = components['schemas']['SendMessageRequest']
 type OkResult<T> = { ok: true; data: T } | { ok: false; kind: 'network' }
-type SyncView = Omit<State, 'requests' | 'timers'>
-type CoreResult = { effects: Effect[]; changedChannels: ReadonlySet<string>; records: ReadonlyMap<string, Message[]>; stateChanged: boolean }
-export interface SyncCore {
-  get(): SyncView
-  request(id: number): State['requests'][number] | undefined
-  timer(id: number): State['timers'][number] | undefined
-  hasPending(): boolean
-  step(input: Input): CoreResult
-}
 type SocketHandlers = {
   onReady(): void
   onEvent(ev: Extract<import('../src/api-schema.d.ts').ServerEvent, { type: 'message' | 'subscribed' }>): void
@@ -90,7 +85,7 @@ function makeMessage(seq: number, channelUuid: string, opts?: {
   sender?: string; clientMessageId?: string; bodyText?: string; mention?: boolean
   topicId?: string | null; replyTo?: string | null; replyRootId?: string | null
 }): Message {
-  return { history_generation: '00000000-0000-4000-8000-000000000515',
+  return { history_generation: FIXTURE_GENERATION,
     id: fixtureUuid(`${channelUuid}-msg-${seq}`), channel_id: channelUuid, created_seq: seq, version: seq, deleted: false,
     sender: opts?.sender ?? OTHER_UUID, client_message_id: opts?.clientMessageId ?? fixtureUuid(`${channelUuid}-cid-${seq}`),
     body: opts?.bodyText ?? body155(seq, channelUuid), created_at: '2026-01-01T00:00:00Z',
@@ -126,143 +121,6 @@ function assertG3CatchUpComplete(view: SyncView, channelId: string, expectedHigh
   }
 }
 
-const summarizeSamples = (samples: number[]) => ({
-  p50: Number(nearestRank(samples, 50).toFixed(3)),
-  p95: Number(nearestRank(samples, 95).toFixed(3)),
-  p99: Number(nearestRank(samples, 99).toFixed(3)),
-})
-
-function buildMixedTraces(driver: Pick<typeof import('../src/protocol-driver.ts'), 'initialState' | 'step'>): { id: string; inputs: Input[] }[] {
-  const { initialState, step } = driver
-  const scenarios = loadClientScenarios()
-  const rec = (seq: number, channel = 'A'): Message => ({ history_generation: '00000000-0000-4000-8000-000000000515',
-    mentions: [], channel_id: channel, created_seq: seq, version: seq, deleted: false, body: `m${seq}`, id: `id${seq}`, sender: 'other',
-    client_message_id: `auto-${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null, reply_to: null, reply_root_id: null,
-  })
-  function makeRecorder(id: string) {
-    let state = initialState(SELF_UUID)
-    const inputs: Input[] = []
-    const feed = (raw: Input): Effect[] => {
-      const norm = normalizeInput(raw); inputs.push(norm)
-      const res = step(state, norm); state = res.state; return res.effects
-    }
-    return { id, inputs, feed, get: () => state }
-  }
-  const traces: { id: string; inputs: Input[] }[] = []
-  for (const scenario of partitionScenarios(scenarios).running.filter((s) => s.layer !== 'controller')) {
-    const d = makeRecorder(scenario.id)
-    const errs = runClientScenario(scenario, makeProtocolClient(d.feed, driver))
-    if (errs.length > 0) throw new Error(`Fixture ${scenario.id} failed: ${errs.join('; ')}`)
-    traces.push({ id: d.id, inputs: d.inputs })
-  }
-  {
-    const d = makeRecorder('retention-ranges-and-reference-identity')
-    d.feed({ type: 'session_start', selfId: 'me' })
-    const connection = d.get().connection!
-    d.feed({ type: 'connection_ready', connection })
-    const channel = 'A', view = () => d.get().channels[fixtureUuid(channel)]
-    const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (rec(seq)).created_seq, message: rec(seq) } })
-    const page = (request: number, start: number, length: number) =>
-      d.feed({ type: 'history_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: start + length - 1,  messages: Array.from({ length }, (_, i) => rec(start + i)), has_more: true } })
-    // After-cursor fills answer with Channel events since #515 slice 3; only events advance the cursor.
-    const fill = (request: number, start: number, length: number) =>
-      d.feed({ type: 'events_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: true,
-        events: Array.from({ length }, (_, i) => ({ type: 'message' as const, kind: 'create' as const, seq: start + i, message: rec(start + i) })) } })
-    d.feed({ type: 'watch', channel }); page(view().latest!, 1, 200)
-    d.feed({ type: 'event', connection, subscription: -1, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
-    d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
-    for (let i = 0; i < 425; i++) event(202 + i * 2)
-    d.feed({ type: 'timer_elapsed', id: view().wait! })
-    while (view().fill !== undefined) fill(view().fill!, view().cursor! + 1, 200)
-    if (view().cursor! < 1050 || view().forgottenThrough !== undefined) throw new Error(`Retention trace did not catch up: cursor=${view().cursor}`)
-    for (let seq = view().cursor! + 1, end = seq + 450; seq < end; seq++) event(seq)
-    const duplicate = rec(view().cursor!)
-    d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
-    d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
-    d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate }, refreshMentionNames: true })
-    for (const name of ['Retained', 'Retained', 'Renamed']) {
-      d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: ({ ...duplicate, mentions: [{ member_id: 'target', name }] }).created_seq, message: { ...duplicate, mentions: [{ member_id: 'target', name }] } } })
-    }
-    d.feed({ type: 'load_older', channel }); page(view().older!, 1, 200); d.feed({ type: 'refresh', channel })
-    d.feed({ type: 'history_result', request: view().latest!, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1901,  messages: [rec(1901), rec(1900), { ...rec(1901), body: 'canonical' }], has_more: false } })
-    d.feed({ type: 'user_send', channel, clientMessageId: 'reply', body: 'pending', reply_to: 'parent', replyRootId: 'root' })
-    d.feed({ type: 'user_send', channel, clientMessageId: 'reply', body: 'same key' }); d.feed({ type: 'unwatch', channel })
-    for (const ch of ['B', 'C', 'D', 'E', 'F', 'G', 'H']) {
-      d.feed({ type: 'watch', channel: ch })
-      const c = d.get().channels[fixtureUuid(ch)]
-      d.feed({ type: 'history_result', request: c.latest!, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 200,  messages: Array.from({ length: 200 }, (_, i) => rec(i + 1, ch)), has_more: true } })
-      d.feed({ type: 'unwatch', channel: ch })
-    }
-    d.feed({ type: 'watch', channel })
-    d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 2 } })
-    traces.push({ id: d.id, inputs: d.inputs })
-  }
-  for (const seed of [1, 42, 464, 0xdeadbeef]) {
-    const d = makeRecorder(`generated-${seed}`)
-    let rng = seed
-    const random = (n: number) => { rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0; return rng % n }
-    const channels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
-    const boot = () => {
-      d.feed({ type: 'session_start', selfId: 'me' }); d.feed({ type: 'connection_ready', connection: d.get().connection! })
-      for (const ch of channels) {
-        const req = d.feed({ type: 'watch', channel: ch }).find((e) => e.type === 'fetch_history')!
-        if (req.type !== 'fetch_history') throw new Error('missing bootstrap')
-        d.feed({ type: 'history_result', request: req.id, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 200,  messages: Array.from({ length: 200 }, (_, i) => rec(i + 1, ch)), has_more: true } })
-        d.feed({ type: 'event', connection: d.get().connection!, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: ch, caught_up_seq: 200 } })
-      }
-    }
-    boot()
-    for (let index = 0; index < 1600; index++) {
-      const state = d.get(), ch = channels[random(channels.length)], c = state.channels[fixtureUuid(ch)]
-      const requests = Object.entries(state.requests), request = requests[random(requests.length)], timers = Object.keys(state.timers)
-      const pending = c?.pending[random(c.pending.length)], connection = state.connection ?? 999_999
-      const seq = random(3) === 0 ? (c?.cursor ?? 200) + 1 : 1 + random(1300)
-      const message = {
-        ...rec(seq, ch), ...(random(4) === 0 ? { sender: 'me', client_message_id: pending?.clientMessageId ?? 'c1' } : {}),
-        mentions: random(3) === 0 ? [{ member_id: 'mention', name: `name${random(3)}` }] : [],
-      }
-      const choices: Input[] = [
-        { type: 'watch', channel: ch }, { type: 'unwatch', channel: ch }, { type: 'refresh', channel: ch },
-        { type: 'load_older', channel: ch }, { type: 'channel_unavailable', channel: ch },
-        { type: 'user_send', channel: ch, clientMessageId: `c${random(4)}`, body: ['hello', '  ', '\ufeff', '\u0085'][random(4)],
-          ...(random(3) === 0 ? { reply_to: 'parent', replyRootId: 'root' } : random(2) === 0 ? { topic_name: 'Topic' } : {}) },
-        { type: 'user_retry', channel: ch, clientMessageId: pending?.clientMessageId ?? 'c1' },
-        { type: 'user_discard', channel: ch, clientMessageId: pending?.clientMessageId ?? 'c1' },
-        { type: 'event', connection, event: { type: 'message', kind: 'create', seq: (message).created_seq, message }, ...(random(5) === 0 ? { refreshMentionNames: true } : {}) },
-        { type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: ch, caught_up_seq: random(500) }, ...(random(3) === 0 ? { subscription: 99999 } : {}) },
-        { type: 'event', connection, event: { type: 'error', channel_id: ch, code: ['channel_not_found', 'subscription_limit', 'unknown'][random(3)] } },
-        { type: 'event', connection, event: { type: 'channel_access_lost', channel_id: ch } },
-        { type: 'settle_history', channel: ch, messages: [message] },
-        { type: 'connection_ready', connection },
-        { type: 'timer_elapsed', id: timers.length ? Number(timers[random(timers.length)]) : 99999 },
-      ]
-      if (request) {
-        const [token, r] = request
-        if (r.type === 'history') {
-          const hasMore = random(2) === 0
-          const messages = Array.from({ length: random(8) }, (_, i) => ({ ...rec((r.seq ?? 190) + i + 1, r.channel), ...(random(5) === 0 ? { sender: 'me', client_message_id: 'c1' } : {}) }))
-          choices.push(r.page === 'after'
-            ? { type: 'events_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: hasMore,
-              events: messages.map((m) => ({ type: 'message' as const, kind: 'create' as const, seq: m.created_seq, message: m })) } }
-            : { type: 'history_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: messages.at(-1)?.created_seq ?? 0, messages, has_more: hasMore } })
-          choices.push({ type: 'history_failed', request: Number(token), status: [401, 403, 404, 500, 'network', 'timeout'][random(6)] as 401 })
-        } else {
-          choices.push({ type: 'ack', request: Number(token), message: { ...message, channel_id: r.channel, sender: 'me', client_message_id: r.clientMessageId } })
-          choices.push({ type: 'send_failed', request: Number(token), status: [400, 401, 403, 404, 409, 413, 415, 429, 503, 'network', 'timeout'][random(11)] as 400,
-            retryAfterMs: [0, 1000.5, 2000, Number.MAX_SAFE_INTEGER, 1e16][random(5)], error: 'refused' })
-        }
-      }
-      if (index % 71 === 0) d.feed({ type: 'socket_closed', connection, code: [1006, 4008, 4029, 4001, 4003][random(5)] })
-      else if (index % 127 === 0) d.feed({ type: 'organization_unavailable' })
-      else if (index % 173 === 0) { d.feed({ type: 'stop' }); d.feed({ type: 'stop' }); boot() }
-      else if (index % 89 === 0 || !state.running) { d.feed({ type: 'session_replaced', selfId: 'me' }); d.feed({ type: 'connection_ready', connection: d.get().connection! }) }
-      else d.feed(choices[random(choices.length)])
-    }
-    traces.push({ id: d.id, inputs: d.inputs })
-  }
-  return traces
-}
-
 function bootstrapGridCore(createCoreFn: (selfId: string) => SyncCore, channelsCount: number, messagesPerChannel: number) {
   const core = createCoreFn(SELF_UUID)
   const connId = (core.step({ type: 'session_start', selfId: SELF_UUID }).effects.find((e) => e.type === 'connect') as { id: number }).id
@@ -271,20 +129,20 @@ function bootstrapGridCore(createCoreFn: (selfId: string) => SyncCore, channelsC
   for (let i = channelsCount - 1; i >= 1; i--) {
     const ch = channelUuids[i]
     const histId = (core.step({ type: 'watch', channel: ch }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
-    core.step({ type: 'history_result', request: histId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 50,  messages: Array.from({ length: 50 }, (_, m) => makeMessage(m + 1, ch)), has_more: false } })
-    core.step({ type: 'event', connection: connId, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: ch, caught_up_seq: 50 } })
+    core.step({ type: 'history_result', request: histId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: 50,  messages: Array.from({ length: 50 }, (_, m) => makeMessage(m + 1, ch)), has_more: false } })
+    core.step({ type: 'event', connection: connId, event: { history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: ch, caught_up_seq: 50 } })
     if (messagesPerChannel === 400 || i >= 8) core.step({ type: 'unwatch', channel: ch })
   }
   const c0 = channelUuids[0]
   const h0Id = (core.step({ type: 'watch', channel: c0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
   if (messagesPerChannel <= 200) {
-    core.step({ type: 'history_result', request: h0Id, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: messagesPerChannel,  messages: Array.from({ length: messagesPerChannel }, (_, m) => makeMessage(m + 1, c0)), has_more: true } })
+    core.step({ type: 'history_result', request: h0Id, page: { history_generation: FIXTURE_GENERATION, as_of_seq: messagesPerChannel,  messages: Array.from({ length: messagesPerChannel }, (_, m) => makeMessage(m + 1, c0)), has_more: true } })
   } else {
-    core.step({ type: 'history_result', request: h0Id, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 400,  messages: Array.from({ length: 200 }, (_, m) => makeMessage(201 + m, c0)), has_more: true } })
+    core.step({ type: 'history_result', request: h0Id, page: { history_generation: FIXTURE_GENERATION, as_of_seq: 400,  messages: Array.from({ length: 200 }, (_, m) => makeMessage(201 + m, c0)), has_more: true } })
     const olderId = (core.step({ type: 'load_older', channel: c0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
-    core.step({ type: 'history_result', request: olderId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 400,  messages: Array.from({ length: 200 }, (_, m) => makeMessage(1 + m, c0)), has_more: true } })
+    core.step({ type: 'history_result', request: olderId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: 400,  messages: Array.from({ length: 200 }, (_, m) => makeMessage(1 + m, c0)), has_more: true } })
   }
-  core.step({ type: 'event', connection: connId, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: c0, caught_up_seq: messagesPerChannel } })
+  core.step({ type: 'event', connection: connId, event: { history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: c0, caught_up_seq: messagesPerChannel } })
   assertG3Step(core.get(), new Map([[c0, messagesPerChannel]]))
   return { core, connId, c0, cursor: messagesPerChannel }
 }
@@ -365,7 +223,7 @@ async function main() {
       makeMessage(seq, ch, { topicId, replyTo: seq > 1 && seq % 3 === 0 ? ROOT_MSG_UUID : null, replyRootId: seq > 1 && seq % 3 === 0 ? ROOT_MSG_UUID : null })
     const summaryResp = (ch: string, topic: string): OkResult<TopicSummaryResponse> => ({
       ok: true,
-      data: { history_generation: '00000000-0000-4000-8000-000000000515',
+      data: { history_generation: FIXTURE_GENERATION,
         as_of_seq: highSeq,
         topic: { id: topic, name: 'T', first_seq: 1, last_seq: highSeq, message_count: highSeq, unread_count: 0, mention_unread_count: 0, read_seq: highSeq, latest_message: makeSynth(highSeq, ch, topic) },
       },
@@ -376,18 +234,18 @@ async function main() {
         async listTimeline(channel, query = {}) {
           const w = query.as_of_seq ?? highSeq, endSeq = Math.min(w, (query.before_position ?? w + 1) - 1), startSeq = Math.max(1, endSeq - 49)
           const items = Array.from({ length: Math.max(0, endSeq - startSeq + 1) }, (_, i) => ({ kind: 'message' as const, message: makeSynth(startSeq + i, channel) }))
-          return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: w, has_more: startSeq > 1, items } }
+          return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: w, has_more: startSeq > 1, items } }
         },
-        async listTopics() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: highSeq, topics: [], has_more: false } } },
+        async listTopics() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: highSeq, topics: [], has_more: false } } },
         async getTopicSummary(channel, topic) { return summaryResp(channel, topic) },
         async listTopicMessages(channel, topic, query = {}) {
           const endSeq = Math.min(highSeq, (query.before_seq ?? highSeq + 1) - 1), startSeq = Math.max(1, endSeq - 49)
           const messages = Array.from({ length: Math.max(0, endSeq - startSeq + 1) }, (_, i) => makeSynth(startSeq + i, channel, topic))
-          return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  messages, has_more: startSeq > 1 } }
+          return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: (messages).at(-1)?.created_seq ?? 0,  messages, has_more: startSeq > 1 } }
         },
       },
       api: {
-        async listMessages() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } } },
+        async listMessages() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: 0,  messages: [], has_more: false } } },
         async sendMessage() { return { ok: false, kind: 'network' } },
       },
       connect(h) { memSocket = h; return { send() {}, close() {} } },
@@ -400,15 +258,15 @@ async function main() {
             const m = makeSynth(startSeq + i, channel)
             return m.created_seq === 1 ? m : { ...m, reply_to: ROOT_MSG_UUID, reply_root_id: ROOT_MSG_UUID }
           })
-          return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0, chain_version: highSeq, root_id: ROOT_MSG_UUID, has_more: startSeq + count <= highSeq, messages } }
+          return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: (messages).at(-1)?.created_seq ?? 0, chain_version: highSeq, root_id: ROOT_MSG_UUID, has_more: startSeq + count <= highSeq, messages } }
         },
       },
     })
     const unread = createUnread(sync, {
       topics,
       api: {
-        async listChannels() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', channels: [], unread_channels: [] } } },
-        async markRead(_s, body) { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: body.read_seq } } },
+        async listChannels() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, channels: [], unread_channels: [] } } },
+        async markRead(_s, body) { return { ok: true, data: { history_generation: FIXTURE_GENERATION, read_seq: body.read_seq } } },
         async getTopicSummary(channel, topic) { return summaryResp(channel, topic) },
       },
     })
@@ -416,11 +274,11 @@ async function main() {
     await sync.start(); memSocket!.onReady()
     for (let s = 0; s < 5; s++) {
       const initOther = fixtureUuid(`mem-init-lru-${s}`)
-      await sync.watch(initOther); memSocket!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: initOther, caught_up_seq: highSeq })
+      await sync.watch(initOther); memSocket!.onEvent({ history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: initOther, caught_up_seq: highSeq })
       for (let k = 1; k <= 50; k++) memSocket!.onEvent({ type: 'message', kind: 'create', seq: (makeSynth(highSeq + k, initOther)).created_seq, message: makeSynth(highSeq + k, initOther) })
       await sync.unwatch(initOther)
     }
-    await sync.watch(chA); memSocket!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: chA, caught_up_seq: highSeq })
+    await sync.watch(chA); memSocket!.onEvent({ history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: chA, caught_up_seq: highSeq })
 
     const checkCaps = () => {
       const syncCount = Object.values(sync.get().channels).reduce((n, ch) => n + ch.messages.length, 0), proj = topics.get(chA)
@@ -457,10 +315,10 @@ async function main() {
       checkCaps(); topics.releaseTopic(chA, TOPIC_T_UUID); replies.dismiss(chA)
       const otherCh = fixtureUuid(`mem-other-${cycle}`)
       await sync.unwatch(chA); await sync.watch(otherCh)
-      memSocket!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: otherCh, caught_up_seq: highSeq })
+      memSocket!.onEvent({ history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: otherCh, caught_up_seq: highSeq })
       for (let k = 1; k <= 100; k++) memSocket!.onEvent({ type: 'message', kind: 'create', seq: (makeSynth(highSeq + k, otherCh)).created_seq, message: makeSynth(highSeq + k, otherCh) })
       await sync.unwatch(otherCh); await sync.watch(chA)
-      memSocket!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: chA, caught_up_seq: highSeq })
+      memSocket!.onEvent({ history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: chA, caught_up_seq: highSeq })
       await topics.loadMainLatest(chA); checkCaps(); sampleMemory(arrivedMessages)
     }
 
@@ -550,12 +408,12 @@ async function main() {
         })
         for (let i = 0; i < warmupSteps; i++) {
           const reqId = (core.step({ type: 'refresh', channel: c0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
-          core.step({ type: 'history_result', request: reqId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: cursor,  messages: page(i), has_more: true } })
+          core.step({ type: 'history_result', request: reqId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: cursor,  messages: page(i), has_more: true } })
         }
         const samples: number[] = []
         for (let i = 0; i < gridSteps; i++) {
           const reqId = (core.step({ type: 'refresh', channel: c0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
-          const histInput: Input = { type: 'history_result', request: reqId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: cursor,  messages: page(warmupSteps + i), has_more: true } }
+          const histInput: Input = { type: 'history_result', request: reqId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: cursor,  messages: page(warmupSteps + i), has_more: true } }
           const t0 = performance.now(), r = core.step(histInput); samples.push((performance.now() - t0) * 1000)
           if (!r.changedChannels.has(c0)) throw new Error('history_50 page did not change the Channel')
           assertG3Step(core.get(), new Map([[c0, cursor]]))
@@ -567,8 +425,8 @@ async function main() {
     }
   }
 
-  const driver = await import('../src/protocol-driver.ts')
-  const mixedTraces = buildMixedTraces(driver)
+  const driver = await import('../src/protocol-driver-test-helpers.ts')
+  const mixedTraces = buildMixedTraces(SELF_UUID, driver)
   const totalTraceSteps = mixedTraces.reduce((acc, t) => acc + t.inputs.length, 0)
   if (totalTraceSteps <= 6000) throw new Error(`Expected >6000 trace steps, got ${totalTraceSteps}`)
   { const warmCore = createSelectedCore(SELF_UUID); for (const input of mixedTraces[0].inputs.slice(0, warmupSteps)) warmCore.step(input) }
@@ -599,7 +457,7 @@ async function main() {
     let socketHandlers: SocketHandlers | undefined, sendSeqCounter = 0, lastSentMessage: Message | undefined
     const topicSummary = (topicId: string): OkResult<TopicSummaryResponse> => ({
       ok: true,
-      data: { history_generation: '00000000-0000-4000-8000-000000000515',
+      data: { history_generation: FIXTURE_GENERATION,
         as_of_seq: 200,
         topic: { id: topicId, name: 'Topic', first_seq: 1, last_seq: 200, message_count: 1, unread_count: 0, mention_unread_count: 0, read_seq: 200, latest_message: makeMessage(200, channelIds[0], { topicId }) },
       },
@@ -609,7 +467,7 @@ async function main() {
       api: {
         async listMessages(ch) {
           const count = ch === channelIds[0] ? 200 : 50; cursors.set(ch, count)
-          return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: count,  messages: Array.from({ length: count }, (_, m) => makeMessage(m + 1, ch)), has_more: false } }
+          return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: count,  messages: Array.from({ length: count }, (_, m) => makeMessage(m + 1, ch)), has_more: false } }
         },
         async sendMessage(ch, body) {
           const nextSeq = (cursors.get(ch) ?? 0) + 1; cursors.set(ch, nextSeq)
@@ -621,24 +479,24 @@ async function main() {
     })
     const topics = createTopics(sync, {
       api: {
-        async listTimeline() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 200, items: [], has_more: false } } },
-        async listTopics() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 200, topics: [], has_more: false } } },
+        async listTimeline() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: 200, items: [], has_more: false } } },
+        async listTopics() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: 200, topics: [], has_more: false } } },
         async getTopicSummary(_ch, topicId) { return topicSummary(topicId) },
-        async listTopicMessages() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } } },
+        async listTopicMessages() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: 0,  messages: [], has_more: false } } },
       },
     })
-    const replies = createReplies(sync, { api: { async listReplyChain() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, chain_version: 1, root_id: ROOT_MSG_UUID, messages: [], has_more: false } } } } })
+    const replies = createReplies(sync, { api: { async listReplyChain() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, as_of_seq: 0, chain_version: 1, root_id: ROOT_MSG_UUID, messages: [], has_more: false } } } } })
     const unread = createUnread(sync, {
       topics,
       api: {
-        async listChannels() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', channels: [], unread_channels: [] } } },
-        async markRead(_s, body) { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: body.read_seq } } },
+        async listChannels() { return { ok: true, data: { history_generation: FIXTURE_GENERATION, channels: [], unread_channels: [] } } },
+        async markRead(_s, body) { return { ok: true, data: { history_generation: FIXTURE_GENERATION, read_seq: body.read_seq } } },
         async getTopicSummary(_ch, topicId) { return topicSummary(topicId) },
       },
     })
 
     await sync.start(); socketHandlers!.onReady()
-    for (const ch of channelIds) { await sync.watch(ch); socketHandlers!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: ch, caught_up_seq: cursors.get(ch)! }) }
+    for (const ch of channelIds) { await sync.watch(ch); socketHandlers!.onEvent({ history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: ch, caught_up_seq: cursors.get(ch)! }) }
     assertG3Step(sync.get(), cursors)
 
     const dispatchOne = async (idx: number) => {
@@ -723,20 +581,19 @@ async function main() {
   // Only core.step() is timed; get() returns the cached view, and the G3 scans run between steps outside the timer.
   const timedPlain = <T>(acc: { ms: number }, fn: () => T): T => { const t0 = performance.now(), r = fn(); acc.ms += performance.now() - t0; return r }
   const bulkWarmup = smoke ? 3 : 30, bulkReps = smoke ? 5 : 100, bulkC0 = fixtureUuid('bulk-C0')
-  type BulkTimer = <T>(acc: { ms: number }, fn: () => T) => T
   function runBulkHistory8x50(create = createSelectedCore, timed: BulkTimer = timedPlain): number {
     const core = create(SELF_UUID)
     const connId = (core.step({ type: 'session_start', selfId: SELF_UUID }).effects.find((e) => e.type === 'connect') as { id: number }).id
     core.step({ type: 'connection_ready', connection: connId })
     const latestId = (core.step({ type: 'watch', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
-    core.step({ type: 'history_result', request: latestId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 401,  messages: [makeMessage(401, bulkC0)], has_more: true } })
-    core.step({ type: 'event', connection: connId, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: bulkC0, caught_up_seq: 401 } })
+    core.step({ type: 'history_result', request: latestId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: 401,  messages: [makeMessage(401, bulkC0)], has_more: true } })
+    core.step({ type: 'event', connection: connId, event: { history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: bulkC0, caught_up_seq: 401 } })
     const pages = Array.from({ length: 8 }, (_, p) => Array.from({ length: 50 }, (__, m) => makeMessage(400 - (p + 1) * 50 + 1 + m, bulkC0)))
     const acc = { ms: 0 }
     for (let p = 0; p < 8; p++) {
       const olderEff = timed(acc, () => core.step({ type: 'load_older', channel: bulkC0 })).effects; assertG3Step(core.get(), new Map([[bulkC0, 401]]))
       const reqId = (olderEff.find((e) => e.type === 'fetch_history') as { id: number }).id
-      timed(acc, () => core.step({ type: 'history_result', request: reqId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (pages[p]).at(-1)?.created_seq ?? 0,  messages: pages[p], has_more: p < 7 } })); assertG3Step(core.get(), new Map([[bulkC0, 401]]))
+      timed(acc, () => core.step({ type: 'history_result', request: reqId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: (pages[p]).at(-1)?.created_seq ?? 0,  messages: pages[p], has_more: p < 7 } })); assertG3Step(core.get(), new Map([[bulkC0, 401]]))
     }
     const elapsed = acc.ms
     if (core.get().channels[bulkC0].messages.length !== MAIN_MESSAGE_LIMIT) throw new Error('Expected 400 messages after 8x50')
@@ -749,9 +606,9 @@ async function main() {
     const latestId = (core.step({ type: 'watch', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
     const page1 = Array.from({ length: 200 }, (_, m) => makeMessage(201 + m, bulkC0)), page2 = Array.from({ length: 200 }, (_, m) => makeMessage(1 + m, bulkC0))
     const acc = { ms: 0 }
-    timed(acc, () => core.step({ type: 'history_result', request: latestId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (page1).at(-1)?.created_seq ?? 0,  messages: page1, has_more: true } })); assertG3Step(core.get(), new Map([[bulkC0, 400]]))
+    timed(acc, () => core.step({ type: 'history_result', request: latestId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: (page1).at(-1)?.created_seq ?? 0,  messages: page1, has_more: true } })); assertG3Step(core.get(), new Map([[bulkC0, 400]]))
     const olderId = (timed(acc, () => core.step({ type: 'load_older', channel: bulkC0 })).effects.find((e) => e.type === 'fetch_history') as { id: number }).id; assertG3Step(core.get(), new Map([[bulkC0, 400]]))
-    timed(acc, () => core.step({ type: 'history_result', request: olderId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (page2).at(-1)?.created_seq ?? 0,  messages: page2, has_more: false } }))
+    timed(acc, () => core.step({ type: 'history_result', request: olderId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: (page2).at(-1)?.created_seq ?? 0,  messages: page2, has_more: false } }))
     const elapsed = acc.ms; assertG3CatchUpComplete(core.get(), bulkC0, 400, MAIN_MESSAGE_LIMIT)
     return Number(elapsed.toFixed(4))
   }
@@ -760,8 +617,8 @@ async function main() {
     const conn1 = (core.step({ type: 'session_start', selfId: SELF_UUID }).effects.find((e) => e.type === 'connect') as { id: number }).id
     core.step({ type: 'connection_ready', connection: conn1 })
     const latestId = (core.step({ type: 'watch', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id, baseCursor = 100
-    core.step({ type: 'history_result', request: latestId, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 100,  messages: Array.from({ length: 100 }, (_, m) => makeMessage(1 + m, bulkC0)), has_more: false } })
-    core.step({ type: 'event', connection: conn1, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: bulkC0, caught_up_seq: baseCursor } })
+    core.step({ type: 'history_result', request: latestId, page: { history_generation: FIXTURE_GENERATION, as_of_seq: 100,  messages: Array.from({ length: 100 }, (_, m) => makeMessage(1 + m, bulkC0)), has_more: false } })
+    core.step({ type: 'event', connection: conn1, event: { history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: bulkC0, caught_up_seq: baseCursor } })
     if (totalMessages === 1000) {
       for (let i = 0; i < 405; i++) core.step({ type: 'event', connection: conn1, event: { type: 'message', kind: 'create', seq: (makeMessage(baseCursor + 2 + i * 2, bulkC0)).created_seq, message: makeMessage(baseCursor + 2 + i * 2, bulkC0) } })
       if (!core.get().channels[bulkC0].forgottenThrough) throw new Error('Expected forgottenThrough before 1000 catch-up')
@@ -772,13 +629,13 @@ async function main() {
     const pageCount = totalMessages / 50, highWaterSeq = baseCursor + totalMessages
     const pages = Array.from({ length: pageCount }, (_, p) => Array.from({ length: 50 }, (__, m) => makeMessage(baseCursor + p * 50 + 1 + m, bulkC0)))
     const acc = { ms: 0 }
-    let subEff = timed(acc, () => core.step({ type: 'event', connection: conn2, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: bulkC0, caught_up_seq: highWaterSeq } })).effects
+    let subEff = timed(acc, () => core.step({ type: 'event', connection: conn2, event: { history_generation: FIXTURE_GENERATION, type: 'subscribed', channel_id: bulkC0, caught_up_seq: highWaterSeq } })).effects
     assertG3Step(core.get())
     for (let p = 0; p < pageCount; p++) {
       const fillReq = subEff.find((e) => e.type === 'fetch_history' && e.page === 'after') as { id: number } | undefined
       if (!fillReq) throw new Error(`Missing after_seq fill request at page ${p}`)
       // After-cursor fill answers with Channel events since #515 slice 3; only events advance the cursor.
-      subEff = timed(acc, () => core.step({ type: 'events_result', request: fillReq.id, page: { history_generation: '00000000-0000-4000-8000-000000000515',
+      subEff = timed(acc, () => core.step({ type: 'events_result', request: fillReq.id, page: { history_generation: FIXTURE_GENERATION,
         events: pages[p].map((message) => ({ type: 'message' as const, kind: 'create' as const, seq: message.created_seq, message })), has_more: p < pageCount - 1 } })).effects
       assertG3Step(core.get(), new Map([[bulkC0, baseCursor + (p + 1) * 50]]))
     }
@@ -787,13 +644,19 @@ async function main() {
     return Number(elapsed.toFixed(4))
   }
 
-  for (const [subCase, fn] of [
-    ['history_8x50', runBulkHistory8x50], ['history_2x200', runBulkHistory2x200],
-    ['catchup_250', () => runBulkCatchup(250)], ['catchup_1000', () => runBulkCatchup(1000)],
-  ] as const) {
-    for (let w = 0; w < bulkWarmup; w++) { fn(); await releaseCores() }
+  function runBulk(subCase: BulkCase, create = createSelectedCore, timed = timedPlain): number {
+    switch (subCase) {
+      case 'history_8x50': return runBulkHistory8x50(create, timed)
+      case 'history_2x200': return runBulkHistory2x200(create, timed)
+      case 'catchup_250': return runBulkCatchup(250, create, timed)
+      case 'catchup_1000': return runBulkCatchup(1000, create, timed)
+    }
+  }
+
+  for (const subCase of BULK_CASES) {
+    for (let w = 0; w < bulkWarmup; w++) { runBulk(subCase); await releaseCores() }
     const samples: number[] = []
-    for (let r = 0; r < bulkReps; r++) { samples.push(fn()); await releaseCores() }
+    for (let r = 0; r < bulkReps; r++) { samples.push(runBulk(subCase)); await releaseCores() }
     emit({ type: 'bulk_receipt', arm, core: coreKind, round, subCase, repetitions: bulkReps, unit: 'ms', samples, ...summarizeSamples(samples) })
   }
 
@@ -802,115 +665,17 @@ async function main() {
   const receiveProbe = (await import(pathToFileURL(resolve(webDir, 'scripts/receive-probe-core.ts')).href)) as typeof import('./receive-probe-core.ts')
   const variant = async <T>(path: string, name: 'prod' | 'probe') => (await import(`${pathToFileURL(resolve(webDir, path)).href}?${name}`)) as T
   const createProdCore = (await variant<{ createCore: (selfId: string) => SyncCore }>('src/core-wasm.ts', 'prod')).createCore
-  const timedProbe = <T>(acc: { ms: number }, fn: () => T): T => {
-    receiveProbe.probe.armed = true
-    const t0 = performance.now(), r = fn(); acc.ms += performance.now() - t0
-    receiveProbe.probe.armed = false
-    return r
-  }
-  type CoreFactory = (selfId: string) => SyncCore
-  const a1Cases = [
-    ['history_8x50', (create: CoreFactory, time: BulkTimer) => runBulkHistory8x50(create, time)],
-    ['history_2x200', (create: CoreFactory, time: BulkTimer) => runBulkHistory2x200(create, time)],
-    ['catchup_250', (create: CoreFactory, time: BulkTimer) => runBulkCatchup(250, create, time)],
-    ['catchup_1000', (create: CoreFactory, time: BulkTimer) => runBulkCatchup(1000, create, time)],
-  ] as const
-  for (const [subCase, fn] of a1Cases) {
-    const plain: number[] = [], probed: Array<{ total: number; input: number; wasm: number; output: number; steps: number }> = []
-    for (let r = 0; r < bulkWarmup + bulkReps; r++) {
-      const plainMs = fn(createProdCore, timedPlain); await releaseCores()
-      receiveProbe.resetParts()
-      const total = fn(receiveProbe.createCore, timedProbe), { input, wasm, output, steps } = receiveProbe.parts
-      await releaseCores()
-      if (steps === 0) throw new Error(`A1 ${subCase}: no probed step`)
-      if (r >= bulkWarmup) { plain.push(plainMs); probed.push({ total, input, wasm, output, steps }) }
-    }
-    emit({ type: 'receive_a1', arm, core: coreKind, round, subCase, repetitions: bulkReps, unit: 'ms', plain, probed })
-  }
-
-  type RealtimeHandlers = { onReady(): void; onEvent(event: unknown): void; onClose(code: number): void }
-  type ReplaySocket = { send(data: string): void; close(): void; onopen: (() => void) | null; onmessage: ((e: { data: unknown }) => void) | null; onclose: ((e: { code: number }) => void) | null }
-  type ReplaySyncFn = (opts: {
-    selfId: string; newId?: () => string
-    api: Parameters<CreateSyncFn>[0]['api'] & { listChannelEvents(ch: string, q: unknown): Promise<OkResult<components['schemas']['ChannelEventPage']>> }
-    connect(h: RealtimeHandlers): { send(message: unknown): void; close(): void }
-  }) => Omit<SyncInstance, 'getTimeline'> & { getTimeline(ch: string): { subscribe(listener: () => void): () => void } }
-  const { connectRealtime } = (await import(pathToFileURL(resolve(webDir, 'src/realtime.ts')).href)) as {
-    connectRealtime(handlers: RealtimeHandlers, open: () => ReplaySocket): { send(message: unknown): void; close(): void }
-  }
-  const createProdSync = (await variant<{ createSync: ReplaySyncFn }>('src/sync.ts', 'prod')).createSync
-  const createProbeSync = (await variant<{ createSync: ReplaySyncFn }>('src/sync.ts', 'probe')).createSync
-  const realParse = JSON.parse
-  type ReplayParts = { total: number; parse: number; validate: number; stepInput: number; wasm: number; output: number; controller: number; steps: number }
-  // One trial: the Channel's base page, then `frameCount` replayed Create frames and `subscribed`, in the S3 order.
-  async function runReplay(frameCount: 250 | 1000, probed: boolean): Promise<ReplayParts | number> {
-    const ch = fixtureUuid('replay-C0'), baseSeq = 100, generation = '00000000-0000-4000-8000-000000000515'
-    let socket: ReplaySocket | undefined, sendSeq = 0, tEvent = 0, events = 0
-    const sent: string[] = []
-    const sync = (probed ? createProbeSync : createProdSync)({
-      selfId: SELF_UUID, newId: () => fixtureUuid(`replay-cid-${++sendSeq}`),
-      api: {
-        async listChannelEvents() { return { ok: true, data: { history_generation: generation, events: [], has_more: false } } },
-        async listMessages() { return { ok: true, data: { history_generation: generation, as_of_seq: baseSeq, messages: Array.from({ length: baseSeq }, (_, m) => makeMessage(m + 1, ch)), has_more: false } } },
-        async sendMessage() { return { ok: false, kind: 'network' } },
-      },
-      connect: h => connectRealtime(probed ? { ...h, onEvent(event) { tEvent = performance.now(); events++; h.onEvent(event) } } : h,
-        () => (socket = { send: d => { sent.push(d) }, close() {}, onopen: null, onmessage: null, onclose: null })),
-    })
-    await sync.start(); socket!.onopen!(); await sync.watch(ch); await delay(0)
-    const subscribe = sent.map((d) => realParse(d) as { type: string; channel_id?: string; after_seq?: number }).find((m) => m.type === 'subscribe' && m.channel_id === ch)
-    if (subscribe?.after_seq !== baseSeq) throw new Error(`A2: expected subscribe after_seq ${baseSeq}, sent ${JSON.stringify(sent)}`)
-    const frames = Array.from({ length: frameCount }, (_, k) => {
-      const message = makeMessage(baseSeq + 1 + k, ch)
-      return JSON.stringify({ type: 'message', kind: 'create', seq: message.created_seq, message })
-    })
-    frames.push(JSON.stringify({ history_generation: generation, type: 'subscribed', channel_id: ch, caught_up_seq: baseSeq + frameCount }))
-    let lastNotify = 0, notifications = 0, parse = 0, validate = 0, armParse = false
-    const unsubscribe = sync.getTimeline(ch).subscribe(() => { lastNotify = performance.now(); notifications++ })
-    // Only the frame's own JSON.parse in realtime.ts is timed: it is the first parse of each onmessage call.
-    const timedParse = ((text: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
-      if (!armParse) return realParse(text, reviver)
-      armParse = false
-      const p0 = performance.now(), value: unknown = realParse(text, reviver); parse += performance.now() - p0
-      return value
-    }) as typeof JSON.parse
-    if (probed) { JSON.parse = timedParse; receiveProbe.resetParts(); receiveProbe.probe.armed = true }
-    const last = frames[frames.length - 1]
-    let beforeLast = -1
-    const t0 = performance.now()
-    try {
-      for (const data of frames) {
-        if (data === last) beforeLast = notifications
-        if (!probed) { socket!.onmessage!({ data }); continue }
-        const f0 = performance.now(), parsedBefore = parse
-        armParse = true; socket!.onmessage!({ data })
-        validate += tEvent - f0 - (parse - parsedBefore)
-      }
-    } finally {
-      receiveProbe.probe.armed = false; JSON.parse = realParse
-    }
-    const total = lastNotify - t0
-    const view = sync.get().channels[ch]
-    if (view?.cursor !== baseSeq + frameCount) throw new Error(`A2: cursor ${view?.cursor} !== ${baseSeq + frameCount}`)
-    assertG3Step(sync.get()); g3CompletionAssertions++
-    // total ends at the last notification, so the final frame must notify or total would miss it.
-    if (notifications <= beforeLast || total <= 0) throw new Error('A2: the final frame sent no view notification')
-    if (probed && events !== frames.length) throw new Error(`A2: ${events} events reached the controller, expected ${frames.length}`)
-    const { input: stepInput, wasm, output, steps } = receiveProbe.parts
-    unsubscribe(); await sync.close()
-    if (!probed) return total
-    return { total, parse, validate, stepInput, wasm, output, controller: total - parse - validate - stepInput - wasm - output, steps }
-  }
-  for (const frameCount of [250, 1000] as const) {
-    const plain: number[] = [], probed: ReplayParts[] = []
-    for (let r = 0; r < bulkWarmup + bulkReps; r++) {
-      const plainMs = await runReplay(frameCount, false); await releaseCores()
-      const parts = await runReplay(frameCount, true); await releaseCores()
-      if (typeof plainMs !== 'number' || typeof parts === 'number') throw new Error('A2: trial kind mismatch')
-      if (r >= bulkWarmup) { plain.push(plainMs); probed.push(parts) }
-    }
-    emit({ type: 'receive_a2', arm, core: coreKind, round, frames: frameCount, repetitions: bulkReps, unit: 'ms', plain, probed })
-  }
+  await measureReceivePath({
+    arm, coreKind, round, bulkWarmup, bulkReps, selfId: SELF_UUID, runBulk, timedPlain,
+    createProdCore, receiveProbe, makeMessage, releaseCores, emit,
+    async loadReplay() {
+      const { connectRealtime } = (await import(pathToFileURL(resolve(webDir, 'src/realtime.ts')).href)) as Pick<ReplayRuntime, 'connectRealtime'>
+      const createProdSync = (await variant<{ createSync: ReplayRuntime['createProdSync'] }>('src/sync.ts', 'prod')).createSync
+      const createProbeSync = (await variant<{ createSync: ReplayRuntime['createProbeSync'] }>('src/sync.ts', 'probe')).createSync
+      return { connectRealtime, createProdSync, createProbeSync }
+    },
+    assertReplay(view) { assertG3Step(view); g3CompletionAssertions++ },
+  })
 
   {
     emit({ type: 'g3_integrity', arm, core: coreKind, round, passed: true, totalStepAssertions: g3StepAssertions, totalRunCompletionAssertions: g3CompletionAssertions })

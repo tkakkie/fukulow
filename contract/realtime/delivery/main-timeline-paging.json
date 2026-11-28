@@ -5,7 +5,7 @@
       "id": "main-timeline-pages-as-of-w-while-posting",
       "title": "Main-timeline pages stay as of W while Messages are posted between pages: no Topic with a Message <= W is missing or repeated, and counts are as of W",
       "covers": ["P2","P5"],
-      "rust": {"existing_tests":["topic_projection_paging_preserves_w_counts_positions_and_unfiltered_holes","topic_paging_many_moved_topics_has_no_loss_or_duplication"],"note":"Runs real HTTP /timeline pages and Topic sends, with canonical Message checks over WebSocket replay."},
+      "rust": {"existing_tests":["server/src/messages/tests/topics/paging.rs::topic_projection_paging_preserves_w_counts_positions_and_unfiltered_holes","server/src/messages/tests/topics/paging.rs::topic_paging_many_moved_topics_has_no_loss_or_duplication"],"note":"Runs real HTTP /timeline pages and Topic sends, with canonical Message checks over WebSocket replay."},
       "setup": {"organizations":["o1"],"members":[{"id":"alice","organization":"o1"}],"channels":[{"id":"general","organization":"o1","visibility":"public","creator":"alice"}]},
       "steps": [
         {"do":"connect","socket":"s","as":"alice"},

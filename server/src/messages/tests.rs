@@ -14,6 +14,7 @@ use tower::ServiceExt;
 mod admission;
 pub(super) mod authors;
 mod channel_log;
+mod create_cutover;
 mod dms_pool;
 pub(super) mod history;
 mod mentions;
@@ -21,6 +22,7 @@ mod move_topic;
 mod page_mentions;
 mod receipts;
 mod replay_plans;
+mod retention;
 mod search;
 mod text_input;
 pub(super) mod unread;
@@ -155,10 +157,14 @@ fn input(client_message_id: Uuid, text: &str) -> Value {
     json!({"client_message_id": client_message_id, "body": text})
 }
 
-// Direct state fixtures used by replay also need their committed Create positions.
-async fn seed_channel_log(pool: &PgPool) {
-    sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages ON CONFLICT DO NOTHING")
-        .execute(pool).await.unwrap();
+// A fixture crossing #620 must first satisfy the schema it upgrades from.
+async fn seed_legacy_creates(pool: &PgPool, org: Uuid, channels: &[Uuid]) {
+    sqlx::query(include_str!("../../../load/channel-log.sql"))
+        .bind(org)
+        .bind(channels)
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 async fn apply_migrations_after(pool: &PgPool, boundary: &str) {
@@ -540,30 +546,25 @@ async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
     channel(&pool, second, channel_id, sender, true).await;
     let client_id = Uuid::new_v4();
     let a = sent(&app, &first_token, channel_id, input(client_id, "first")).await;
-    let mut b = sent(&app, &second_token, channel_id, input(client_id, "second")).await;
-    assert_ne!(a["id"], b["id"]);
-    // This fixture rewrites a canonical id and rebuilds its derived search terms.
-    let original = serde_json::from_value::<Uuid>(b["id"].clone()).unwrap();
+    // Insert the same Message id directly in the second Organization. Its
+    // send identity and creation position are canonical from insertion.
     let shared = serde_json::from_value::<Uuid>(a["id"].clone()).unwrap();
+    sqlx::query(
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $2, 1)",
+    )
+    .bind(second)
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body) VALUES ($1,$2,$3,1,$4,$5,'second')")
+        .bind(second).bind(shared).bind(channel_id).bind(sender).bind(client_id).execute(&pool).await.unwrap();
     crate::database::organization(&pool, second, async |tx: &mut sqlx::PgConnection| {
-        sqlx::query(
-            "DELETE FROM message_search_terms WHERE organization_id = $1 AND message_id = $2",
-        )
-        .bind(second)
-        .bind(original)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("UPDATE messages SET id = $3 WHERE organization_id = $1 AND id = $2")
-            .bind(second)
-            .bind(original)
-            .bind(shared)
-            .execute(&mut *tx)
-            .await?;
         super::search::D3rEngine::insert_terms(tx, second, &[shared]).await
     })
     .await
     .unwrap();
-    b["id"] = a["id"].clone();
+    let b = sent(&app, &second_token, channel_id, input(client_id, "second")).await;
     assert_eq!(
         sent(&app, &second_token, channel_id, input(client_id, "second")).await,
         b
@@ -827,9 +828,15 @@ async fn failed_send_after_sequence_allocation_leaves_no_gap(pool: PgPool) {
         let allocated: Option<i64> = sqlx::query_scalar("SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2")
             .bind(organization_id).bind(channel_id).fetch_optional(&pool).await.unwrap();
         assert_eq!(allocated, if expected == 1 { None } else { Some(1) });
-        let logged: Vec<i64> = sqlx::query_scalar("SELECT event_seq FROM channel_log WHERE organization_id=$1 AND channel_id=$2 ORDER BY event_seq")
-            .bind(organization_id).bind(channel_id).fetch_all(&pool).await.unwrap();
-        assert_eq!(logged, (1..expected).collect::<Vec<_>>());
+        let created: Vec<i64> = sqlx::query_scalar(
+            "SELECT seq FROM messages WHERE organization_id=$1 AND channel_id=$2 ORDER BY seq",
+        )
+        .bind(organization_id)
+        .bind(channel_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(created, (1..expected).collect::<Vec<_>>());
         assert_eq!(
             sent(&app, &token, channel_id, input(Uuid::new_v4(), "success")).await["created_seq"],
             expected
@@ -1019,6 +1026,7 @@ pub(super) mod replies;
 pub(super) mod removal;
 
 mod context;
+
 mod limit;
 mod rls_statements;
 

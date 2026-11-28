@@ -30,12 +30,19 @@ pub(super) fn extract(body: &str) -> Vec<Uuid> {
 // Resolve only persisted ids, in one set-based query over the bounded page.
 // Keeping this inside the page statement also protects single-statement replay
 // and its authorization snapshot. The caller supplies the final page ordering.
+// OFFSET 0 keeps the lookups correlated. All-visible Mention pages can make
+// an index-only probe for every page Message and every Member look cheap.
 pub(super) fn page_sql(page: &str, order: &str) -> String {
     format!(
         "WITH mention_page AS MATERIALIZED ({page}), mention_sets AS (\
          SELECT mm.message_id, jsonb_agg(jsonb_build_object('member_id',mm.member_id,'name',u.name) ORDER BY mm.member_id) AS mentions \
-         FROM mention_page p JOIN message_mentions mm ON mm.organization_id=$1 AND mm.channel_id=p.channel_id AND mm.message_id=p.id AND NOT p.deleted \
-         JOIN ({}) u ON u.organization_id=mm.organization_id AND u.id=mm.member_id \
+         FROM mention_page p CROSS JOIN LATERAL (\
+             SELECT organization_id,message_id,member_id FROM message_mentions \
+             WHERE organization_id=$1 AND channel_id=p.channel_id AND message_id=p.id AND NOT p.deleted OFFSET 0\
+         ) mm CROSS JOIN LATERAL (\
+             SELECT name FROM ({}) identity \
+             WHERE identity.organization_id=mm.organization_id AND identity.id=mm.member_id OFFSET 0\
+         ) u \
          GROUP BY mm.message_id) \
          SELECT p.*, ({}) AS history_generation, COALESCE(ms.mentions,'[]'::jsonb)::text AS mentions \
          FROM mention_page p LEFT JOIN mention_sets ms ON ms.message_id=p.id ORDER BY {order}",

@@ -1,5 +1,6 @@
-use super::context::{clean, pools};
+use crate::database::test_support::{clean, pools};
 use crate::database::{organization_statement, organization_statement_sql};
+use crate::test_support::{Blocked, Count, wait_blocked};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -156,14 +157,13 @@ async fn statement_context_cancelled_during_rls_read_discards_in_each_plan_mode(
             )
             .await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let sleeping: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event='PgSleep')")
-                    .bind(pid).fetch_one(&pools.admin).await.unwrap();
-                if sleeping { break; }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }).await.expect("RLS row was read before cancellation during pg_sleep");
+        wait_blocked(
+            &pools.admin,
+            Blocked::PidEvent(pid, "PgSleep"),
+            Count::AtLeast(1),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         pending.abort();
         assert!(pending.await.unwrap_err().is_cancelled());
         let replacement = tokio::time::timeout(std::time::Duration::from_secs(5), clean(&single))

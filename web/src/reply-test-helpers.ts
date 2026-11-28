@@ -5,7 +5,7 @@ import type { RealtimeHandlers } from './realtime'
 import { createReplySync } from './reply-sync'
 import { createSync, type SyncOptions } from './sync'
 import { record } from './protocol-test-helpers'
-import { flush } from './sync-test-helpers'
+import { flush, standaloneAccess } from './sync-test-helpers'
 export { deferred, ok } from './topic-test-helpers'
 export const root = (topic: string | null = null) => ({ ...record(1), topic_id: topic })
 export const reply = (seq: number, parent = 'id1', topic: string | null = null): Message =>
@@ -24,6 +24,7 @@ export function replyClient(requestTimeoutMs = 30_000) {
   const listChannelEvents = vi.fn<NonNullable<SyncOptions['api']>['listChannelEvents']>(async () => ({ ok: false, kind: 'network' }))
   const options: SyncOptions = { selfId: 'me', api: { listChannelEvents, listMessages, sendMessage },
     newId: () => `send${++id}`, onSessionEnded, requestTimeoutMs,
+    ...standaloneAccess(onSessionEnded),
     connect(h) { handlers.push(h); return { send: m => { controls.push(m) }, close: vi.fn() } },
   }
   const source = createSync(options)

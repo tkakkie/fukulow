@@ -14,6 +14,7 @@
   import type { UnreadAdapter } from './unread.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
+  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
@@ -46,6 +47,7 @@
     channelListStatus,
     panelOpen = false,
     mainViewSelected = true,
+    awaitingInitialSenders = false,
     members = [],
     resolveSenderName,
     resolveSearchContext = () => '',
@@ -56,6 +58,7 @@
     panelToggleBtn = $bindable<HTMLButtonElement | null>(null),
     composerRef = $bindable<HTMLInputElement | HTMLTextAreaElement | null>(null),
     topicInputRef = $bindable<HTMLInputElement | HTMLTextAreaElement | null>(null),
+    timelineRef = $bindable<{ isPositioning(): boolean } | null>(null),
     onsearchinput,
     onsearchsubmit,
     onclosesearch,
@@ -73,6 +76,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     searchState?: SearchState
     searchOpen?: boolean
@@ -102,6 +106,7 @@
     channelListStatus: 'loading' | 'ready' | 'error'
     panelOpen?: boolean
     mainViewSelected?: boolean
+    awaitingInitialSenders?: boolean
     members?: readonly Member[]
     resolveSenderName?: (senderId: string) => string
     resolveSearchContext?: (hit: SearchHit) => string
@@ -112,6 +117,7 @@
     panelToggleBtn?: HTMLButtonElement | null
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
+    timelineRef?: { isPositioning(): boolean } | null
     onsearchinput?: (value: string) => void
     onsearchsubmit?: (value: string) => void
     onclosesearch?: () => void
@@ -129,6 +135,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 </script>
 
@@ -258,6 +265,7 @@
             {search}
             {selfId}
             viewSelected={mainViewSelected}
+            {awaitingInitialSenders}
             {organizationUnavailable}
             {sendDisabled}
             {reconnecting}
@@ -271,11 +279,13 @@
             {ongoToChannelList}
             {onrecheckmembership}
             {onswitchorganization}
+            {onpositioningchange}
           />
         {/key}
       {:else}
         {#key selected.id}
           <Timeline
+            bind:this={timelineRef}
             channel={currentChannel}
             topics={currentTopics}
             replies={currentReplies}
@@ -285,6 +295,7 @@
             {search}
             {selfId}
             viewSelected={mainViewSelected}
+            {awaitingInitialSenders}
             {organizationUnavailable}
             {reconnecting}
             {resolveSenderName}
@@ -298,6 +309,7 @@
             {ongoToChannelList}
             {onrecheckmembership}
             {onswitchorganization}
+            {onpositioningchange}
           />
         {/key}
       {/if}
@@ -305,16 +317,7 @@
   </div>
 {:else if organizationUnavailable}
   <div class="main-card__empty">
-    <StatusBanner
-      tone="danger"
-      role="alert"
-      message="この組織は利用できません。"
-      detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-      actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
-      onaction={onrecheckmembership}
-      secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
-      onsecondaryaction={onswitchorganization}
-    />
+    <OrganizationUnavailableBanner {onrecheckmembership} {onswitchorganization} />
   </div>
 {:else if channelListStatus === 'ready'}
   <div class="main-card__empty">

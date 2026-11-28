@@ -1,3 +1,4 @@
+import { messageTimeline, records } from './search-main-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import type * as api from './api'
@@ -309,7 +310,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const net = fakeNetwork()
     const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
     net.socket.onReady()
-    net.pages.general = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'general')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'general')], has_more: false })
+    const confirmed = { ...record(1, 'general'), body: 'アクセス喪失前に読み込んだメッセージ' }
+    net.pages.general = ok({ history_generation: confirmed.history_generation, as_of_seq: 1, messages: [confirmed], has_more: false })
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('general', 'general')] }))
     await settle()
     net.subscribed('general', 1)
@@ -336,6 +338,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       props: {
         channel: ch,
         channelId: 'general',
+        topics: topicsAdapter(session.topics, 'general'),
         selfId: 'me',
         ongoToChannelList: () => {},
       },
@@ -353,6 +356,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     expect(timelineHost.textContent).toContain('このチャンネルは利用できません。')
+    expect(timelineHost.textContent).toContain(confirmed.body)
     expect(buttonsByText(timelineHost, 'チャンネル一覧へ')).toHaveLength(1)
     expect(buttonsByText(timelineHost, '再試行')).toHaveLength(0)
     expect(buttonsByText(timelineHost, '再送する')).toHaveLength(0)
@@ -437,14 +441,14 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const textarea = host.querySelector('textarea')!
     expect(textarea.value).toBe('入力途中の大事な下書き')
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
 
     // 1. Clicking 編集して送り直す with a non-empty draft opens the confirmation dialog without mutating state
     buttonsByText(host, '編集して送り直す')[0].click()
     flushSync()
     await tick()
 
-    const dialog = host.querySelector('[role="dialog"]')
+    const dialog = host.querySelector('dialog:modal')
     expect(dialog).not.toBeNull()
     expect(dialog!.getAttribute('aria-label')).toBe('入力中の下書きを置き換えますか？')
     expect(buttonsByText(dialog!, '置き換える')).toHaveLength(1)
@@ -458,7 +462,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
 
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(ch.composer.draft).toBe('入力途中の大事な下書き')
     expect(textarea.value).toBe('入力途中の大事な下書き')
     expect(ch.timeline.pending).toHaveLength(1)
@@ -467,13 +471,13 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // 3. Reopen and click 置き換える: replaces the draft, removes the failed Message, and focuses Composer
     buttonsByText(host, '編集して送り直す')[0].click()
     flushSync()
-    const reopened = host.querySelector('[role="dialog"]')!
+    const reopened = host.querySelector('dialog:modal')!
     buttonsByText(reopened, '置き換える')[0].click()
     flushSync()
     await settle()
     flushSync()
 
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(ch.composer.draft).toBe('拒否されたメッセージ本文')
     expect(textarea.value).toBe('拒否されたメッセージ本文')
     expect(ch.timeline.pending).toHaveLength(0)
@@ -494,7 +498,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     await settle()
     flushSync()
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(textarea.value).toBe('二度目の拒否メッセージ')
     expect(dom.doc.activeElement).toBe(textarea)
 
@@ -691,7 +695,12 @@ describe('Search result navigation', () => {
     const older = deferred<api.Result<api.MessagePage>>()
     const read = async (query?: api.ListMessagesQuery) => query?.before_seq === 4 ? older.promise
       : ok({ history_generation, as_of_seq: 100, messages: query?.after_seq === 3 ? [message(4), message(5), message(6)] : [message(100)], has_more: false })
-    options.sync!.api!.listMessages = (_channel, query) => read(query)
+    const normalTimeline = options.topicsApi!.listTimeline
+    options.topicsApi!.listTimeline = async (id, query, signal) => {
+      if (!signal || !query) return normalTimeline(id, query)
+      const page = await read({ before_seq: query.before_position, after_seq: query.after_position })
+      return page.ok ? ok(messageTimeline(page.data.messages, 100, query)) : page
+    }
     options.topicsApi!.listTopicMessages = (_channel, _topic, query) => read(query)
     const app = openWorkspace(net, options)
     try {
@@ -716,10 +725,10 @@ describe('Search result navigation', () => {
     const options = net.options()
     const history_generation = record(1).history_generation
     net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [record(100)], has_more: false })
-    options.sync!.api!.listMessages = async (_id, query) => ok({
-      history_generation, as_of_seq: 100, messages: query?.after_seq === 39 ? [record(40)] : [],
-      has_more: query?.after_seq === 39,
-    })
+    const normalTimeline = options.topicsApi!.listTimeline
+    options.topicsApi!.listTimeline = async (id, query, signal) => signal && query
+      ? ok(messageTimeline([record(40), ...Array.from({ length: 30 }, (_, index) => record(71 + index))], 100, query))
+      : normalTimeline(id, query)
     const app = openWorkspace(net, options)
     try {
       await settle()
@@ -781,5 +790,126 @@ describe('Search result navigation', () => {
     } finally {
       await app.close()
     }
+  })
+
+  function searchHistory(messages: api.Message[], hit: number) {
+    const net = fakeNetwork()
+    const options = net.options()
+    const history_generation = record(1).history_generation
+    net.pages.A = ok({ history_generation, as_of_seq: 500, messages: [record(500)], has_more: false })
+    const normalTimeline = options.topicsApi!.listTimeline
+    options.topicsApi!.listTimeline = async (id, query, signal) => signal && query
+      ? ok(messageTimeline(messages, 500, query)) : normalTimeline(id, query)
+    const app = openWorkspace(net, options)
+    return { ...app, async open() {
+      await settle()
+      net.subscribed('A', 500)
+      await settle()
+      app.navigation.openSearchResult('org', { channelId: 'A', messageId: `id${hit}`, createdSeq: hit })
+      await settle()
+    } }
+  }
+
+  it('renders Topic summary lines outside the live window in normal timeline order during Channel search', async () => {
+    const app = searchHistory([record(30), { ...record(35), topic_id: '設計議論' },
+      record(40), { ...record(45), topic_id: 'リリース準備' }, record(50)], 40)
+    try {
+      await app.open()
+      const text = app.host.querySelector('#main-content')?.textContent ?? ''
+      const positions = ['m30', '設計議論', 'm40', 'リリース準備', 'm50'].map(label => text.indexOf(label))
+      expect(positions[0]).toBeGreaterThanOrEqual(0)
+      expect(positions.every((position, index) => !index || position > positions[index - 1])).toBe(true)
+      expect(app.host.querySelector('.ui-message-row--search-match')?.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe('id40')
+      expect(app.session.sync.get().channels.A.cursor).toBe(500)
+    } finally { await app.close() }
+  })
+
+  it('renders a Topic-heavy Channel search window with both Channel-level Messages and Topic summary lines', async () => {
+    const topics = records(101, 130, '大量トピック')
+    const app = searchHistory([record(80), record(100), ...topics, record(131), record(132)], 100)
+    try {
+      await app.open()
+      const text = app.host.querySelector('#main-content')?.textContent ?? ''
+      const positions = ['m80', 'm100', '大量トピック', 'm131', 'm132'].map(label => text.indexOf(label))
+      expect(positions[0]).toBeGreaterThanOrEqual(0)
+      expect(positions.every((position, index) => !index || position > positions[index - 1])).toBe(true)
+      expect(app.host.querySelector('[data-message-id="id101"]')).toBeNull()
+      expect(app.session.sync.get().channels.A.cursor).toBe(500)
+    } finally { await app.close() }
+  })
+
+})
+
+describe('Topic summary lines, TopicList and TopicView states', () => {
+  it('confirms before replacing a Topic-name-only draft and restores body with its original Topic intent', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({
+      selfId: 'me',
+      organizationId: 'org-1',
+      onEnded: () => {},
+      ...net.options('me'),
+    })
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 0)
+    await settle()
+
+    const ch = syncAdapter(rawSession.sync).channel('c1')
+    const tp = topicsAdapter(rawSession.topics, 'c1')
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(Timeline, {
+      target: host as unknown as Element,
+      props: { channel: ch, topics: tp, channelId: 'c1', selfId: 'me' },
+    })
+    flushSync()
+
+    // Submit a send to "Original topic" and have the server refuse it (400)
+    const topicInput = queryAll(host, 'input').find((el) => el.getAttribute('aria-label') === 'トピック名')!
+    const textarea = queryAll(host, 'textarea').find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+    topicInput.value = 'Original topic'
+    topicInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    textarea.value = '拒否されたトピック本文'
+    textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    host.querySelector('form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    await settle()
+    net.sends[0].resolve({ ok: false, kind: 'http', status: 400 })
+    await settle()
+    flushSync()
+
+    // Type ONLY "Different topic" into the Topic-name field (body draft stays empty)
+    topicInput.value = 'Different topic'
+    topicInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    expect(textarea.value).toBe('')
+
+    buttonsByText(host, '編集して送り直す')[0].click()
+    flushSync()
+    const dialog = host.querySelector('dialog:modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog?.textContent).toContain('入力中の下書きを置き換えますか？')
+
+    // Cancel keeps both "Different topic" and the failed "Original topic" send
+    buttonsByText(host, 'キャンセル')[0].click()
+    flushSync()
+    expect(topicInput.value).toBe('Different topic')
+    expect(ch.timeline.pending).toHaveLength(1)
+
+    // Confirm replaces with both the refused body AND "Original topic"
+    buttonsByText(host, '編集して送り直す')[0].click()
+    flushSync()
+    buttonsByText(host, '置き換える')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    expect(textarea.value).toBe('拒否されたトピック本文')
+    expect(topicInput.value).toBe('Original topic')
+    expect(ch.timeline.pending).toHaveLength(0)
+
+    await unmount(instance)
+    rawSession.close()
   })
 })

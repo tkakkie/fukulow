@@ -14,8 +14,8 @@
       ],
       "rust": {
         "existing_tests": [
-          "reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concurrent_appends",
-          "reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_match"
+          "server/src/messages/tests/replies/paging.rs::reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concurrent_appends",
+          "server/src/realtime/tests/replies.rs::reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_match"
         ],
         "note": "No #139 proposed fixture existed on the #137 base; this server scenario runs now. Client panel behavior stays with #140."
       },

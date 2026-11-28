@@ -2,12 +2,19 @@ mod allowed_host;
 pub mod auth;
 pub mod channels;
 pub mod database;
+mod health;
 pub mod messages;
 pub mod observability;
 pub mod openapi;
 pub mod realtime;
+mod security_headers;
 pub mod shutdown;
+mod static_assets;
 
+#[cfg(test)]
+mod pool_stats_tests;
+#[cfg(test)]
+mod sql_fragment_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -16,18 +23,16 @@ mod websocket_test_support;
 pub use allowed_host::AllowedHost;
 use axum::{
     Router,
-    extract::{Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    extract::State,
+    http::header,
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
 };
-use rust_embed::RustEmbed;
 use shutdown::Shutdown;
 use std::{
-    collections::{HashMap, HashSet},
     future::Future,
-    sync::{LazyLock, Mutex, MutexGuard, PoisonError},
+    sync::{Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -46,36 +51,6 @@ pub(crate) fn get_mut_ignoring_poison<T>(mutex: &mut Mutex<T>) -> &mut T {
 pub fn spawn_revocation_holds_sampler() -> Option<tokio::task::JoinHandle<()>> {
     observability::spawn_revocation_holds_sampler(channels::activity::revocation_hold_counts)
 }
-
-const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()";
-
-#[derive(serde::Deserialize)]
-struct ManifestChunk {
-    file: String,
-    #[serde(default)]
-    css: Vec<String>,
-    #[serde(default)]
-    assets: Vec<String>,
-}
-
-// The Vite manifest identifies build outputs; filename patterns could cache unhashed public files forever.
-static HASHED_ASSETS: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    Assets::get(".vite/manifest.json")
-        .and_then(|file| serde_json::from_slice::<HashMap<String, ManifestChunk>>(&file.data).ok())
-        .into_iter()
-        .flat_map(|manifest| manifest.into_values())
-        .flat_map(|chunk| {
-            std::iter::once(chunk.file)
-                .chain(chunk.css)
-                .chain(chunk.assets)
-        })
-        .filter(|name| name.starts_with("assets/"))
-        .collect()
-});
-
-#[derive(RustEmbed)]
-#[folder = "../web/dist"]
-struct Assets;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -118,24 +93,30 @@ impl AppState {
     }
 }
 
-/// The restricted application pool for `admin`, or `admin` itself when it is
-/// already non-superuser (e.g. `TestPools::app`).
+/// Convert a superuser pool to the restricted application pool. Reuse a
+/// non-superuser pool only if it meets the test app role restrictions.
 #[cfg(test)]
-pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
+pub(crate) async fn test_app_pool(pool: sqlx::PgPool) -> sqlx::PgPool {
     // A pool that never connects must use `AppState::with_test_pool`: probing it
     // here waits out sqlx's 30 s acquire timeout, so an inspection error fails.
-    let superuser: bool = sqlx::query_scalar(
-        "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
+    let inspection_error =
+        "inspect the test pool role (use AppState::with_test_pool for a pool that never connects)";
+    let mut connection = pool.acquire().await.expect(inspection_error);
+    let (role, superuser, bypass_rls): (String, bool, bool) = sqlx::query_as(
+        "SELECT rolname::text, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
     )
-    .fetch_one(&admin)
+    .fetch_one(&mut *connection)
     .await
-    .expect(
-        "inspect the test pool role (use AppState::with_test_pool for a pool that never connects)",
-    );
+    .expect(inspection_error);
+    if !superuser {
+        assert!(!bypass_rls, "test app pool role {role} has BYPASSRLS");
+        test_support::assert_restricted_role(&mut connection, &role).await;
+    }
+    drop(connection);
     if superuser {
-        test_support::TestPools::new(admin).await.app
+        test_support::TestPools::new(pool).await.app
     } else {
-        admin
+        pool
     }
 }
 
@@ -161,14 +142,14 @@ fn configured_app(
             state.message_delivery.channel_access.clone(),
         ));
     let cookie_secure = state.cookie_secure;
-    let readiness = Readiness {
+    let readiness = health::Readiness {
         pool: state.pool.clone(),
         sessions: state.session_changes.clone(),
         flight: Default::default(),
     };
     Router::new()
-        .route("/api/v1/health", get(health))
-        .route("/api/v1/ready", get(ready).with_state(readiness))
+        .route("/api/v1/health", get(health::health))
+        .route("/api/v1/ready", get(health::ready).with_state(readiness))
         .route("/api/v1/setup", get(auth::setup_status).post(auth::setup))
         .route(
             "/api/v1/session",
@@ -297,7 +278,7 @@ fn configured_app(
         )
         .route("/api/v1/orgs/{org}/ws", get(realtime::upgrade))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
-        .fallback(static_handler)
+        .fallback(static_assets::static_handler)
         .layer(axum::middleware::from_fn_with_state(
             state.shutdown.clone(),
             reject_new_requests,
@@ -308,7 +289,7 @@ fn configured_app(
         ))
         .layer(middleware::from_fn_with_state(
             cookie_secure,
-            security_headers,
+            security_headers::security_headers,
         ))
         .layer(middleware::from_fn(observability::request))
         .with_state(state)
@@ -356,14 +337,19 @@ pub async fn serve(
     .await
 }
 
-pub async fn serve_with_search(
-    listener: tokio::net::TcpListener,
+pub async fn serve_with_search<L>(
+    listener: L,
     state: AppState,
     search_engine: messages::search::SearchEngine,
     allowed_host: AllowedHost,
     signal: impl Future<Output = ()>,
     deadline: Duration,
-) -> std::io::Result<bool> {
+) -> std::io::Result<bool>
+where
+    L: axum::serve::Listener<Addr = std::net::SocketAddr>,
+    std::net::SocketAddr:
+        for<'a> axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, L>>,
+{
     let shutdown = state.shutdown.clone();
     let pool = state.pool.clone();
     let delivery = state.message_delivery.clone();
@@ -413,239 +399,18 @@ pub fn signal() -> std::io::Result<impl Future<Output = ()>> {
     })
 }
 
-// Host is validated as an authority and restricted to CSP source characters before reflection.
-fn websocket_source(headers: &HeaderMap, secure: bool) -> Option<String> {
-    let mut hosts = headers.get_all(header::HOST).iter();
-    let host = hosts.next()?.to_str().ok()?;
-    if hosts.next().is_some()
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
-    {
-        return None;
-    }
-    let authority: axum::http::uri::Authority = host.parse().ok()?;
-    if authority.host().is_empty() {
-        return None;
-    }
-    Some(format!("{}://{host}", if secure { "wss" } else { "ws" }))
-}
-
-async fn security_headers(State(secure): State<bool>, request: Request, next: Next) -> Response {
-    let websocket = websocket_source(request.headers(), secure)
-        .map(|s| format!(" {s}"))
-        .unwrap_or_default();
-    let policy = format!(
-        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'{websocket}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
-    );
-    let api = request.uri().path() == "/api" || request.uri().path().starts_with("/api/");
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_str(&policy).unwrap_or_else(|_| {
-            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'")
-        }),
-    );
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
-    headers.insert(
-        "permissions-policy",
-        HeaderValue::from_static(PERMISSIONS_POLICY),
-    );
-    headers.insert(
-        "cross-origin-opener-policy",
-        HeaderValue::from_static("same-origin"),
-    );
-    if api {
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    }
-    response
-}
-
-#[utoipa::path(get, path = "/api/v1/health", responses((status = 200, description = "Server is responding; returns the plain-text body ok", body = String, content_type = "text/plain")))]
-async fn health() -> Result<&'static str, auth::ApiError> {
-    auth::authorization::require(
-        auth::Actor::Anonymous,
-        auth::Action::Public,
-        auth::Resource::Global,
-    )?;
-    tracing::trace!(
-        target: observability::REVOCATION_MEASUREMENT_TARGET,
-        event = "revocation_clock_sample",
-        server_ms = observability::measurement_ms()
-    );
-    Ok("ok")
-}
-
-#[derive(Clone)]
-struct Readiness {
-    pool: sqlx::PgPool,
-    sessions: auth::SessionChanges,
-    flight: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<bool>>>>>,
-}
-
-impl Readiness {
-    async fn check(&self) -> bool {
-        let mut flight = self.flight.lock().await;
-        let mut result = match flight.as_ref() {
-            Some(result) if result.borrow().is_none() && result.has_changed().is_ok() => {
-                result.clone()
-            }
-            _ => {
-                let (sender, result) = tokio::sync::watch::channel(None);
-                let pool = self.pool.clone();
-                let sessions = self.sessions.clone();
-                // The bounded check outlives any individual HTTP caller. Completed
-                // results are replaced on the next call, never cached across checks.
-                tokio::spawn(async move {
-                    let healthy = sessions.fallback_available()
-                        && database::ready(&pool).await
-                        && sessions.fallback_available();
-                    let _ = sender.send(Some(healthy));
-                });
-                *flight = Some(result.clone());
-                result
-            }
-        };
-        drop(flight);
-        matches!(result.wait_for(|value| value.is_some()).await, Ok(value) if *value == Some(true))
-    }
-}
-
-#[utoipa::path(get, path = "/api/v1/ready", responses(
-    (status = 200, description = "Database check succeeded, connection cleanup completed and the fallback supervisor has not observed an abnormal worker exit (not a progress watchdog); returns plain-text ok", body = String, content_type = "text/plain"),
-    (status = 503, description = "Readiness unavailable: error not_ready (Retry-After: 1); database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit", body = auth::ErrorBody)
-))]
-async fn ready(State(readiness): State<Readiness>) -> Response {
-    if readiness.check().await {
-        return "ok".into_response();
-    }
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [(header::RETRY_AFTER, "1")],
-        axum::Json(auth::ErrorBody {
-            error: "not_ready".into(),
-        }),
-    )
-        .into_response()
-}
-
-async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    // Undefined API endpoints are never the SPA.
-    if path == "api"
-        || path.starts_with("api/")
-        || path.starts_with(".vite/")
-        || path.ends_with(".br")
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    if let Some(file) = Assets::get(path) {
-        return serve_asset(path, file, &headers);
-    }
-    // A path whose last segment has an extension is an asset request: missing means 404,
-    // not index.html. Anything else is a client-side route of the SPA.
-    let last = path.rsplit('/').next().unwrap_or("");
-    if last.contains('.') {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match Assets::get("index.html") {
-        Some(file) => serve_asset("index.html", file, &headers),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-fn serve_asset(name: &str, file: rust_embed::EmbeddedFile, headers: &HeaderMap) -> Response {
-    let compressed = accepts_brotli(headers)
-        .then(|| Assets::get(&format!("{name}.br")))
-        .flatten();
-    let encoded = compressed.is_some();
-    let file = compressed.unwrap_or(file);
-    let guessed = mime_guess::from_path(name).first_or_octet_stream();
-    let mime = if name.ends_with(".wasm") {
-        "application/wasm"
-    } else {
-        guessed.as_ref()
-    };
-    let cache = if is_hashed_asset(name) {
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
-    };
-    let mut response = (
-        [
-            (header::CONTENT_TYPE, mime),
-            (header::CACHE_CONTROL, cache),
-            (header::VARY, "Accept-Encoding"),
-        ],
-        file.data,
-    )
-        .into_response();
-    if encoded {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
-    }
-    response
-}
-
-fn accepts_brotli(headers: &HeaderMap) -> bool {
-    let mut explicit = None;
-    let mut wildcard = None;
-    for value in headers.get_all(header::ACCEPT_ENCODING) {
-        let Ok(value) = value.to_str() else { continue };
-        for coding in value.split(',') {
-            let mut parts = coding.split(';').map(str::trim);
-            let name = parts.next().unwrap_or("");
-            let quality = match parts.next() {
-                None => true,
-                Some(parameter) => parameter.split_once('=').is_some_and(|(key, value)| {
-                    let value = value.trim();
-                    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
-                    key.trim().eq_ignore_ascii_case("q")
-                        && fraction.len() <= 3
-                        && fraction.bytes().all(|b| b.is_ascii_digit())
-                        && match whole {
-                            "0" => fraction.bytes().any(|b| b != b'0'),
-                            "1" => fraction.bytes().all(|b| b == b'0'),
-                            _ => false,
-                        }
-                }),
-            } && parts.next().is_none();
-            if name.eq_ignore_ascii_case("br") {
-                // A refusal wins over duplicate entries and wildcard acceptance.
-                explicit = Some(explicit.unwrap_or(true) && quality);
-            } else if name == "*" {
-                wildcard = Some(wildcard.unwrap_or(true) && quality);
-            }
-        }
-    }
-    explicit.or(wildcard).unwrap_or(false)
-}
-
-fn is_hashed_asset(name: &str) -> bool {
-    HASHED_ASSETS.contains(name)
-}
-
 #[cfg(test)]
 mod tests {
-    mod readiness;
+    mod test_pool;
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, http::Request, response::Response};
     use tower::ServiceExt;
 
-    async fn get(path: &str) -> Response {
+    pub(super) async fn get(path: &str) -> Response {
         get_encoded(path, None).await
     }
 
-    async fn get_encoded(path: &str, encoding: Option<&str>) -> Response {
+    pub(super) async fn get_encoded(path: &str, encoding: Option<&str>) -> Response {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@localhost/unused")
             .unwrap();
@@ -669,364 +434,5 @@ mod tests {
         .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap()
-    }
-
-    fn content_type(res: &Response) -> String {
-        res.headers()[header::CONTENT_TYPE]
-            .to_str()
-            .unwrap()
-            .to_string()
-    }
-
-    #[tokio::test]
-    async fn health_ok() {
-        assert_eq!(get("/api/v1/health").await.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn health_emits_clock_sample_only_with_measurement_enabled() {
-        use tracing::instrument::WithSubscriber;
-
-        let normal = observability::tests::Capture::default();
-        let response = get("/api/v1/health")
-            .with_subscriber(normal.subscriber())
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let events = normal.events();
-        assert!(!events.is_empty(), "expected a normal health event");
-        assert!(
-            events
-                .iter()
-                .all(|event| { event["fields"]["event"] != "revocation_clock_sample" })
-        );
-
-        let measurement = observability::tests::Capture::default();
-        let response = get("/api/v1/health")
-            .with_subscriber(measurement.measurement_subscriber())
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let events = measurement.events();
-        let samples: Vec<_> = events
-            .iter()
-            .filter(|event| event["fields"]["event"] == "revocation_clock_sample")
-            .collect();
-        assert_eq!(samples.len(), 1);
-        assert_eq!(
-            samples[0]["target"],
-            observability::REVOCATION_MEASUREMENT_TARGET
-        );
-        let server_ms = samples[0]["fields"]["server_ms"].as_f64().unwrap();
-        assert!(server_ms.is_finite() && server_ms >= 0.0);
-    }
-
-    #[tokio::test]
-    async fn index_is_served_at_root() {
-        let res = get("/").await;
-        assert_eq!(res.status(), StatusCode::OK);
-        assert!(content_type(&res).starts_with("text/html"));
-    }
-
-    #[tokio::test]
-    async fn spa_route_gets_index_html() {
-        let res = get("/channels/general/topics/1").await;
-        assert_eq!(res.status(), StatusCode::OK);
-        assert!(content_type(&res).starts_with("text/html"));
-    }
-
-    #[tokio::test]
-    async fn existing_assets_are_served_with_their_type() {
-        let mut checked = 0;
-        for name in Assets::iter().filter(|n| n.starts_with("assets/") && !n.ends_with(".br")) {
-            let res = get(&format!("/{name}")).await;
-            assert_eq!(res.status(), StatusCode::OK, "{name}");
-            assert!(!content_type(&res).starts_with("text/html"), "{name}");
-            checked += 1;
-        }
-        assert!(
-            checked > 0,
-            "web/dist has no assets; build the web app first"
-        );
-    }
-
-    #[tokio::test]
-    async fn all_public_assets_negotiate_brotli_without_changing_mime_or_cache() {
-        let mut checked = 0;
-        for name in Assets::iter().filter(|n| !n.starts_with('.') && !n.ends_with(".br")) {
-            let raw = Assets::get(&name).unwrap().data;
-            let compressed = Assets::get(&format!("{name}.br"))
-                .expect("build Brotli assets first")
-                .data;
-            let identity = get(&format!("/{name}")).await;
-            let mime = content_type(&identity);
-            let cache = identity.headers()[header::CACHE_CONTROL].clone();
-            for (encoding, br) in [
-                (None, false),
-                (Some(""), false),
-                (Some("gzip, zstd"), false),
-                (Some("br"), true),
-                (Some("gzip, br;q=0.5"), true),
-                (Some("br;q=0, gzip"), false),
-                (Some("*;q=1, br;q=0"), false),
-                (Some("*;q=0.5"), true),
-                (Some("*;q=0"), false),
-                (Some("BR;Q=1.000"), true),
-                (Some("br;q=0.001"), true),
-                (Some("br;q=0.000"), false),
-                (Some("br;q=1.001"), false),
-                (Some("br;q=invalid"), false),
-                (Some("br, br;q=0"), false),
-                (Some("*;q=0, *;q=0.5"), false),
-            ] {
-                let response = get_encoded(&format!("/{name}"), encoding).await;
-                assert_eq!(response.status(), StatusCode::OK, "{name} {encoding:?}");
-                assert_eq!(content_type(&response), mime);
-                assert_eq!(response.headers()[header::CACHE_CONTROL], cache);
-                assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
-                assert_eq!(
-                    response
-                        .headers()
-                        .get(header::CONTENT_ENCODING)
-                        .map(|v| v.to_str().unwrap()),
-                    br.then_some("br")
-                );
-                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    body.as_ref(),
-                    if br {
-                        compressed.as_ref()
-                    } else {
-                        raw.as_ref()
-                    }
-                );
-            }
-            checked += 1;
-        }
-        assert!(checked > 0);
-        let root = get_encoded("/channels/general", Some("br")).await;
-        assert_eq!(root.headers()[header::CONTENT_ENCODING], "br");
-        assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
-        for path in [
-            "/.vite/manifest.json.br",
-            "/index.html.br",
-            "/assets/missing.wasm",
-        ] {
-            assert_eq!(
-                get_encoded(path, Some("br")).await.status(),
-                StatusCode::NOT_FOUND
-            );
-        }
-    }
-
-    #[test]
-    fn brotli_negotiation_reads_repeated_header_fields() {
-        let mut headers = HeaderMap::new();
-        headers.append(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
-        headers.append(
-            header::ACCEPT_ENCODING,
-            HeaderValue::from_static("br;q=0.5"),
-        );
-        assert!(accepts_brotli(&headers));
-        headers.append(header::ACCEPT_ENCODING, HeaderValue::from_static("br;q=0"));
-        assert!(!accepts_brotli(&headers));
-    }
-
-    #[tokio::test]
-    async fn wasm_and_glue_are_manifest_assets_with_immutable_cache_and_wasm_mime() {
-        let manifest = Assets::get(".vite/manifest.json").expect("build web first");
-        let chunks: HashMap<String, ManifestChunk> =
-            serde_json::from_slice(&manifest.data).unwrap();
-        let wasm: Vec<_> = chunks
-            .values()
-            .map(|c| &c.file)
-            .filter(|name| name.ends_with(".wasm"))
-            .collect();
-        let glue: Vec<_> = chunks
-            .values()
-            .map(|c| &c.file)
-            .filter(|name| name.contains("sync-wasm") && name.ends_with(".js"))
-            .collect();
-        assert_eq!(wasm.len(), 1);
-        assert_eq!(glue.len(), 1);
-        for name in wasm.iter().chain(glue.iter()) {
-            assert!(is_hashed_asset(name));
-            let response = get(&format!("/{name}")).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response.headers()[header::CACHE_CONTROL],
-                "public, max-age=31536000, immutable"
-            );
-            if name.ends_with(".wasm") {
-                assert_eq!(content_type(&response), "application/wasm");
-            }
-        }
-        assert!(!is_hashed_asset("assets/unlisted-abc12345.wasm"));
-        assert!(!is_hashed_asset("assets/sync-wasm-abc12345.js"));
-    }
-
-    #[tokio::test]
-    async fn missing_asset_is_404_not_html() {
-        for path in [
-            "/assets/missing.js",
-            "/missing.css",
-            "/favicon.png",
-            "/.vite/manifest.json",
-        ] {
-            assert_eq!(get(path).await.status(), StatusCode::NOT_FOUND, "{path}");
-        }
-    }
-
-    #[tokio::test]
-    async fn undefined_api_paths_are_404() {
-        for path in ["/api", "/api/", "/api/v1/nope", "/api/v1/health/x"] {
-            assert_eq!(get(path).await.status(), StatusCode::NOT_FOUND, "{path}");
-        }
-    }
-
-    #[tokio::test]
-    async fn path_merely_starting_with_api_is_a_spa_route() {
-        assert_eq!(get("/apixyz").await.status(), StatusCode::OK);
-    }
-    #[tokio::test]
-    async fn security_headers_cover_success_errors_and_fallbacks() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
-            .unwrap();
-        pool.close().await;
-        for secure in [false, true] {
-            let router = app(AppState {
-                cookie_secure: secure,
-                ..AppState::with_test_pool(pool.clone())
-            });
-            for (method, path, content_type, input, status) in [
-                ("GET", "/", "application/json", "", 200),
-                ("GET", "/channels/general", "application/json", "", 200),
-                ("GET", "/favicon.svg", "application/json", "", 200),
-                ("GET", "/api/v1/health", "application/json", "", 200),
-                ("GET", "/missing.js", "application/json", "", 404),
-                ("GET", "/api/v1/missing", "application/json", "", 404),
-                ("POST", "/api/v1/health", "application/json", "", 405),
-                ("POST", "/api/v1/session", "application/json", "{", 400),
-                ("POST", "/api/v1/native/session", "text/plain", "{}", 415),
-                (
-                    "POST",
-                    "/api/v1/session",
-                    "application/json",
-                    &"x".repeat(17 * 1024),
-                    413,
-                ),
-                ("GET", "/api/v1/me", "application/json", "", 401),
-                (
-                    "GET",
-                    "/api/v1/orgs/unknown/ws",
-                    "application/json",
-                    "",
-                    403,
-                ),
-                ("GET", "/api/v1/setup", "application/json", "", 500),
-            ] {
-                let response = router
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method(method)
-                            .uri(path)
-                            .extension(axum::extract::ConnectInfo(
-                                "192.0.2.1:1234".parse::<std::net::SocketAddr>().unwrap(),
-                            ))
-                            .header(header::HOST, "chat.example:18443")
-                            .header("x-forwarded-host", "evil.example")
-                            .header(header::CONTENT_TYPE, content_type)
-                            .body(Body::from(input.to_owned()))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(response.status().as_u16(), status, "{method} {path}");
-                let headers = response.headers();
-                let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
-                let scheme = if secure { "wss" } else { "ws" };
-                assert!(csp.contains(&format!(
-                    "connect-src 'self' {scheme}://chat.example:18443;"
-                )));
-                assert!(csp.contains("frame-ancestors 'none'"));
-                assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
-                assert!(!csp.contains("'unsafe-eval'"));
-                assert!(csp.contains("style-src 'self'"));
-                assert!(!csp.replace("'wasm-unsafe-eval'", "").contains("unsafe-"));
-                assert!(!csp.contains("evil.example"));
-                assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-                assert_eq!(
-                    headers[header::REFERRER_POLICY],
-                    "strict-origin-when-cross-origin"
-                );
-                assert!(!headers.contains_key(header::STRICT_TRANSPORT_SECURITY));
-                assert_eq!(headers["permissions-policy"], PERMISSIONS_POLICY);
-                assert_eq!(headers["cross-origin-opener-policy"], "same-origin");
-                if path.starts_with("/api/") {
-                    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn csp_websocket_source_rejects_injected_or_ambiguous_hosts() {
-        let mut headers = HeaderMap::new();
-        for host in [
-            "chat.example;script-src *",
-            "chat.example'",
-            "user@chat.example",
-            "chat.example/path",
-            "chat.example:443 evil.example",
-        ] {
-            headers.insert(header::HOST, host.parse().unwrap());
-            assert!(websocket_source(&headers, true).is_none(), "{host}");
-        }
-        headers.insert(header::HOST, "[::1]:18443".parse().unwrap());
-        assert_eq!(
-            websocket_source(&headers, true).as_deref(),
-            Some("wss://[::1]:18443")
-        );
-        headers.append(header::HOST, "evil.example".parse().unwrap());
-        assert!(websocket_source(&headers, true).is_none());
-    }
-
-    #[tokio::test]
-    async fn html_and_unhashed_files_revalidate_and_hashed_assets_are_immutable() {
-        let manifest = Assets::get(".vite/manifest.json").expect(
-            "web/dist/.vite/manifest.json is missing: build the SPA and preserve hidden files in the web-dist artifact",
-        );
-        serde_json::from_slice::<HashMap<String, ManifestChunk>>(&manifest.data)
-            .expect("web/dist/.vite/manifest.json must be a valid Vite manifest");
-        for path in ["/", "/index.html", "/channels/general", "/favicon.svg"] {
-            assert_eq!(
-                get(path).await.headers()[header::CACHE_CONTROL],
-                "no-cache",
-                "{path}"
-            );
-        }
-        let mut checked = 0;
-        for name in HASHED_ASSETS.iter() {
-            assert_eq!(
-                get(&format!("/{name}")).await.headers()[header::CACHE_CONTROL],
-                "public, max-age=31536000, immutable"
-            );
-            checked += 1;
-        }
-        assert!(
-            checked > 0,
-            "Vite manifest must list hashed assets under assets/"
-        );
-        for name in [
-            "assets/app.js",
-            "assets/logo.svg",
-            "assets/app-unhashed.js",
-            "app-12345678.js",
-            "assets/app-1234.js",
-        ] {
-            assert!(!is_hashed_asset(name), "{name}");
-        }
     }
 }

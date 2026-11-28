@@ -183,6 +183,10 @@ export class MiniNode extends MiniEventTarget {
     return this.childNodes.filter((c): c is MiniElement => c instanceof MiniElement)
   }
 
+  get childElementCount(): number {
+    return this.children.length
+  }
+
   get isConnected(): boolean {
     let cur: MiniNode | null = this
     while (cur) {
@@ -395,6 +399,8 @@ export class MiniElement extends MiniNode {
   readonly localName: string
   private readonly attrs = new Map<string, string>()
   private _value = ''
+  private _modal = false
+  returnValue = ''
   defaultValue = ''
   checked = false
   scrollIntoView() {}
@@ -468,8 +474,28 @@ export class MiniElement extends MiniNode {
     const next = Boolean(v)
     const prev = this.attrs.has('open')
     if (next) this.attrs.set('open', '')
-    else this.attrs.delete('open')
+    else {
+      this.attrs.delete('open')
+      this._modal = false
+    }
     if (this.tagName === 'DETAILS' && next !== prev) this.dispatchEvent(new MiniDomEvent('toggle'))
+  }
+
+  get isModal(): boolean {
+    return this.tagName === 'DIALOG' && this.open && this._modal
+  }
+
+  showModal(): void {
+    this._modal = true
+    this.attrs.set('open', '')
+  }
+
+  close(returnValue?: string): void {
+    if (returnValue !== undefined) this.returnValue = returnValue
+    const wasOpen = this.attrs.has('open')
+    this._modal = false
+    this.attrs.delete('open')
+    if (wasOpen) this.dispatchEvent(new MiniDomEvent('close'))
   }
 
   get type(): string {
@@ -586,7 +612,7 @@ export class MiniElement extends MiniNode {
 
   focus(): void {
     const opts = this.ownerDocument?.options
-    if (this.disabled || !this.ownerDocument) return
+    if (this.disabled || !this.ownerDocument || this.closest('[inert]')) return
     if (!opts?.allowDetachedFocus && !this.isConnected) return
     const changed = this.ownerDocument.activeElement !== this
     this.ownerDocument.activeElement = this
@@ -634,6 +660,46 @@ export class MiniElement extends MiniNode {
     return evt
   }
 
+  override dispatchEvent(event: MiniDomEvent): boolean {
+    const notPrevented = super.dispatchEvent(event)
+    if (
+      notPrevented &&
+      event.type === 'keydown' &&
+      this.tagName === 'INPUT' &&
+      !this.disabled &&
+      event.key === 'Enter' &&
+      !event.isComposing &&
+      event.keyCode !== 229 &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey
+    ) {
+      const form = this.closest('form')
+      const defaultSubmit = form?.querySelectorAll('button').find(
+        (btn) => (btn.getAttribute('type') ?? 'submit') === 'submit',
+      )
+      if (form && defaultSubmit && !defaultSubmit.disabled) {
+        const clickEvt = new MiniDomEvent('click', { bubbles: true, cancelable: true })
+        defaultSubmit.dispatchEvent(clickEvt)
+        const submitMode = this.ownerDocument?.options.clickSubmit ?? 'default'
+        if (submitMode !== 'never' && (submitMode === 'always' || !clickEvt.defaultPrevented)) {
+          form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+        }
+      }
+    } else if (
+      notPrevented &&
+      event.type === 'keydown' &&
+      this.tagName === 'BUTTON' &&
+      !this.disabled &&
+      event.key === 'Enter' &&
+      !event.isComposing &&
+      event.keyCode !== 229
+    ) {
+      this.click()
+    }
+    return notPrevented
+  }
+
   get hidden(): boolean {
     return this.attrs.has('hidden')
   }
@@ -641,6 +707,15 @@ export class MiniElement extends MiniNode {
   set hidden(v: boolean) {
     if (v) this.setAttribute('hidden', '')
     else this.removeAttribute('hidden')
+  }
+
+  get inert(): boolean {
+    return this.attrs.has('inert')
+  }
+
+  set inert(v: boolean) {
+    if (v) this.setAttribute('inert', '')
+    else this.removeAttribute('inert')
   }
 
   // Minimal non-emulated box so components that check connection/non-zero rect work in Node.
@@ -993,6 +1068,9 @@ function matchesCompound(el: MiniElement, compound: string): boolean {
     } else if (rest.startsWith(':disabled')) {
       if (!el.disabled) return false
       rest = rest.slice(':disabled'.length)
+    } else if (rest.startsWith(':modal')) {
+      if (!el.isModal) return false
+      rest = rest.slice(':modal'.length)
     } else if (rest.startsWith('#')) {
       const m = /^#([a-zA-Z0-9_-]+)/.exec(rest)
       if (!m || el.id !== m[1]) return false
@@ -1074,6 +1152,7 @@ const GLOBAL_KEYS = [
   'Element',
   'HTMLElement',
   'HTMLButtonElement',
+  'HTMLDialogElement',
   'HTMLInputElement',
   'HTMLTextAreaElement',
   'HTMLSelectElement',
@@ -1109,6 +1188,7 @@ function installGlobals(options: MiniDomOptions = {}): { doc: MiniDocument; win:
     Element: MiniElement,
     HTMLElement: MiniElement,
     HTMLButtonElement: MiniElement,
+    HTMLDialogElement: MiniElement,
     HTMLInputElement: MiniElement,
     HTMLTextAreaElement: MiniElement,
     HTMLSelectElement: MiniElement,

@@ -4,38 +4,33 @@
   import { onMount, tick, untrack } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
-  import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
+  import { resolveRovingMessageId } from './composer-keys'
   import Composer from './Composer.svelte'
   import VirtualRows from './ui/VirtualRows.svelte'
-  import {
-    confirmReplaceDraftWithFailedSend,
-    decideEditAndResend,
-    discardAndFocusComposer,
-    focusTarget,
-  } from './focus-management'
+  import { focusTarget } from './focus-management'
   import { type RepliesAdapter } from './replies.svelte'
   import { foldTopicName, type ChannelSync } from './sync.svelte'
+  import { createTimelineDraftController } from './timeline-draft'
   import {
     applyTimelineScrollAction,
     createTimelineScrollController,
     handleTimelineContainerScroll,
     isTimelineDisplayed,
-    measureTimelineItems,
-    measureVisibleConfirmedSeqs,
     type ScrollAction,
     type ScrollAnchor,
   } from './timeline-scroll'
+  import { isDocumentVisible } from './timeline-presentation'
+  import { createTimelineViewController, type TimelineRowWindow } from './timeline-view'
   import type { TopicsAdapter } from './topics.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
   import type { UnreadAdapter } from './unread.svelte'
+  import TimelineFrame from './TimelineFrame.svelte'
   import SearchAnchorStatus from './ui/SearchAnchorStatus.svelte'
   import Button from './ui/Button.svelte'
-  import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
   import ReadMarker from './ui/ReadMarker.svelte'
   import Skeleton from './ui/Skeleton.svelte'
-  import StatusBanner from './ui/StatusBanner.svelte'
 
   // Renders one Topic's filtered history window and own Composer without owning I/O or sync state.
   // Leaves row/header room for future Unread badges (#143) and Reply chains (#140).
@@ -50,6 +45,7 @@
     topicStatus = 'idle',
     selfId = '',
     viewSelected = true,
+    awaitingInitialSenders = false,
     organizationUnavailable = false,
     sendDisabled = false,
     reconnecting = false,
@@ -64,6 +60,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     channel: ChannelSync
     topics: TopicsAdapter
@@ -75,6 +72,7 @@
     topicStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
     selfId?: string
     viewSelected?: boolean
+    awaitingInitialSenders?: boolean
     organizationUnavailable?: boolean
     sendDisabled?: boolean
     reconnecting?: boolean
@@ -89,6 +87,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 
   const currentChannelId = $derived(channelId)
@@ -108,6 +107,8 @@
     loading: search.view?.paging ?? false, error: search.view?.pageError === 'older', notFound: false,
   } : topicView)
   let skipUnreadVisit = $state(false)
+  // The visit stops waiting for its entry position (loading timeout or own send) and opens at the bottom, as after a failed boundary.
+  let entryPositionAbandoned = $state(false)
   let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === currentTopicId ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
@@ -124,7 +125,7 @@
     ),
   )
   const firstUnreadMessageId = $derived(
-    !search && !skipUnreadVisit && entry &&
+    !search && !skipUnreadVisit && !entryPositionAbandoned && entry &&
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
@@ -152,6 +153,10 @@
         (entry === null || entry.boundary === null),
     ),
   )
+  const awaitingEntryPosition = $derived(
+    !search && !skipUnreadVisit && !entryPositionAbandoned &&
+      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error)),
+  )
   const pending = $derived(
     s.pending.filter(
       (p) =>
@@ -171,7 +176,7 @@
     return scrollController.get()
   })
 
-  let rowWindow = $state<{ reveal(id: string, focus?: boolean, align?: 'start' | 'end'): Promise<void> } | null>(null)
+  let rowWindow = $state<TimelineRowWindow | null>(null)
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
@@ -187,94 +192,64 @@
   let mountedIds = $state<string[]>([])
   const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds.filter(id => mountedIds.includes(id)), activeRowId))
 
-  function isDocumentVisible(): boolean {
-    if (typeof document === 'undefined') return true
-    return (document.visibilityState ?? 'visible') === 'visible'
-  }
-
-  function reportPresented() {
-    if (!unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
-    if (!isDocumentVisible()) return
-    const currentEntry = uState?.entry
-    if (!currentEntry || currentEntry.scope.topicId !== topicId) return
-    if (search) {
-      if (!initialScrollApplied || search.view?.status !== 'ready') return
-    } else if (!skipUnreadVisit) {
-      if (currentEntry.boundary === null || needsOlderUnreadPage) return
-      if ((currentEntry.unreadAtEntry ?? 0) > 0) {
-        if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
-      } else if (!initialScrollApplied) {
-        return
-      }
-    }
-    const seqs = measureVisibleConfirmedSeqs(scrollEl!)
-    if (seqs.length > 0) {
-      unread.presented(currentEntry.id, seqs)
-    }
-  }
-
-  async function focusMessage(id: string | undefined) {
-    if (!id) return
-    activeRowId = id
-    await rowWindow?.reveal(id, true)
-  }
-  function handleRowKeydown(e: KeyboardEvent) {
-    const id = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-message-id]')?.getAttribute('data-message-id')
-    const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
-    if (next === null) return
-    e.preventDefault()
-    void focusMessage(focusableMessageIds[next]).catch(console.error)
-  }
-  async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
-    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
-    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
-  }
-
-  function captureCurrentAnchor() {
-    if (!scrollEl) return
-    scrollController.captureAnchor(measureTimelineItems(scrollEl))
-  }
+  const {
+    reportPresented,
+    focusMessage,
+    handleRowKeydown,
+    revealScrollTarget,
+    captureCurrentAnchor,
+    applyScrollAction,
+    jumpToBottom,
+    loadOlderWithAnchor,
+  } = createTimelineViewController({
+    scrollController,
+    getScrollEl: () => scrollEl,
+    getRowWindow: () => rowWindow,
+    getFocusableMessageIds: () => focusableMessageIds,
+    setActiveRowId: (id) => {
+      activeRowId = id
+    },
+    afterUpdate: tick,
+    isPositioning: () => positioning,
+    presentation: {
+      isEnabled: () => Boolean(unread),
+      isAwaitingInitialSenders: () => awaitingInitialSenders,
+      isViewSelected: () => viewSelected,
+      isTargetUnavailable: () => targetUnavailable,
+      getExpectedTopicId: () => topicId,
+      getEntry: () => uState?.entry ?? null,
+      isSearchActive: () => Boolean(search),
+      isSearchReady: () => search?.view?.status === 'ready',
+      isInitialScrollApplied: () => initialScrollApplied,
+      isSkipUnreadVisit: () => skipUnreadVisit,
+      needsOlderUnreadPage: () => needsOlderUnreadPage,
+      isEntryPositionAbandoned: () => entryPositionAbandoned,
+      getFirstUnreadMessageId: () => firstUnreadMessageId,
+      getScrolledFirstUnreadId: () => scrolledFirstUnreadId,
+      onPresented: (visitId, seqs) => unread?.presented(visitId, seqs),
+    },
+    search: {
+      isActive: () => Boolean(search),
+      jumpToLatest: () => {
+        skipUnreadVisit = true
+        search?.latest()
+      },
+      loadOlder: () => {
+        void search?.loadOlder()
+      },
+    },
+    hasNewer: () => Boolean(view.hasNewer),
+    loadLatest: () => topics.loadTopicLatest(topicId),
+    loadOlder: () => {
+      void topics.loadTopic(topicId).catch(console.error)
+    },
+  })
 
   function handleScroll() {
+    if (awaitingInitialSenders) return
     handleTimelineContainerScroll(scrollEl, scrollController)
     topics.setTopicPinned(topicId, scrollController.get().pinned)
     reportPresented()
-  }
-
-  function applyScrollAction(
-    action: ScrollAction,
-    anchor: ScrollAnchor | null,
-    firstUnreadId?: string | null,
-  ) {
-    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
-    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) {
-      void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
-        applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
-        reportPresented()
-      }).catch(console.error)
-    } else applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
-  }
-
-  async function jumpToBottom() {
-    if (search) {
-      skipUnreadVisit = true
-      search.latest()
-      await tick()
-      if (search) return
-      await topics.loadTopicLatest(topicId)
-      await tick()
-      if (search) return
-    }
-    if (view.hasNewer) { await topics.loadTopicLatest(topicId); await tick() }
-    const action = scrollController.jumpToBottom()
-    applyScrollAction(action, null)
-    reportPresented()
-  }
-
-  function loadOlderWithAnchor() {
-    captureCurrentAnchor()
-    if (search) void search.loadOlder()
-    else void topics.loadTopic(topicId).catch(console.error)
   }
 
   function retryInitial() {
@@ -284,6 +259,10 @@
     void topics.retrySummary(topicId).catch(console.error)
     void topics.loadTopic(topicId).catch(console.error)
   }
+
+  $effect(() => {
+    onpositioningchange?.(positioning)
+  })
 
   $effect(() => () => scrollController.destroy())
   onMount(() => {
@@ -378,7 +357,8 @@
   })
 
   $effect(() => {
-    if (search || skipUnreadVisit || !needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
+    // A visit that opened at the bottom no longer positions at the first Unread, so it pages no older history toward it.
+    if (search || skipUnreadVisit || entryPositionAbandoned || !needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
       return
     }
     if (effectiveStatus !== 'ready') return
@@ -391,10 +371,14 @@
       : search ? (!search.view || search.view.status === 'loading' ? 'loading' : 'ready')
       : topicStatus === 'error' || (view.error && view.messages.length === 0)
         ? 'error'
-        : (topicStatus === 'loading' || view.loading) && view.messages.length === 0
+        : ((topicStatus === 'loading' || view.loading) && view.messages.length === 0) || awaitingInitialSenders
           ? 'loading'
           : 'ready',
   )
+  const loadFailed = $derived(effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))
+  const canPosition = $derived(!targetUnavailable && !loadFailed)
+  // Keep rows mounted for positioning. Error and unavailable states show the loaded rows (§5, §8).
+  const positioning = $derived(canPosition && !initialScrollApplied && (awaitingEntryPosition || firstUnreadMessageId !== null))
 
   $effect(() => {
     const scopeKey = `${currentChannelId}/${currentTopicId}${searchId ? ':search' : ''}`
@@ -408,15 +392,17 @@
       lastScrollEntryId = currentEntryId
       initialScrollApplied = false
       scrolledFirstUnreadId = null
+      entryPositionAbandoned = false
       pendingScrollAction = null
     }
-    const displayed = isTimelineDisplayed(scrollEl, viewSelected)
+    const displayed = !awaitingInitialSenders && isTimelineDisplayed(scrollEl, viewSelected)
     const messages = view.messages
     const pendingIds = pending.map((p) => p.clientMessageId)
-    const status = effectiveStatus
-    const targetFirstUnreadId = firstUnreadMessageId
-    const awaitingFirstUnread =
-      !skipUnreadVisit && (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error))
+    // Positioning counts as loading so the controller's loading timeout bounds it; a hidden view defers positioning
+    // to its display (`docs/ui.md` §8), so its wait starts only once displayed.
+    const status = positioning && displayed && effectiveStatus === 'ready' ? 'loading' : effectiveStatus
+    const targetFirstUnreadId = canPosition ? firstUnreadMessageId : null
+    const awaitingFirstUnread = canPosition && awaitingEntryPosition
     const { action, anchor } = scrollController.sync({
       channelId: scopeKey,
       visitId: currentEntryId,
@@ -436,7 +422,7 @@
     const revealVisit = searchVisit
     void tick().then(() => {
       if (searchVisit !== revealVisit) return
-      if (!isTimelineDisplayed(scrollEl, viewSelected)) {
+      if (awaitingInitialSenders || !isTimelineDisplayed(scrollEl, viewSelected)) {
         if (
           !initialScrollApplied &&
           pendingScrollAction &&
@@ -466,6 +452,8 @@
           scrolledFirstUnreadId = targetFirstUnreadId
         }
         if (deferred.action === 'scroll_bottom' || deferred.action === 'scroll_first_unread') {
+          // Opening at the bottom ends this visit's wait, so a boundary resolving later neither marks nor moves it (`docs/ui.md` §8).
+          if (deferred.action === 'scroll_bottom' && !initialScrollApplied && !search) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       } else {
@@ -479,6 +467,11 @@
   })
 
   $effect(() => {
+    // An initial history read that times out shows the retryable error instead; `再試行` restarts the same wait.
+    if (positioning && scrollView.loadingTimedOut && effectiveStatus === 'ready') entryPositionAbandoned = true
+  })
+
+  $effect(() => {
     if (!unread || !viewSelected || targetUnavailable) return
     if (entry?.boundary === null || needsOlderUnreadPage) return
     void tick().then(() => {
@@ -487,39 +480,37 @@
   })
 
 
-  function handleDiscard(clientMessageId: string) {
-    discardAndFocusComposer(clientMessageId, (id) => channel.discard(id), composerRef)
-  }
+  const {
+    handleDiscard,
+    handleRestoreRequest,
+    handleConfirmReplace,
+    handleCancelReplace,
+  } = createTimelineDraftController({
+    getDraft: () => composerState.draft,
+    setDraft: (draft) => tc.setDraft(draft),
+    discard: (id) => channel.discard(id),
+    restore: (id) => tc.restore(id),
+    canRestore: (id) =>
+      !targetUnavailable && pending.some((p) => p.clientMessageId === id && p.status === 'failed'),
+    getComposerRef: () => composerRef,
+    getConfirmReplaceId: () => confirmReplaceId,
+    setConfirmReplaceId: (id) => {
+      confirmReplaceId = id
+    },
+    afterUpdate: tick,
+  })
 
-  function handleRestoreRequest(clientMessageId: string) {
-    const decision = decideEditAndResend(clientMessageId, composerState.draft)
-    if (decision.action === 'restore_now') {
-      if (tc.restore(clientMessageId)) {
-        focusTarget(composerRef)
-      }
-    } else {
-      confirmReplaceId = decision.clientMessageId
-    }
-  }
-
-  function handleConfirmReplace() {
-    const id = confirmReplaceId
-    confirmReplaceId = null
-    if (!id) return
-    const canRestore = !targetUnavailable && pending.some((p) => p.clientMessageId === id && p.status === 'failed')
-    confirmReplaceDraftWithFailedSend(
-      id,
-      composerState.draft,
-      canRestore,
-      (draft) => tc.setDraft(draft),
-      (targetId) => tc.restore(targetId),
-      composerRef,
-    )
-  }
-
-  function handleCancelReplace() {
-    confirmReplaceId = null
-  }
+  const topicUnavailableEmpty = $derived(
+    topicUnavailable && view.messages.length === 0 && pending.length === 0,
+  )
+  const showInitialSkeleton = $derived(
+    !topicUnavailableEmpty &&
+      !positioning &&
+      effectiveStatus === 'loading' &&
+      !scrollView.loadingTimedOut &&
+      (awaitingInitialSenders || (view.messages.length === 0 && pending.length === 0)),
+  )
+  const showTopicBody = $derived(!topicUnavailableEmpty && !showInitialSkeleton)
 
   async function handleSubmit(): Promise<boolean> {
     if (!topicName) return false
@@ -527,6 +518,7 @@
     if (!ok) return false
     if (search) { await jumpToBottom(); return true }
     if (view.hasNewer) await topics.loadTopicLatest(topicId)
+    if (positioning) entryPositionAbandoned = true
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
@@ -535,83 +527,63 @@
   }
 </script>
 
-<section class="topic-view" aria-label="トピックタイムライン">
-  {#if reconnecting && !targetUnavailable && s.status === 'ready'}
-    <div class="topic-view__banner">
-      <StatusBanner tone="info" role={null} message="再接続しています…" />
-    </div>
-  {/if}
-
-  {#if organizationUnavailable}
-    <div class="topic-view__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="この組織は利用できません。"
-        detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-        actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
-        onaction={onrecheckmembership}
-        secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
-        onsecondaryaction={onswitchorganization}
-      />
-    </div>
-  {:else if channelUnavailable}
-    <div class="topic-view__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="このチャンネルは利用できません。"
-        detail="アクセス権がないか、削除された可能性があります。"
-        actionLabel={ongoToChannelList ? 'チャンネル一覧へ' : undefined}
-        onaction={ongoToChannelList}
-      />
-    </div>
-  {:else if !search && !targetUnavailable && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
-    <div class="topic-view__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-        actionLabel="再試行"
-        onaction={retryInitial}
-      />
-    </div>
-  {/if}
-
-  <div class="topic-view__scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if topicUnavailable && view.messages.length === 0 && pending.length === 0}
+<TimelineFrame
+  ariaLabel="トピックタイムライン"
+  classes={{
+    root: 'topic-view',
+    banner: 'topic-view__banner',
+    positioning: 'topic-view__positioning',
+    scroll: 'topic-view__scroll',
+    scrollPositioning: 'topic-view__scroll--positioning',
+    older: 'topic-view__older',
+    newBelow: 'topic-view__new-below',
+    composer: 'topic-view__composer',
+  }}
+  reconnecting={reconnecting && !targetUnavailable && s.status === 'ready'}
+  {organizationUnavailable}
+  {channelUnavailable}
+  loadErrorMessage={!search && !targetUnavailable && loadFailed
+    ? 'トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。'
+    : null}
+  onretry={retryInitial}
+  {ongoToChannelList}
+  {onrecheckmembership}
+  {onswitchorganization}
+  {positioning}
+  positioningLabel="トピックを読み込み中"
+  bind:scrollEl
+  onscroll={handleScroll}
+  showOlder={showTopicBody && view.initialized && view.hasMore && !targetUnavailable}
+  olderDisabled={view.loading}
+  olderError={view.error}
+  onloadolder={loadOlderWithAnchor}
+  pinned={scrollView.pinned}
+  newerCount={Math.max(scrollView.belowCount, view.newerCount ?? 0)}
+  onjumptobottom={() => void jumpToBottom().catch(console.error)}
+  {confirmReplaceId}
+  returnFocusFallback={composerRef}
+  onconfirmreplace={handleConfirmReplace}
+  oncancelreplace={handleCancelReplace}
+>
+  {#snippet beforeOlder()}
+    {#if topicUnavailableEmpty}
       <EmptyState
         title="このトピックは利用できません。"
         description="削除されたか、URLが正しくない可能性があります。"
       />
-    {:else if effectiveStatus === 'loading' && !scrollView.loadingTimedOut && view.messages.length === 0 && pending.length === 0}
+    {:else if showInitialSkeleton}
       <Skeleton rows={4} label="トピックを読み込み中" />
-    {:else}
-      {#if topicUnavailable}
-        <EmptyState
-          title="このトピックは利用できません。"
-          description="削除されたか、URLが正しくない可能性があります。"
-        />
-      {/if}
-      {#if view.initialized && view.hasMore && !targetUnavailable}
-        <div class="topic-view__older">
-          <Button variant="secondary" disabled={view.loading} onclick={loadOlderWithAnchor}>
-            以前のメッセージを読み込む
-          </Button>
-          {#if view.error}
-            <StatusBanner
-              tone="danger"
-              role="alert"
-              message="以前のメッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-              actionLabel="再試行"
-              onaction={loadOlderWithAnchor}
-            />
-          {/if}
-        </div>
-      {/if}
+    {:else if topicUnavailable}
+      <EmptyState
+        title="このトピックは利用できません。"
+        description="削除されたか、URLが正しくない可能性があります。"
+      />
+    {/if}
+  {/snippet}
 
-          {#if view.messages.length > 0 || pending.length > 0}
-        <VirtualRows
+  {#if showTopicBody}
+    {#if view.messages.length > 0 || pending.length > 0}
+      <VirtualRows
         class="topic-view__list"
         bind:this={rowWindow}
         items={view.messages}
@@ -630,31 +602,29 @@
         onfocuslost={() => focusTarget(composerRef)}
       >
         {#snippet children(m)}
-
-              {#if firstUnreadMessageId === m.id}
-                <ReadMarker />
-              {/if}
-              <MessageRow
-                senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
-                createdAt={m.created_at}
-                searchMatch={searchId === m.id}
-                body={m.body ?? ''}
-                mentions={m.mentions}
-                {resolveMentionName}
-                {selfId}
-                replyCount={replyCounts[m.reply_root_id ?? m.id] ?? null}
-                focusable
-                rovingTabindex={rovingRowId === m.id ? 0 : -1}
-                onopenreplies={onopenreplies && !targetUnavailable
-                  ? (opener) => onopenreplies(m, opener)
-                  : undefined}
-                onrowfocus={() => {
-                  activeRowId = m.id
-                }}
-                onrowkeydown={handleRowKeydown}
-              />
-
-          {/snippet}
+          {#if firstUnreadMessageId === m.id}
+            <ReadMarker />
+          {/if}
+          <MessageRow
+            senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
+            createdAt={m.created_at}
+            searchMatch={searchId === m.id}
+            body={m.body ?? ''}
+            mentions={m.mentions}
+            {resolveMentionName}
+            {selfId}
+            replyCount={replyCounts[m.reply_root_id ?? m.id] ?? null}
+            focusable
+            rovingTabindex={rovingRowId === m.id ? 0 : -1}
+            onopenreplies={onopenreplies && !targetUnavailable
+              ? (opener) => onopenreplies(m, opener)
+              : undefined}
+            onrowfocus={() => {
+              activeRowId = m.id
+            }}
+            onrowkeydown={handleRowKeydown}
+          />
+        {/snippet}
         {#snippet pendingRow(p)}
           <MessageRow
             body={p.body}
@@ -667,32 +637,23 @@
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
         {/snippet}
-        </VirtualRows>
-      {:else if !search && effectiveStatus === 'ready'}
-        <EmptyState
-          title="まだメッセージがありません。"
-          description="下の入力欄からメッセージを送信できます。"
-        />
-      {/if}
+      </VirtualRows>
+    {:else if !search && effectiveStatus === 'ready'}
+      <EmptyState
+        title="まだメッセージがありません。"
+        description="下の入力欄からメッセージを送信できます。"
+      />
     {/if}
-      {#if view.hasNewer && !targetUnavailable}
-      <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
-    {/if}
-
-    {#if search && !targetUnavailable}
-      <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
-    {/if}
-  </div>
-
-  {#if !scrollView.pinned && (scrollView.belowCount > 0 || (view.newerCount ?? 0) > 0)}
-    <div class="topic-view__new-below">
-      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
-        新着 {Math.max(scrollView.belowCount, view.newerCount ?? 0)}件 ↓
-      </Button>
-    </div>
+  {/if}
+  {#if view.hasNewer && !targetUnavailable}
+    <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
   {/if}
 
-  <div class="topic-view__composer">
+  {#if search && !targetUnavailable}
+    <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
+  {/if}
+
+  {#snippet composer()}
     <Composer
       {members}
       {onmentionrequest}
@@ -706,63 +667,5 @@
       onsubmit={handleSubmit}
       onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
-  </div>
-
-  <ReplaceDraftDialog
-    pendingId={confirmReplaceId}
-    description="入力中の下書きを破棄して、送信できなかったメッセージを入力欄に戻します。"
-    returnFocusFallback={composerRef}
-    onconfirm={handleConfirmReplace}
-    oncancel={handleCancelReplace}
-  />
-</section>
-
-<style>
-  .topic-view {
-    position: relative;
-    display: grid;
-    grid-template-rows: auto 1fr auto;
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-    gap: var(--space-8);
-  }
-
-  .topic-view__banner {
-    padding: 0 var(--space-16);
-    min-width: 0;
-  }
-
-  .topic-view__scroll {
-    grid-row: 2;
-    overflow-y: auto;
-    overflow-anchor: none;
-    padding: var(--space-8) var(--space-16);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-8);
-    min-height: 0;
-    min-width: 0;
-  }
-
-  .topic-view__older {
-    display: grid;
-    justify-items: start;
-    gap: var(--space-8);
-    min-width: 0;
-  }
-
-  .topic-view__new-below {
-    position: absolute;
-    bottom: calc(var(--space-24) * 4);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 10;
-  }
-
-  .topic-view__composer {
-    grid-row: 3;
-    padding: 0 var(--space-12) var(--space-12);
-    min-width: 0;
-  }
-</style>
+  {/snippet}
+</TimelineFrame>

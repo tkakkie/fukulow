@@ -1,4 +1,6 @@
 use super::*;
+use crate::channels::access::AccessStatus;
+use crate::test_support::{Blocked, Count, wait_blocked_or};
 
 #[fukulow_test::test]
 async fn channel_manager_last_manager_denials_and_unmanaged_controls(pool: PgPool) {
@@ -112,7 +114,7 @@ async fn channel_manager_role_changes_are_atomic_and_preserve_grant_subscription
         json!({"error":"last_channel_manager"})
     );
     assert_eq!(snapshot(&f.pools.admin).await, before);
-    assert_eq!(watch.status(), 0);
+    assert_eq!(watch.status(), AccessStatus::Active);
     assert_eq!(
         mutation(&f.app, &f.token, second, backup, true)
             .await
@@ -138,7 +140,7 @@ async fn channel_manager_role_changes_are_atomic_and_preserve_grant_subscription
         assert_eq!(positions, after);
         let after: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(p) ORDER BY channel_id,topic_id) FROM topic_read_positions p WHERE organization_id=$1 AND member_id=$2").bind(f.org).bind(f.creator).fetch_one(&f.pools.admin).await.unwrap();
         assert_eq!(topic_positions, after);
-        assert_eq!(watch.status(), 0);
+        assert_eq!(watch.status(), AccessStatus::Active);
     }
     f.pools.app.close().await;
 }
@@ -250,13 +252,13 @@ async fn channel_manager_new_lifetimes_never_revive_right_or_old_subscription(po
             .check(&f.pools.app, SubscriptionScope::All)
             .await
             .unwrap();
-        assert_eq!(watch.status(), 1);
+        assert_eq!(watch.status(), AccessStatus::ChannelLost);
         let fresh = access
             .subscribe(&f.pools.app, f.org, (target, 0), f.channel)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(fresh.status(), 0);
+        assert_eq!(fresh.status(), AccessStatus::Active);
     }
     f.pools.app.close().await;
 }
@@ -339,7 +341,7 @@ async fn channel_manager_invite_reactivation_leaves_stale_right_unusable_and_ren
         .check(&f.pools.app, SubscriptionScope::All)
         .await
         .unwrap();
-    assert_eq!(watch.status(), 3); // Membership loss retains #146's 4003 classification.
+    assert_eq!(watch.status(), AccessStatus::MembershipLost); // Membership loss retains #146's 4003 classification.
     f.add(target).await;
     assert_ne!(f.right(target).await.0, old);
     assert!(!f.right(target).await.1);
@@ -471,13 +473,17 @@ async fn channel_manager_public_visibility_race_cannot_commit_a_right_on_public(
             })
             .await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(3),async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'INSERT INTO channel_members%' OR query LIKE 'UPDATE channels SET visibility=%'))").fetch_one(&f.pools.admin).await.unwrap();
-                if waiting || pending.is_finished() {break;}
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
+        wait_blocked_or(
+            &f.pools.admin,
+            Blocked::LockQueries(&[
+                "INSERT INTO channel_members%",
+                "UPDATE channels SET visibility=%",
+            ]),
+            Count::AtLeast(1),
+            std::time::Duration::from_secs(3),
+            || pending.is_finished(),
+        )
+        .await;
         assert!(
             !pending.is_finished(),
             "visibility and manager writes must serialize"

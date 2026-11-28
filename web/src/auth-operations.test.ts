@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createAuthOperations } from './auth-operations'
 import type { AuthState, signIn } from './auth'
 import type { AccountIdentity, Identity, Result } from './api'
-import { createInviteAcceptance } from './members'
+import { createInviteAcceptance } from './invite-acceptance'
 
 function deferred<T>() {
   let resolve!: (value: T) => void

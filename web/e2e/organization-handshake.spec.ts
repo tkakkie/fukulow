@@ -111,7 +111,9 @@ test('C10 organization_unavailable keeps Workspace and Timeline mounted with loa
   const host = await fixture('membership', { withChannel: true, upgradeDelayMs: 400 })
   try {
     await page.goto(host.url)
-    await expect(page.getByRole('list', { name: 'メッセージ一覧' }).getByText('保持されるメッセージ')).toBeVisible()
+    // Before C10 the socket is never live, so no entry boundary arrives: the loaded row stays hidden under the
+    // positioning Skeleton while the Composer stays usable (`docs/ui.md` §8, #968). C10 must then reveal it.
+    await expect(page.locator('#main-content [data-message-id="00000000-0000-0000-0000-000000000004"]')).toBeAttached()
     const composer = page.getByRole('textbox', { name: 'メッセージ' })
     await composer.fill('保持される下書き')
 

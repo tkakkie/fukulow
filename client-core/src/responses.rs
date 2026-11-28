@@ -1,6 +1,5 @@
 use crate::{engine::Step, merge::Source, *};
 use fukulow_api::MessagePage;
-use std::rc::Rc;
 
 pub(crate) enum HistoryPage {
     Messages(MessagePage),
@@ -11,7 +10,7 @@ impl Step<'_> {
     pub(super) fn history_response(
         &mut self,
         request: Token,
-        result: Result<HistoryPage, Failure>,
+        result: Result<HistoryPage, (Failure, Option<&str>)>,
     ) {
         if !matches!(
             self.core.requests.get(&request),
@@ -30,11 +29,21 @@ impl Step<'_> {
             return;
         };
         self.metadata_changed = true;
-        if stale {
-            if matches!(result, Err(Failure::Status(401))) {
-                self.stop(true);
-            }
-            return;
+        let access = match &result {
+            Err((status, error)) => access_outcome(
+                AccessEndpoint::History,
+                AccessLifetime::request(stale),
+                status.http_status(),
+                *error,
+            ),
+            Ok(_) if stale => AccessOutcome::Ignored,
+            Ok(_) => AccessOutcome::LocalOutcome,
+        };
+        match access {
+            AccessOutcome::AccountEnded if stale => return self.stop(true),
+            AccessOutcome::OrganizationUnavailable => return self.organization_unavailable(),
+            AccessOutcome::Ignored => return,
+            _ => {}
         }
         let generation = match &result {
             Ok(HistoryPage::Messages(p)) => Some(p.history_generation),
@@ -67,15 +76,12 @@ impl Step<'_> {
             Page::After => c.fill = None,
         }
         match result {
-            Err(Failure::Status(401)) => self.stop(true),
-            Err(Failure::Status(403 | 404)) => self.unavailable(id),
+            Err(_) if access == AccessOutcome::AccountEnded => self.stop(true),
+            Err(_) if access == AccessOutcome::ChannelUnavailable => self.unavailable(id),
             Err(_) => {
                 if page == Page::After {
                     if Self::gap(c) {
-                        let attempt = c.fill_attempt;
-                        c.fill_attempt += 1;
-                        let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
-                        self.channel(id).wait = Some(n);
+                        self.fill_backoff_or_reconcile(id, true);
                     }
                 } else if page == Page::Latest {
                     c.history_error = true;
@@ -110,15 +116,8 @@ impl Step<'_> {
                     }
                 }
                 let c = self.channel(id);
-                if c.cursor == before && Self::gap(c) {
-                    let attempt = c.fill_attempt;
-                    c.fill_attempt += 1;
-                    let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
-                    self.channel(id).wait = Some(n);
-                } else {
-                    c.fill_attempt = 0;
-                    self.reconcile(id, true);
-                }
+                let back_off = c.cursor == before && Self::gap(c);
+                self.fill_backoff_or_reconcile(id, back_off);
             }
             Ok(HistoryPage::Messages(result)) => {
                 let before = c.cursor;
@@ -136,7 +135,7 @@ impl Step<'_> {
                     } else if let Some(first) = first {
                         c.retired_through = c
                             .retired_through
-                            .map(|through| through.min(first - 1))
+                            .map(|through| through.min(first.saturating_sub(1)))
                             .filter(|through| *through > 0);
                     }
                 }
@@ -157,15 +156,8 @@ impl Step<'_> {
                 }
                 if page == Page::After {
                     let c = self.channel(id);
-                    if c.cursor == before && Self::gap(c) {
-                        let attempt = c.fill_attempt;
-                        c.fill_attempt += 1;
-                        let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
-                        self.channel(id).wait = Some(n);
-                    } else {
-                        c.fill_attempt = 0;
-                        self.reconcile(id, true);
-                    }
+                    let back_off = c.cursor == before && Self::gap(c);
+                    self.fill_backoff_or_reconcile(id, back_off);
                 } else {
                     self.subscribe(id);
                     self.reconcile(id, false);
@@ -173,96 +165,20 @@ impl Step<'_> {
             }
         }
     }
-    pub(super) fn send_response(
-        &mut self,
-        request: Token,
-        result: Result<fukulow_api::Message, (Failure, Option<f64>, Option<String>)>,
-    ) {
-        if !matches!(self.core.requests.get(&request), Some(Request::Send { .. })) {
-            return;
-        }
-        let Some(Request::Send {
-            channel: id,
-            client_message_id,
-            stale,
-        }) = self.core.requests.remove(&request)
-        else {
-            return;
-        };
-        self.metadata_changed = true;
-        if stale {
-            if matches!(result, Err((Failure::Status(401), ..))) {
-                self.stop(true);
-            }
-            return;
-        }
-        if matches!(&result, Err((Failure::Status(409), _, Some(error))) if error == "history_generation_changed")
-        {
-            self.reset_history(None);
-            return;
-        }
-        self.channel(id);
-        match result {
-            Ok(message) => {
-                if !self.accept_generation(message.history_generation) {
-                    return;
-                }
-                self.merge(id, vec![message], Source::Ack);
-                self.reconcile(id, false);
-            }
-            Err((Failure::Status(401), ..)) => self.stop(true),
-            Err((status, delay, error)) => {
-                let c = self.channel(id);
-                let Some(index) = c
-                    .pending
-                    .iter()
-                    .position(|p| p.client_message_id == client_message_id && p.request == request)
-                else {
-                    return;
-                };
-                let mut pending = (*c.pending).clone();
-                let p = &mut pending[index];
-                if status == Failure::Status(429) {
-                    self.cancel(p.retry_wait);
-                    let n = self.token();
-                    let delay = delay
-                        .filter(|d| {
-                            d.is_finite()
-                                && d.fract() == 0.0
-                                && *d >= 1000.0
-                                && *d <= 9_007_199_254_740_991.0
-                        })
-                        .unwrap_or(1000.0) as u64;
-                    self.core.timers.insert(
-                        n,
-                        Timer {
-                            purpose: Purpose::SendRetry,
-                            channel: Some(id),
-                            client_message_id: Some(client_message_id),
-                        },
-                    );
-                    p.state = PendingState::Throttled;
-                    p.retry_wait = Some(n);
-                    self.out.effects.push(Effect::Wait {
-                        id: n,
-                        purpose: Purpose::SendRetry,
-                        channel: Some(id),
-                        delay_ms: Some(delay),
-                        attempt: None,
-                    });
-                } else {
-                    p.state =
-                        if matches!(status, Failure::Status(400 | 403 | 404 | 409 | 413 | 415)) {
-                            PendingState::Failed
-                        } else {
-                            PendingState::Unknown
-                        };
-                    p.failure_code = error;
-                }
-                self.channel(id).pending = Rc::new(pending);
-            }
+
+    fn fill_backoff_or_reconcile(&mut self, id: Uuid, back_off: bool) {
+        let c = self.channel(id);
+        if back_off {
+            let attempt = c.fill_attempt;
+            c.fill_attempt += 1;
+            let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
+            self.channel(id).wait = Some(n);
+        } else {
+            c.fill_attempt = 0;
+            self.reconcile(id, true);
         }
     }
+
     pub(super) fn timer_elapsed(&mut self, id: Token) {
         let Some(t) = self.core.timers.remove(&id) else {
             return;
@@ -275,22 +191,10 @@ impl Step<'_> {
             self.core.session.reconnect_wait = None;
             self.connect();
         } else if let Some(channel) = t.channel {
-            let c = self.channel(channel);
             if t.purpose == Purpose::SendRetry {
-                if c.state != Availability::Unavailable
-                    && let Some(p) = c
-                        .pending
-                        .iter()
-                        .find(|p| {
-                            Some(p.client_message_id) == t.client_message_id
-                                && p.retry_wait == Some(id)
-                                && p.state == PendingState::Throttled
-                        })
-                        .cloned()
-                {
-                    self.attempt(channel, p);
-                }
+                self.send_retry_elapsed(channel, id, t.client_message_id);
             } else {
+                let c = self.channel(channel);
                 if c.wait != Some(id) {
                     return;
                 }
@@ -298,5 +202,64 @@ impl Step<'_> {
                 self.reconcile(channel, true);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fill_backoff_uses_the_current_nonzero_attempt_for_its_wait() {
+        let channel = Uuid::from_u128(1);
+        let mut core = Core::new(Uuid::from_u128(2));
+        let mut step = Step::new(&mut core);
+        let c = step.channel(channel);
+        c.cursor = Some(1);
+        c.held_through = Some(3);
+        c.fill_attempt = 2;
+
+        step.fill_backoff_or_reconcile(channel, true);
+
+        let c = step.channel(channel);
+        assert_eq!(c.fill_attempt, 3);
+        let wait = c.wait.unwrap();
+        assert!(matches!(
+            step.out.effects.as_slice(),
+            [Effect::Wait {
+                id,
+                purpose: Purpose::FillBackoff,
+                channel: Some(wait_channel),
+                delay_ms: None,
+                attempt: Some(2),
+            }] if *id == wait && *wait_channel == channel
+        ));
+    }
+
+    #[test]
+    fn latest_page_clears_retired_floor_at_minimum_creation_position() {
+        let channel = Uuid::from_u128(1);
+        let mut core = Core::new(Uuid::from_u128(2));
+        let mut step = Step::new(&mut core);
+        step.channel(channel).retired_through = Some(10);
+        step.history(channel, Page::Latest, None);
+        let request = step.channel(channel).latest.unwrap();
+        let page = serde_json::from_value(json!({
+            "history_generation": Uuid::nil(), "as_of_seq": 10, "has_more": true,
+            "messages": [{
+                "history_generation": Uuid::nil(), "channel_id": channel,
+                "id": Uuid::from_u128(3), "client_message_id": Uuid::from_u128(4),
+                "created_seq": i64::MIN, "version": i64::MIN, "deleted": false,
+                "sender": Uuid::from_u128(5), "body": "message",
+                "created_at": "2026-01-01T00:00:00Z", "topic_id": null,
+                "reply_to": null, "reply_root_id": null, "mentions": []
+            }]
+        }))
+        .unwrap();
+
+        step.history_response(request, Ok(HistoryPage::Messages(page)));
+
+        assert_eq!(step.channel(channel).retired_through, None);
     }
 }

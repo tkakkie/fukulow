@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest'
+import type { DmListChanged } from './api-schema'
 import { connectRealtime, type SocketLike } from './realtime'
 import { moveEvent, record } from './protocol-test-helpers'
 
@@ -138,4 +139,17 @@ it('forwards canonical section generations losslessly and refuses malformed or e
     expect(onEvent).toHaveBeenLastCalledWith(event)
   }
   expect(onEvent).toHaveBeenCalledTimes(3)
+})
+
+it('forwards dm_list_changed with only the type key and rejects extra fields', () => {
+  const socket: SocketLike = { send() {}, close() {}, onopen: null, onmessage: null, onclose: null }
+  const onEvent = vi.fn()
+  const connection = connectRealtime({ onReady() {}, onClose() {}, onEvent }, () => socket)
+  for (const invalid of [{ type: 'dm_list_changed', channel_id: 'D' }, { type: 'dm_list_changed', extra: true }])
+    socket.onmessage?.({ data: JSON.stringify(invalid) })
+  expect(onEvent).not.toHaveBeenCalled()
+  const event: DmListChanged = { type: 'dm_list_changed' }
+  socket.onmessage?.({ data: JSON.stringify(event) })
+  expect(onEvent).toHaveBeenCalledExactlyOnceWith(event)
+  connection.close()
 })

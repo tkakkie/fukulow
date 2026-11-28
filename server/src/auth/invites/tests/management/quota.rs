@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use std::collections::HashSet;
 
 async fn seed_role(
@@ -309,24 +310,13 @@ async fn concurrent_creators_share_the_last_invite_slot_in_each_pool(pool: sqlx:
             let token = token.clone();
             tokio::spawn(async move { create(&app, org, &token, role).await })
         });
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let waiting: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() \
-                     AND wait_event_type='Lock' \
-                     AND query LIKE 'SELECT organization_id FROM organizations%FOR NO KEY UPDATE'",
-                )
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                if waiting == 2 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::LockQuery("SELECT organization_id FROM organizations%FOR NO KEY UPDATE"),
+            Count::Exactly(2),
+            Duration::from_secs(10),
+        )
+        .await;
         blocker.commit().await.unwrap();
         let mut statuses = Vec::new();
         for task in pending {

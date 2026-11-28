@@ -1,6 +1,7 @@
 import type { ActivityTarget } from './activity'
 import { createSubscriber } from 'svelte/reactivity'
 import { createAuthOperations } from './auth-operations'
+import { watchAuthorScope } from './author-lookup-scope'
 import { createAccountSecurity } from './account-security'
 import { accountSecurityAdapter } from './account-security.svelte'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
@@ -8,10 +9,12 @@ import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.s
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
-import { getOrganizationMe, isOrganizationUnavailable, type Identity, type Role } from './api'
+import { getOrganizationMe, isOrganizationUnavailable, isSessionEnded, listTimeline, type Identity, type Role } from './api'
+import { startInitialSelection } from './initial-timeline'
+import type { Navigation } from './navigation'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
-import { createSession } from './session'
+import { createSession, createSessionEndReporter, startInitialChannels, type SessionOptions } from './session'
 import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess, type MemberListAccess } from './members'
@@ -26,7 +29,9 @@ import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 import type { SearchSource } from './search-source'
 
 export type { AuthState } from './auth'
+type InitialSelection = Pick<SessionOptions, 'initialTimeline' | 'initialChannelHint'>
 export type SessionModel = {
+  watchAuthors?(authors: Parameters<typeof watchAuthorScope>[2]): () => void
   holdActivity?(key: string, target: ActivityTarget): unknown
   dms?: DmsAdapter
   navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
@@ -41,7 +46,7 @@ export type SessionModel = {
   unread?(id: string): UnreadAdapter
   channelMembers?(id: string): ReturnType<typeof createChannelMembers>
   memberListAccess?(): MemberListAccess
-  onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void): () => void
+  onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void, onDirectoryLoad?: (listener: () => void) => () => void): () => void
   onChannelRevoked?(listener: (channelId: string) => void): () => void
   close(): void
 }
@@ -51,29 +56,34 @@ export type AuthDeps = {
   setupAndSignIn: typeof setupAndSignIn
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
+  readInitialChannels?: typeof startInitialChannels
+  readInitialTimeline?: typeof listTimeline
   /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean, initialChannels?: SessionOptions['initialChannels'], initialSelection?: InitialSelection): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
+  readInitialChannels: startInitialChannels,
+  readInitialTimeline: listTimeline,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal) {
-    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels, initialSelection) {
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, initialChannels, ...initialSelection, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
     return {
+      watchAuthors: authors => watchAuthorScope(session.channels, session.sync, authors),
       holdActivity: session.holdActivity,
       memberListAccess: session.memberListAccess,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       searchAnchor: searchAnchorAdapter(session.searchAnchor),
       searchSource: session.searchSource,
       onChannelRevoked: session.onChannelRevoked,
-      onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
-      channels: channelsAdapter(session.channels),
+      onMemberListRefresh: (listener, onDirectoryLoad) => watchMemberAccess(session.channels, session.sync, listener, { skipConnectRefresh: true, memberListAccess: session.memberListAccess, onDirectoryLoad }),
+      channels: channelsAdapter(session.channels, session.channelCreation),
       sections: sectionsAdapter(session.sections),
       dms: dmsAdapter(session.dms),
       sync: syncAdapter(session.sync),
@@ -99,37 +109,45 @@ const defaults: AuthDeps = {
   },
 }
 /** Account lifetime owns the 401 fence; each Organization selection owns a separate data generation. */
-export function createAuth(deps: AuthDeps = defaults) {
+export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
   let view = $state<AuthState>({ screen: 'loading' })
   let organization = $state<Identity | null>(null)
-  let capabilitiesPending = $state(false)
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
   let stopMemberAvailability: (() => void) | undefined
   let stopMemberRefresh: (() => void) | undefined
+  let stopAuthorScope: (() => void) | undefined
   let members = $state<ReturnType<typeof membersAdapter> | null>(null)
   let security = $state<ReturnType<typeof accountSecurityAdapter> | null>(null)
   let changes = $state(0)
   const drafts = createDraftStore()
   let accountGeneration = 0
   let accountRequests = new AbortController()
+  let reportAccountRejection = accountRejection(accountGeneration)
   let selectionGeneration = 0
+  let startup: ReturnType<typeof startInitialSelection> | undefined
 
   function closeOrganization() {
+    startup?.close(); startup = undefined
     stopMemberAvailability?.(); stopMemberAvailability = undefined
     stopMemberRefresh?.(); stopMemberRefresh = undefined
+    stopAuthorScope?.(); stopAuthorScope = undefined
     session?.close(); session = null
     members?.close(); members = null
     clearMessageFormatCache()
     organization = null
-    capabilitiesPending = false
     selectionGeneration++
     changes++
   }
-  function ended(generation: number) {
-    if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedMessage })
+  function accountRejection(generation: number) {
+    return createSessionEndReporter(() => {
+      if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedMessage })
+    }, accountRequests.signal)
   }
+  const route = () => navigation ? navigation.get().target
+    : typeof window !== 'undefined' ? parseNavigation(window.location.href) : null
+
   async function selectOrganization(id: string) {
     if (view.screen !== 'app') return
     operations.clearError()
@@ -137,42 +155,60 @@ export function createAuth(deps: AuthDeps = defaults) {
     selectedOrganizationId = id
     organizationStatus = 'loading'
     const account = accountGeneration, selection = selectionGeneration
+    const reportEnded = reportAccountRejection
     const result = await deps.getOrganization(id)
     // Account Session rejection remains authoritative even when this selection was replaced.
-    if (!result.ok && result.kind === 'http' && result.status === 401) { ended(account); return }
+    if (isSessionEnded(result)) { reportEnded(); return }
     if (account !== accountGeneration || selection !== selectionGeneration) return
     if (!result.ok) {
       if (isOrganizationUnavailable(result)) organizationStatus = 'unavailable'
       else organizationStatus = 'error'
       return
     }
-    // The REST reads above overlap core loading; no sync controller exists until the core is ready.
+    // A superseded selection's 401 can still end this Account Session.
+    const initialChannels = deps.readInitialChannels?.(id, accountRequests.signal)
+      .then(list => {
+        if (isSessionEnded(list)) reportEnded()
+        return list
+      })
+    const initial = startInitialSelection({
+      organizationId: id, route, navigation, channels: initialChannels, accountSignal: accountRequests.signal,
+      load: deps.readInitialTimeline, onEnded: reportEnded,
+      onUnavailableBeforeSession: () => { organizationStatus = 'unavailable' },
+    })
+    startup = initial
     if (deps.coreReady) {
-      try { await deps.coreReady() } catch { return }
+      try { await deps.coreReady() } catch { initial.close(); return }
       if (account !== accountGeneration || selection !== selectionGeneration) return
     }
+    if (initial.unavailable) return
+    const { initialChannelHint, initialTimeline } = initial
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
+    const opened = deps.openSession(result.data.member.id, reportEnded, id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
-      capabilitiesPending = identity === null
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    }, result.data.member.role, accountRequests.signal)
+    }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed, initialChannels,
+    { initialChannelHint, initialTimeline })
+    session = opened
+    initial.attachSession(() => { void opened.sync.markUnavailable() })
     organizationStatus = 'ready'
-    members = deps.openMembers?.(id, () => ended(account), () => {
+    members = deps.openMembers?.(id, reportEnded, () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       void session?.sync.markUnavailable()
     }, session.memberListAccess ?? (() => organization?.member.role ?? null)) ?? null
-    if (members) session.holdActivity?.('members', members.activityTarget)
+    if (members) {
+      stopAuthorScope = session.watchAuthors?.(members.authors)
+      session.holdActivity?.('members', members.activityTarget)
+    }
     stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
     if (session.sync.unavailable) members?.unavailable()
-    void members?.load()
     const currentMembers = members
     stopMemberRefresh = session.onMemberListRefresh?.(reason => {
       if (reason === 'access') currentMembers?.activityTarget.invalidate('access')
-      else void currentMembers?.load()
-    })
+      else void currentMembers?.refreshIfActive()
+    }, currentMembers?.onLoad)
     changes++
   }
   async function show(next: AuthState) {
@@ -183,14 +219,14 @@ export function createAuth(deps: AuthDeps = defaults) {
     // Reply reads survive Organization switches for C6. End their transport once the Account is fenced.
     accountRequests.abort()
     accountRequests = new AbortController()
+    reportAccountRejection = accountRejection(accountGeneration)
     selectedOrganizationId = ''
     organizationStatus = 'loading'
     operations.clearError()
     view = next
     if (next.screen === 'app') {
-      const account = accountGeneration
-      security = accountSecurityAdapter((deps.openSecurity ?? createAccountSecurity)(() => ended(account)))
-      const requested = typeof window !== 'undefined' ? parseNavigation(window.location.href)?.organizationId : null
+      security = accountSecurityAdapter((deps.openSecurity ?? createAccountSecurity)(reportAccountRejection))
+      const requested = route()?.organizationId
       const id = requested ?? next.identity.organizations[0]?.organization_id
       if (id) await selectOrganization(id)
     }
@@ -201,7 +237,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     selection: () => selectionGeneration,
     loading: () => { view = { screen: 'loading' } },
     show,
-    ended,
+    ended: generation => { if (generation === accountGeneration) reportAccountRejection() },
     async accepted(identity) {
       if (view.screen !== 'app') return
       const organizations = view.identity.organizations.filter(o => o.organization_id !== identity.organization.organization_id)
@@ -215,7 +251,6 @@ export function createAuth(deps: AuthDeps = defaults) {
     get error() { subscribe(); return operations.get().error },
     get busy() { subscribe(); return operations.get().busy },
     get organization() { return organization },
-    get capabilitiesPending() { return capabilitiesPending },
     get members() { return members },
     get security() { return security },
     get selectedOrganizationId() { return selectedOrganizationId },

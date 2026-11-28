@@ -1,19 +1,20 @@
-use super::*;
+use super::{hooks::Phase, *};
 use tracing::instrument::WithSubscriber;
 
 #[fukulow_test::test]
 async fn connection_database_failures_emit_once_with_fixed_operation_and_no_details(pool: PgPool) {
     for (phase, operation) in [
-        ("authorize", "websocket_authorize"),
-        ("access_subscribe", "websocket_subscribe"),
-        ("registered", "websocket_latest_seq"),
-        ("refresh", "websocket_refresh"),
-        ("snapshot", "websocket_replay"),
-        ("subscribed_seq", "websocket_subscribed_seq"),
-        ("handoff_generation", "websocket_authorize"),
+        (Some(Phase::Authorize), "websocket_authorize"),
+        (Some(Phase::AccessSubscribe), "websocket_subscribe"),
+        (Some(Phase::Registered), "websocket_latest_seq"),
+        (Some(Phase::Refresh), "websocket_refresh"),
+        (Some(Phase::Snapshot), "websocket_replay"),
+        (Some(Phase::SubscribedSeq), "websocket_subscribed_seq"),
+        (Some(Phase::HandoffGeneration), "websocket_authorize"),
+        (None, "websocket_authorize"),
     ] {
         let f = fixture(&pool).await;
-        if phase == "snapshot" {
+        if phase == Some(Phase::Snapshot) {
             post(&f, f.channel).await;
         }
         let output = crate::observability::tests::Capture::default();
@@ -29,24 +30,22 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                         let capture = capture.clone();
                         let finished = finished.clone();
                         async move {
+                            let permit = state.socket_gate.admit(auth.account_id).unwrap();
+                            let activity = state
+                                .message_delivery
+                                .channel_access
+                                .activity
+                                .register(&auth);
                             ws.on_upgrade(move |mut socket| {
                                 async move {
-                                    let permit = state.socket_gate.admit(auth.account_id).unwrap();
-                                    let queue = state.message_delivery.queue(
-                                        auth.identity.organization.organization_id,
-                                        (auth.identity.member.id, auth.membership_revision),
-                                        LIVE_QUEUE_CAPACITY,
-                                    );
-                                    let mut connection = connection::Connection {
-                                        state: &state,
-                                        auth: &auth,
-                                        queue,
-                                        cursors: HashMap::new(),
-                                        access: HashMap::new(),
-                                        permit,
-                                    };
+                                    let mut connection =
+                                        connection::Connection::new(&state, &auth, permit);
                                     let code = connection
-                                        .run(&mut socket, connection::Lifecycle::default())
+                                        .run(
+                                            &mut socket,
+                                            activity,
+                                            connection::Lifecycle::default(),
+                                        )
                                         .await
                                         .unwrap_err();
                                     close(&mut socket, code).await;
@@ -60,12 +59,36 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
             )
             .with_state(f.state.clone());
         let server = Server::start(router).await;
-        let gate = access_loss::gate(f.channel, phase, 0);
+        // The duplicate branch has no pause point: a second Subscribe reaches it.
+        let gate = phase.map(|phase| hooks::register(f.channel, phase, 0));
         let mut socket = server.connect(&f.token).await;
         subscribe(&mut socket, f.channel, 0).await;
-        entered(&gate).await;
-        f.state.pool.close().await;
-        gate.release.add_permits(1);
+        if let Some(gate) = gate {
+            gate.entered().await;
+            f.state.pool.close().await;
+            gate.release();
+        } else {
+            let ServerEvent::Subscribed {
+                history_generation,
+                channel_id,
+                caught_up_seq,
+            } = serde_json::from_value(event(&mut socket).await).unwrap()
+            else {
+                panic!("expected the initial subscription to succeed");
+            };
+            assert_eq!((channel_id, caught_up_seq), (f.channel, 0));
+            f.state.pool.close().await;
+            control(
+                &mut socket,
+                ClientMessage::Subscribe {
+                    history_generation: Some(history_generation),
+                    channel_id,
+                    after_seq: caught_up_seq,
+                },
+            )
+            .await
+            .unwrap();
+        }
         closed(&mut socket, 1011).await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), completion.recv())
@@ -73,21 +96,28 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                 .unwrap(),
             Some(1011)
         );
-        let failures: Vec<_> = output
-            .events()
-            .into_iter()
-            .filter(|event| event["fields"]["event"] == "database_failure")
+        let events = output.events();
+        let failures: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["fields"]["event"] == "database_failure")
             .collect();
-        assert_eq!(failures.len(), 1, "{phase}: {}", output.text());
+        assert_eq!(failures.len(), 1, "{phase:?}: {}", output.text());
+        let (failure_index, failure) = failures[0];
+        let close_index = events
+            .iter()
+            .position(|event| event["fields"]["event"] == "websocket_closed")
+            .unwrap_or_else(|| panic!("{phase:?}: {}", output.text()));
+        assert!(failure_index < close_index, "{phase:?}: {}", output.text());
         assert_eq!(
-            failures[0]["fields"],
+            failure["fields"],
             json!({"event":"database_failure", "kind":"pool_closed"}),
-            "{phase}"
+            "{phase:?}"
         );
         assert_eq!(
-            failures[0]["span"],
+            failure["span"],
             json!({"name":"database", "operation":operation}),
-            "{phase}"
+            "{phase:?}"
         );
         for forbidden in [
             "pool closed",
@@ -99,7 +129,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
         ] {
             assert!(
                 !output.text().contains(forbidden),
-                "{phase}: {}",
+                "{phase:?}: {}",
                 output.text()
             );
         }

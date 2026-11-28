@@ -1,5 +1,45 @@
 import { describe, expect, it, vi } from 'vitest'
-import { checkHealth, lookupAuthors, type ChannelPlacement, type CreatedSection, type SectionLayout } from './api'
+import { checkHealth, isChannelDenial, isSessionEnded, lookupAuthors, type ChannelPlacement, type CreatedSection, type SectionLayout } from './api'
+
+describe('isSessionEnded', () => {
+  it.each([401, 403, 404, 429, 500])('classifies HTTP %i by status alone', status => {
+    expect(isSessionEnded({ ok: false, kind: 'http', status })).toBe(status === 401)
+  })
+
+  it('ignores successful results and network failures', () => {
+    expect(isSessionEnded({ ok: true, data: undefined })).toBe(false)
+    expect(isSessionEnded({ ok: false, kind: 'network' })).toBe(false)
+  })
+})
+
+describe('isChannelDenial', () => {
+  it.each([
+    [401, false, false],
+    [403, false, true],
+    [404, true, true],
+    [429, false, false],
+    [500, false, false],
+  ] as const)('checks HTTP %i against each caller-supplied status set', (status, notFoundOnly, forbiddenOrNotFound) => {
+    const result = { ok: false, kind: 'http', status } as const
+    expect(isChannelDenial(result, { statuses: [404] })).toBe(notFoundOnly)
+    expect(isChannelDenial(result, { statuses: [403, 404] })).toBe(forbiddenOrNotFound)
+  })
+
+  it.each([403, 404])('exempts an exact local not-found code on HTTP %i when requested', status => {
+    const result = { ok: false, kind: 'http', status, error: 'topic_not_found' } as const
+    const statuses = [403, 404]
+    expect(isChannelDenial(result, { statuses, localNotFound: 'topic_not_found' })).toBe(false)
+    expect(isChannelDenial(result, { statuses, localNotFound: 'reply_chain_not_found' })).toBe(true)
+    expect(isChannelDenial(result, { statuses })).toBe(true)
+    expect(isChannelDenial({ ok: false, kind: 'http', status }, { statuses, localNotFound: 'topic_not_found' })).toBe(true)
+  })
+
+  it('ignores successful results and network failures', () => {
+    const denial = { statuses: [403, 404], localNotFound: 'topic_not_found' }
+    expect(isChannelDenial({ ok: true, data: undefined }, denial)).toBe(false)
+    expect(isChannelDenial({ ok: false, kind: 'network' }, denial)).toBe(false)
+  })
+})
 
 it('looks up display identities in the selected Organization using generated request and response types', async () => {
   const identities = [{ id: 'author', name: '名前', deactivated: true }]

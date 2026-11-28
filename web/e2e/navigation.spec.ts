@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { secretSafe, createChannel, signInOwner } from './helpers.ts'
+import { secretSafe, createChannel, signInOwner, waitForAnimations } from './helpers.ts'
 
 let org: string
 let first: string
@@ -470,6 +470,7 @@ test('responsive panel geometry: overlays main at 960px, 1100px and 1279px, push
 
     await openPanelBtn.click()
     await expect(panel).toBeVisible()
+    await waitForAnimations(panel)
     const mainOpen = await main.boundingBox()
     const panelBox = await panel.boundingBox()
     expect(mainOpen).not.toBeNull()
@@ -511,6 +512,7 @@ test('responsive panel geometry: overlays main at 960px, 1100px and 1279px, push
 
   await openPanelBtn.click()
   await expect(panel).toBeVisible()
+  await waitForAnimations(panel)
   const mainOpen1280 = await main.boundingBox()
   const panel1280 = await panel.boundingBox()
   expect(mainOpen1280).not.toBeNull()

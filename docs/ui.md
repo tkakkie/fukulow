@@ -6,6 +6,7 @@ Write shared web UI rules beyond code and tests (#200), including layout, naviga
 - Left to right (§4 tokens): **rail** (`--rail-width`: logo, navigation, presence, settings, self), rounded **チャンネル column** (`--channel-col-width`, `--navbox`), fluid rounded **main** card (minimum `--main-min-width` only at widths >= 960px), rounded **right panel** card (`--panel-width`, opens/closes).
 - Separate surfaces by tone, radius and `--region-gap`, never lines.
 - Each チャンネル in the column is an accordion row. Open rows show that チャンネル's recent and Unread トピック first (up to 5), then `すべてのトピック(n)›` to open the panel's トピック tab. Leave room for personal sections (#204).
+- Place Channel creation before the チャンネル list so loading rows cannot move the form under the pointer. Reserve space for the permission hint so revalidation cannot move the rows.
 - Main shows one **view** (a チャンネル's main timeline or one トピック view). Its Composer is part of that view and posts to it.
 - The panel holds one **layer** (tabs トピック / 概要 / メンバー or a 返信のつながり).
 - Each timeline in main or the panel has its own scroll container. The page never scrolls. Prevent text forcing width with `min-width: 0` on flex/grid children and `overflow-wrap: anywhere` in Message bodies.
@@ -73,7 +74,7 @@ Values in `web/src/app.css` under `:root`; each colour token is declared once wi
 - Type: `--font-sans` (Inter for Latin and digits, then CSS fallbacks). Root size in §7, rem scale `--font-size-12` (meta), `--font-size-13`, `--font-size-14`, `--font-size-15` (body), `--font-size-17` (view title), `--font-size-20` (page title). Use `--line-height-message` for Messages. Weights: `--font-weight-regular`, `--font-weight-medium`, `--font-weight-semibold`.
 - Spacing scale: `--space-4`, `--space-8`, `--space-12`, `--space-16`, `--space-24`. Radii: `--radius-8` for rows/inputs, `--radius-10` or `--radius-12` for buttons/chips/Messages, `--radius-16` for regions/Composer and `--radius-avatar` for avatars.
 - Always show `--focus-ring` with `--focus-offset` on `:focus-visible` only.
-- Style state from its ARIA attribute (e.g. `aria-selected`, `aria-current`, `aria-expanded`), never a parallel class (target until #839 merges).
+- Style state from its ARIA attribute (e.g. `aria-selected`, `aria-current`, `aria-expanded`), never a parallel class.
 - Panel slide, hover and badge pop use the `--duration-fast`, `--duration-normal`, `--duration-panel` scale and `--ease-out`. No motion under `prefers-reduced-motion: reduce`.
 
 ## 5. Components and states
@@ -84,7 +85,7 @@ Compose screens from the shared components (one per kind) in `web/src/ui/`: Butt
 - `Button` accepts optional `tabindex` (`0 | -1`) and `buttonRef` so composite widgets can exclude secondary pointer buttons from `Tab` while keeping a programmatic return-focus target.
 - `MessageRow` accepts `focusable`, `rovingTabindex` (`0 | -1`), `onrowfocus`, `onrowkeydown`, `onopenreplies(opener)`. Each timeline gives exactly one confirmed row `rovingTabindex={0}` (active, otherwise latest, §9). `Tab` enters without clearing the Composer draft. Row `Enter`/`R` passes `rowRef` as opener; clicking the inline reply Button (`tabindex={-1}`) passes `buttonRef`.
 - `Timeline`, `TopicView` and `ReplyPanel` share `createTimelineScrollController`, `measureTimelineItems`, `handleTimelineContainerScroll` and `applyTimelineScrollAction` from `web/src/timeline-scroll.ts` for pinned tracking, anchoring, own-send scroll to bottom and `新着 n件 ↓` (§8).
-- Sender labels: see §10 for deactivated authors. Use `メンバー` for unknown authors.
+- Sender labels: resolve first-page authors before display with a bounded timeout so failed or slow lookups never block display; see §10 for deactivated authors and use `メンバー` for unknown or pending authors.
 
 Render states consistently everywhere (A2-2). Each state with fixed copy is one component, and views pass only its actions (target until #835 merges).
 
@@ -130,7 +131,7 @@ Render states consistently everywhere (A2-2). Each state with fixed copy is one 
 - Your own send scrolls to the bottom: it is your action, not an automatic follow.
 - Older pages, gap fills and reordering above the viewport keep the first visible Message at the same offset (measured anchor, not only `overflow-anchor`); focus does not move.
 - Selecting another Message in the same Reply chain reveals that row. A cached target already fully in view keeps the scroll position and virtual list; an offscreen target is mounted before revealing it. The active navigation anchor remains available separately from bounded history.
-- On entering the main timeline or a トピック view, the entry boundary is that scope's read position at entry. If an other-sender Message exists above the boundary, older projection pages load until that first Unread Message is in the window, the view opens positioned at it, and `ReadMarker` (`未読`) is shown above it for the whole visit while the read position advances. With no Unread, the view opens pinned at the bottom with no marker.
+- On entering the main timeline or a トピック view, the entry boundary is that scope's read position at entry. If an other-sender Message exists above the boundary, older projection pages load until that first Unread Message is in the window, the view opens positioned at it, and `ReadMarker` (`未読`) is shown above it for the whole visit while the read position advances. With no Unread, the view opens pinned at the bottom with no marker. Until the entry position is applied (#968), rows stay mounted but hidden and inert under `Skeleton` (`aria-busy`), so nothing moves after the user acts; the Composer stays usable. If the boundary fails, the 10 s loading timeout (counted only while the view is displayed) passes or your own send is accepted first, the visit opens at the bottom with no marker, and a later boundary does not move it.
 - A confirmed Message of the active scope is marked presented when its row is inside the timeline viewport while that view is selected and `document.visibilityState === 'visible'`. Hidden tabs, main-timeline `TopicSummaryLine` rows and `ReplyPanel` never advance read positions.
 
 ## 9. Keyboard and command palette

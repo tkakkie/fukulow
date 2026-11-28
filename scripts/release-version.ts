@@ -1,6 +1,5 @@
 // Release tag rules (#808): SemVer tags, the image tags a release moves and the previous release.
 import { execFileSync } from 'node:child_process'
-import { pathToFileURL } from 'node:url'
 
 export type Version = { tag: string, version: string, major: number, minor: number, patch: number, prerelease: string[] }
 
@@ -62,7 +61,7 @@ export function planRelease(tag: string, existingTags: string[]): ReleasePlan {
   return { version: current.version, prerelease, tags, latest, ...(previous ? { previous } : {}) }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (import.meta.main) {
   const tag = process.argv[2] ?? ''
   const existing = execFileSync('git', ['tag', '--list', 'v*'], { encoding: 'utf8' }).split('\n').filter(Boolean)
   const plan = planRelease(tag, existing)

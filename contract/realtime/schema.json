@@ -109,11 +109,11 @@
         "title": { "type": "string" },
         "covers": { "$ref": "#/$defs/Covers" },
         "rust": {
-          "$comment": "Which Rust tests relate to this scenario. existing_tests lists tests (path::name) that stay and cover the same behaviour; the scenario does not replace them. An empty list means the runner is the first test of this behaviour. note may say how the scenario differs or what the runner needs (for example a test hook).",
+          "$comment": "Which Rust tests relate to this scenario. existing_tests lists Rust tests (path.rs::name, checked by the schema pattern and check-invariants.ts) that stay and cover the same behaviour; the scenario does not replace them. An empty list means the runner is the first test of this behaviour. note may say how the scenario differs or what the runner needs (for example a test hook).",
           "type": "object",
           "required": ["existing_tests"],
           "properties": {
-            "existing_tests": { "type": "array", "items": { "type": "string" } },
+            "existing_tests": { "type": "array", "items": { "type": "string", "pattern": "^[^\\s:]+\\.rs::[A-Za-z_][A-Za-z0-9_]*$" } },
             "note": { "type": "string" }
           },
           "additionalProperties": false

@@ -1,0 +1,87 @@
+--- a/lib/executor/constant_arrival_rate.go
++++ b/lib/executor/constant_arrival_rate.go
+@@ -325,11 +325,16 @@
+ 	droppedIterationMetric := car.executionState.Test.BuiltinMetrics.DroppedIterations
+ 	shownWarning := false
+ 	metricTags := car.getMetricTags(nil)
+-	for li, gi := 0, start; ; li, gi = li+1, gi+offsets[li%len(offsets)] {
++	// Schedule only ticks in [0, duration). If a timer wakes late,
++	// still process its tick during the existing graceful stop period.
++	for li, gi := 0, start; notScaledTickerPeriod*time.Duration(gi) < duration; li, gi = li+1, gi+offsets[li%len(offsets)] {
+ 		t := notScaledTickerPeriod*time.Duration(gi) - time.Since(startTime)
+ 		timer.Reset(t)
+ 		select {
+ 		case <-timer.C:
++			if maxDurationCtx.Err() != nil {
++				return nil
++			}
+ 			if vusPool.TryRunIteration() {
+ 				continue
+ 			}
+@@ -362,8 +367,10 @@
+ 			default: // we're already allocating a new VU
+ 			}
+ 
+-		case <-regDurationCtx.Done():
++		case <-maxDurationCtx.Done():
+ 			return nil
+ 		}
+ 	}
++	<-regDurationCtx.Done()
++	return nil
+ }
+--- a/lib/executor/constant_arrival_rate_test.go
++++ b/lib/executor/constant_arrival_rate_test.go
+@@ -394,3 +394,52 @@
+ 		assert.LessOrEqual(t, running, int64(10))
+ 	})
+ }
++
++func TestConstantArrivalRateFinishesTicksDelayedPastDeadline(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		config := getTestConstantArrivalRateConfig()
++		config.Rate = null.IntFrom(10)
++		config.Duration = types.NullDurationFrom(2 * time.Second)
++		config.PreAllocatedVUs = null.IntFrom(2)
++		config.MaxVUs = config.PreAllocatedVUs
++
++		var started, startedInGrace atomic.Int64
++		begin := time.Now()
++		runner := simpleRunner(func(_ context.Context, _ *lib.State) error {
++			if time.Since(begin) >= config.Duration.TimeDuration() {
++				startedInGrace.Add(1)
++			}
++			if started.Add(1) <= 2 {
++				time.Sleep(500 * time.Millisecond)
++			}
++			return nil
++		})
++		test := setupExecutorTest(t, "", "", lib.Options{}, runner, config)
++		defer test.cancel()
++
++		// Saturate the VUs briefly, then hold the first drop's metric write past
++		// the regular deadline to model a stalled scheduler with ticks pending.
++		engineOut := make(chan metrics.SampleContainer)
++		drained := make(chan int64, 1)
++		go func() {
++			time.Sleep(2100 * time.Millisecond)
++			var drops int64
++			for sample := range engineOut {
++				for _, point := range sample.GetSamples() {
++					if point.Metric.Name == metrics.DroppedIterationsName {
++						drops += int64(point.Value)
++					}
++				}
++			}
++			drained <- drops
++		}()
++
++		err := test.executor.Run(test.ctx, engineOut)
++		close(engineOut)
++		drops := <-drained
++		require.NoError(t, err)
++		assert.Positive(t, drops)
++		assert.Positive(t, startedInGrace.Load())
++		assert.EqualValues(t, 20, started.Load()+drops)
++	})
++}

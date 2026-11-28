@@ -1,3 +1,4 @@
+use crate::{AccessLifetime, HistoryObservation, HistoryObservationResult};
 use fukulow_api::{Message, MessagePage, ServerEvent};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -19,6 +20,14 @@ pub enum Failure {
     Status(u16),
     Other(String),
 }
+impl Failure {
+    pub(crate) fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Status(status) => Some(*status),
+            Self::Other(_) => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -35,9 +44,10 @@ pub enum Page {
     Before,
     After,
 }
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Availability {
+    #[default]
     Loading,
     Ready,
     Unavailable,
@@ -94,7 +104,7 @@ pub struct Subscription {
     pub watermark: i64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelView {
     pub state: Availability,
@@ -143,74 +153,71 @@ pub struct ChannelView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription: Option<Rc<Subscription>>,
 }
-impl Default for ChannelView {
-    fn default() -> Self {
-        Self {
-            state: Availability::Loading,
-            watched: false,
-            cursor: None,
-            snapshot_seq: None,
-            mutation_seq: 0,
-            move_seq: None,
-            move_epoch: None,
-            moved_roots: Rc::default(),
-            retired_move_through: 0,
-            messages: Rc::default(),
-            versions: Rc::default(),
-            retired_through: None,
-            retired_versions: Rc::default(),
-            version_epoch: 0,
-            advancing: Rc::default(),
-            pending: Rc::default(),
-            has_older: false,
-            history_error: false,
-            fill_attempt: 0,
-            held_through: None,
-            forgotten_through: None,
-            last_used: None,
-            retained_count: None,
-            stream_base: None,
-            latest: None,
-            older: None,
-            fill: None,
-            wait: None,
-            subscription: None,
-        }
-    }
-}
 impl ChannelView {
     pub(crate) fn same(&self, other: &Self) -> bool {
-        self.state == other.state
-            && self.watched == other.watched
-            && self.cursor == other.cursor
-            && self.snapshot_seq == other.snapshot_seq
-            && self.mutation_seq == other.mutation_seq
-            && self.move_seq == other.move_seq
-            && self.move_epoch == other.move_epoch
-            && Rc::ptr_eq(&self.messages, &other.messages)
-            && Rc::ptr_eq(&self.versions, &other.versions)
-            && Rc::ptr_eq(&self.retired_versions, &other.retired_versions)
-            && self.retired_through == other.retired_through
-            && self.version_epoch == other.version_epoch
-            && Rc::ptr_eq(&self.pending, &other.pending)
-            && Rc::ptr_eq(&self.advancing, &other.advancing)
-            && match (&self.subscription, &other.subscription) {
+        let Self {
+            state,
+            watched,
+            cursor,
+            snapshot_seq,
+            mutation_seq,
+            move_seq,
+            move_epoch,
+            // Move floors guard incoming updates inside the core. Neither is sent in Channel patches.
+            moved_roots: _,
+            retired_move_through: _,
+            messages,
+            versions,
+            retired_through,
+            retired_versions,
+            version_epoch,
+            advancing,
+            pending,
+            has_older,
+            history_error,
+            fill_attempt,
+            held_through,
+            forgotten_through,
+            last_used,
+            retained_count,
+            stream_base,
+            latest,
+            older,
+            fill,
+            wait,
+            subscription,
+        } = self;
+        *state == other.state
+            && *watched == other.watched
+            && *cursor == other.cursor
+            && *snapshot_seq == other.snapshot_seq
+            && *mutation_seq == other.mutation_seq
+            && *move_seq == other.move_seq
+            && *move_epoch == other.move_epoch
+            && Rc::ptr_eq(messages, &other.messages)
+            && Rc::ptr_eq(versions, &other.versions)
+            && Rc::ptr_eq(retired_versions, &other.retired_versions)
+            && *retired_through == other.retired_through
+            && *version_epoch == other.version_epoch
+            && Rc::ptr_eq(pending, &other.pending)
+            && Rc::ptr_eq(advancing, &other.advancing)
+            && match (subscription, &other.subscription) {
                 (Some(a), Some(b)) => Rc::ptr_eq(a, b),
                 (None, None) => true,
                 _ => false,
             }
-            && self.has_older == other.has_older
-            && self.history_error == other.history_error
-            && self.fill_attempt == other.fill_attempt
-            && self.held_through == other.held_through
-            && self.forgotten_through == other.forgotten_through
-            && self.last_used == other.last_used
-            && self.retained_count == other.retained_count
-            && self.stream_base == other.stream_base
-            && self.latest == other.latest
-            && self.older == other.older
-            && self.fill == other.fill
-            && self.wait == other.wait
+            && *has_older == other.has_older
+            && *history_error == other.history_error
+            && *fill_attempt == other.fill_attempt
+            && *held_through == other.held_through
+            && *forgotten_through == other.forgotten_through
+            && *last_used == other.last_used
+            && *retained_count == other.retained_count
+            && *stream_base == other.stream_base
+            && *latest == other.latest
+            && *older == other.older
+            && *fill == other.fill
+            && *wait == other.wait
     }
 }
 #[derive(Clone, Debug, Serialize)]
@@ -273,6 +280,11 @@ pub enum Input {
     HistoryGeneration {
         generation: Option<Uuid>,
     },
+    ObserveHistoryGeneration {
+        issue: Option<Token>,
+        lifetime: AccessLifetime,
+        result: HistoryObservation,
+    },
     Stop,
     OrganizationUnavailable,
     ConnectionReady {
@@ -282,10 +294,25 @@ pub enum Input {
         connection: Token,
         code: u16,
     },
+    SocketDisconnected {
+        connection: Token,
+        code: u16,
+        opened: bool,
+        opaque: bool,
+    },
+    MembershipChecked {
+        connection: Token,
+        status: Option<Failure>,
+        error: Option<String>,
+    },
     Event {
         connection: Token,
         event: ServerEvent,
         subscription: Option<Token>,
+    },
+    SocketFrame {
+        connection: Token,
+        event: ServerEvent,
     },
     Watch {
         channel: Uuid,
@@ -363,12 +390,28 @@ pub struct StepInput {
     pub refresh_mention_names: bool,
 }
 #[derive(Debug, Serialize)]
+pub struct ClosedSocket {
+    pub connection: Token,
+    pub code: u16,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Effect {
     Connect {
         id: Token,
     },
+    CheckMembership {
+        connection: Token,
+    },
+    ReportOrganizationUnavailable {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        socket: Option<ClosedSocket>,
+    },
     Close,
+    CloseConnection {
+        connection: Token,
+    },
     Subscribe {
         #[serde(skip_serializing_if = "Option::is_none")]
         history_generation: Option<Uuid>,
@@ -417,6 +460,15 @@ pub enum Effect {
     },
     SignIn,
 }
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SocketDelivery {
+    Sync {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subscription: Option<Token>,
+    },
+    Activity,
+}
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepResult {
@@ -426,6 +478,10 @@ pub struct StepResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub moves: Vec<MoveVersion>,
     pub state_changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_delivery: Option<SocketDelivery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_observation: Option<HistoryObservationResult>,
 }
 #[derive(Debug, Serialize)]
 pub struct MoveVersion {
@@ -450,4 +506,14 @@ pub struct SessionView {
     pub reconnect_attempt: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconnect_wait: Option<Token>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Availability, ChannelView};
+
+    #[test]
+    fn channel_view_defaults_to_loading() {
+        assert_eq!(ChannelView::default().state, Availability::Loading);
+    }
 }

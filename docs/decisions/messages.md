@@ -3,8 +3,8 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
-- #725 A future external search engine writes an outbox row in the Message transaction and applies it after COMMIT through a worker.
-- #725 Search generates a dedicated cursor key at process start to avoid reusing credentials or provisioning another secret. Cursors expire on restart.
+- #725 External Search would use a Message transaction outbox processed after COMMIT by a worker.
+- #725/#736 (B) Per-process Search cursor keys avoid credential reuse and secret provisioning. Restart or deploy expires cursors. Admission is per instance. To scale out, configure a shared key (A) with dual-key rotation.
 - #301 author lookup caps input at 100 ids, dedupes and omits unreadable authors. A shared non-locking history snapshot covers access, authorship and retained identities to prevent directory expansion and authorization races.
 - #149 usable managers add/remove and every Role can leave its own grant. Serialize private removal and its checks per Channel to preserve the last usable grant and any last manager (409).
 - #231/#305 Role demotion or deactivation that loses a private Channel's last usable manager fails atomically with 409 `last_channel_manager` and no Channel details. Reuse #149's locks and check via the guard injected into auth to preserve module direction.
@@ -45,15 +45,16 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #142 Missing positions suppress only that Channel's Unread at committed seq (Topic W), log list inconsistency, persist nothing and keep mark-read 404. A zero position marks old history unread and a list-wide 500 hides unaffected Channels.
 - #142 Accept serialized set-based work O(active Members + their Topics) on public Channel insert and O(visible Channels + Topics) on Member activation, with shared #135 until COMMIT. Remeasure larger Organizations.
 - #142 Backfill blocks sends and Member/grant writes under SHARE ROW EXCLUSIVE. Work scales with visible Member×Channel pairs plus Topics. A 5 s startup lock wait cap does not bound the write outage after acquisition.
-- #160 Organization-scoped `channel_log` alone carries Create/Edit/Move/Delete positions, using one append-only sequence to simplify S1, cursors and gap fill without replay cost tracking mutation churn. Replay proves coverage and hydrates current Messages/tombstones instead of as-it-was bodies, avoiding a past-body archive and deleted-body resurrection.
+- [#620](https://github.com/tkakkie/fukulow/issues/620) Reuse the scoped Message creation index to save one row and index entry per send. The barrier protects the sole allocator through COMMIT. Each source is unique, so replay rejects cross-source duplicates. Tombstones retain Create identity without archiving past bodies.
 - #160 Event position and Message state version are separate. Version is the last affecting event position. Higher versions alone replace state, so replay/reorder/stale ACKs or pages converge. Delete is a terminal tombstone.
-- #160 Past-body retention/erasure across edits, deletes, receipts and backups remains an open privacy/legal decision. Until then archive no past bodies and reveal no deleted content via replay, snapshots, search or counts. Tombstones prevent resurrection.
+- #160 Past-body retention/erasure across edits, deletes, receipts and backups remains open. Archive no past bodies and expose no deleted content via replay, snapshots, search or counts. Tombstones prevent resurrection.
 - #515 A creation-time SHA-256 digest of the original send intent, retained for the Message lifetime, keeps retry identity stable across edits without keeping plaintext in the receipt while retention remains open.
-- #515 Expire operation receipts after 7 days to bound storage. Later retries are new requests and stale `expected_version` prevents re-execution.
+- #515 Seven-day receipts bound storage. Later retries are new. A stale `expected_version` prevents re-execution.
+- #883 `fukulow_app` calls the maintenance definer for Organization IDs only and uses scoped RLS for receipt probes/deletes. Each 1 s tick allows 32 IDs/100 ms and ten 1,000-row batches in 250 ms total. Round robin caps one worker at 10,000 rows/s total and 10,000/K per Organization with K full queues. For N fixed Organizations, reach is ≤⌈N/32⌉+⌈N/10⌉ full ticks or ≤2N ticks with one completed slot per phase per tick.
 - #141 One release renames Message.seq to created_seq and adds version/deleted and event seq/kind without aliases or a compatibility path. Nothing is deployed yet, the binary embeds web and Kotlin starts with the new shape.
-- #515 uses Organization UUID epochs, explicit as_of_seq bootstrap and a Channel mutation floor to detect restore even beyond old cursors and expire unreconstructable pages. Owner-only rotation prevents ordinary traffic rotating epochs.
-- #160 Required before any mutation ships are history_generation, snapshot_expired, an explicit bootstrap cursor and idempotent sends/mutations via receipts and expected_version. Mutable history invalidates fixed-W pages, cursors and blind retries.
-- #160 Mutation thresholds are fixed before #141/#287 measurements to prevent result fitting. Do not relax budgets. Unevaluated work never passes. Formal evaluation follows #431.
+- #515 uses Organization UUID epochs for restore detection beyond old cursors. Explicit as_of_seq bootstrap and the Channel mutation floor expire unreconstructable pages. Rotation needs DB ownership.
+- #160 Required before any mutation ships are history_generation, snapshot_expired, explicit bootstrap cursors and idempotency via receipts and expected_version. Mutable history invalidates fixed-W pages, cursors and blind retries.
+- #160 Mutation thresholds are fixed before #141/#287 measurements. Unevaluated work cannot pass #431.
 - #160 The INVALID 2026-11-16 replay/migration results remain reference only. No `--settle-fixture` rerun gates this choice, which rests on deterministic buffer counts and settled WAL.
 - #151 DM is a Channel kind for one immutable Organization-scoped Member pair. Omit name, visibility, Topics and manager rights to reuse seq, Replies, sync and Unread without applying private management. [Contract](../spec/dms.md)
 - #151 POST /dms opens or renews the pair and GET lists authorized peer identity and Unread/Mention baselines. Exclude DMs from ordinary Channel lists/sections because they have no name or Topic navigation.

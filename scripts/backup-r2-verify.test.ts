@@ -3,8 +3,8 @@ import { test } from 'node:test'
 import { verifyProvider } from './backup-r2-verify.ts'
 import { accountUsage } from './backup-usage-model.ts'
 import { fakeS3 } from './backup-r2-fake.ts'
-import { inventory } from './backup-r2-model.ts'
-import type { Runner } from './backup-r2.ts'
+import { inventory } from './backup-r2-inventory.ts'
+import type { Runner } from './backup-curl.ts'
 
 test('provider probes pass on local S3 and locked probes count capacity without freezing inventory', async t => {
   const fake = await fakeS3(Date.now); t.after(fake.close)

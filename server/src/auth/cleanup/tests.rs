@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -74,24 +75,13 @@ async fn block_cleanup(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgr
 }
 
 async fn wait_for_blocked_deletes(pool: &PgPool, count: i64) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity \
-                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
-                 AND query LIKE 'DELETE FROM account_sessions%'",
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap();
-            if waiting >= count {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery("DELETE FROM account_sessions%"),
+        Count::AtLeast(count),
+        Duration::from_secs(5),
+    )
+    .await;
 }
 
 #[fukulow_test::test]

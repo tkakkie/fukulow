@@ -72,7 +72,7 @@ RUN find server/src api-types/src client-core/src -name "*.rs" -exec touch {} +
 COPY --from=web /app/web/dist web/dist
 RUN cargo build --locked --release -p fukulow-server
 
-FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS production
 RUN groupadd --gid 10001 fukulow \
  && useradd --uid 10001 --gid fukulow --no-create-home --shell /usr/sbin/nologin fukulow
 COPY --from=server /app/target/release/fukulow-server /usr/local/bin/fukulow-server
@@ -84,3 +84,11 @@ ENV MALLOC_MMAP_THRESHOLD_=131072
 USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["fukulow-server"]
+
+FROM server AS conn-setup-build
+RUN cargo build --locked --release -p fukulow-server --example measure_conn_setup
+
+FROM production AS conn-setup
+COPY --from=conn-setup-build /app/target/release/examples/measure_conn_setup /usr/local/bin/
+
+FROM production AS release

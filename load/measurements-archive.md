@@ -33,7 +33,7 @@ Moved verbatim from the `docs/measurements.md` header: Checked 2026-11-18 on the
 - RLS baseline before tenant RLS (#314 step 2/4, 2026-11-12/13): moved to #314 (superseded by the fresh before/after comparison kept below).
 - Timeline statement persistence (#326, 2026-11-14): moved to #326 (closed; fixed and tested).
 - Bounded web message windows (#308, 2026-11-14): moved to #308 (closed; caps are current decisions in docs/decisions/web.md).
-- Organization activity REST reconciliation (#307 item 5, 2026-11-14): moved to #307 (closed; the debounce and jitter values are in docs/spec/realtime.md O3). Result that kept the 30 s period: 10,000 sockets, steady 967.57 REST requests/s, later periodic round trip p95 2 ms, no errors. Reproduction gap (#612): the checked-in `load/activity.ts` made no REST calls under k6 from #370 until #612, so it could not have produced these numbers; the generator source used for this run is unverified.
+- Organization activity REST reconciliation (#307 item 5, 2026-11-14): moved to #307 (closed; the debounce and jitter values are in docs/spec/realtime.md O3). Result that kept the 30 s period: 10,000 sockets, steady 967.57 REST requests/s, later periodic round trip p95 2 ms, no errors. Reproduction gap (#612): the checked-in `load/activity.ts` made no REST calls under k6 from #370 until #612, so it could not have produced these numbers; the generator source used for this run is unverified. #856 removed `load/activity.ts` and `load/activity-seed.ts`: archive-only harness, #307 done.
 - Web first-paint and timeline waterfall (#345, 2026-11-14): moved to #345 (closed; findings were turned into follow-up Issues).
 - Production-domain crate split Mac build reference (#378, 2026-11-15): moved to #378 (decided and deferred; the decision states the conclusion).
 
@@ -1691,6 +1691,8 @@ The deep saving beyond the measured planning difference is not identified.
 - `server/src/messages/tests/page_mentions.rs`: Mention index keys under a skewed multi-Organization fixture, and the REST 201-row lookahead.
 - `server/src/database/tests/generic_plan.rs`: helper errors, failed SET LOCAL or ROLLBACK, and cancellation.
 
+- Results (moved from `docs/measurements.md`): [SQL result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7071300064) · [App result](https://github.com/tkakkie/fukulow/issues/515#issuecomment-7089274168)
+
 ## Sign-in burst owner impact (#756, #359, 2026-11-23 JST, Mac)
 
 The 3 formal runs of the #756 burst method, pre-registered in [comment 7075307714](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7075307714) and approved by the maintainer on 2026-11-22 ([comment 7079651809](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7079651809)). B1–B5 are the #359 criteria ([comment 6979633120](https://github.com/tkakkie/fukulow/issues/359#issuecomment-6979633120)); A0, C1 and C2 are new in #756. The four #785 evidence tolerances (owner late 5 ms, clock 1,000 ms, sampler gap 100 ms, log stamp 1 ms) were approved before the runs ([comment 7080161589](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7080161589)). No criterion, threshold, tolerance or load condition changed after any run. Result comment: [7089274460](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7089274460). It follows the [2026-11-22 Part B alternative runs](#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac), whose limits (lock barely exercised, 233 ms poll) #756 followed up.
@@ -1757,3 +1759,213 @@ Waits took the tuple form, the transaction form or both (merged per pid), so bot
 - **Raw data:** run directories (`status.json`, `results.json`, `metadata.json`, `server-evidence.json`), the aggregate and the chain log are kept outside Git on the maintainer's Mac and may be removed later.
 
 Reproduce with `node load/signin-owner-burst.ts --recorded --harness-commit <SHA> --out <new absolute dir>` ×3 under the #769 pre-run gates (plan review [comment 7081883602](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7081883602)), then `node load/signin-owner-burst-aggregate.ts <run1> <run2> <run3>`.
+
+## wasm preload (#954, 2026-11-25)
+
+PR #962 adds a wasm preload. It ran on 2026-11-25 09:26–09:57 JST on the Mac (M5) with Docker Desktop, the Caddy profile and Node 26.13.1, under the PR's pre-registration (#466 first-display conditions, the same 8 cells, 5 runs per cell).
+- **Arms:**
+  - B is `main` at `bef3963d`.
+  - A is the PR head `2f587237`, which is that `main` merged in.
+- **Images:** `fukulow-954:{before,after}` were built once before timing.
+- **Rounds:** 5 interleaved rounds, B/A in round 1 with the order swapped each round. No cell was INCONCLUSIVE, so the extension to 9 rounds did not run.
+- **Host:** AC power on before and after every arm. Load average 1.02–3.09; Spotlight indexing raised it before timing, and timing started at 2.66.
+
+**Statistics:**
+- Per cell: the median of the round p50 and p95 values, and the paired round-delta p50 with a bootstrap 95% CI (median of deltas, 10,000 resamples, fixed seed).
+- Target 1 (MET): the CI is entirely below 0.
+- Target 2, at most +5.0%:
+  - MET when the CI upper bound is at most +5.0% of B's p50;
+  - MISSED when the CI lower bound is above +5.0%;
+  - INCONCLUSIVE otherwise.
+
+Result: **Target 1 MISSED on both routes. Target 2 MISSED for throttled cold FCP on both routes.** MAC-RELATIVE.
+
+| Cell | Metric | B p50 / p95 | A p50 / p95 | Change | Paired Δ p50 (95% CI), ms | Target | Status |
+|---|---|---:|---:|---:|---|---|---|
+| `/` unthrottled cold | FCP | 56.0 / 60.0 | 56.0 / 56.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled cold | Timeline | 443.2 / 449.0 | 104.3 / 106.1 | -76.5% | -335.8 (-358.2 to -318.2) | <= +5.0% | MET |
+| `/` unthrottled warm | FCP | 52.0 / 56.0 | 52.0 / 52.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled warm | Timeline | 435.5 / 454.0 | 99.0 / 104.3 | -77.3% | -335.5 (-369.5 to -330.7) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | FCP | 56.0 / 60.0 | 56.0 / 56.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | Timeline | 442.6 / 444.9 | 104.4 / 106.1 | -76.4% | -338.3 (-350.9 to -325.1) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled warm | FCP | 52.0 / 56.0 | 52.0 / 52.0 | +0.0% | 0.0 (0.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled warm | Timeline | 432.6 / 440.6 | 100.8 / 422.7 | -76.7% | -331.4 (-341.9 to -326.0) | <= +5.0% | MET |
+| `/` throttled cold | FCP | 1028.0 / 1036.0 | 1584.0 / 1596.0 | +54.1% | 564.0 (548.0 to 580.0) | <= +5.0% | MISSED |
+| `/` throttled cold | Timeline | 3635.0 / 3652.0 | 3724.4 / 3732.6 | +2.5% | 85.8 (80.0 to 101.1) | improves, CI < 0 | MISSED |
+| `/` throttled warm | FCP | 240.0 / 244.0 | 244.0 / 244.0 | +1.7% | 4.0 (0.0 to 8.0) | <= +5.0% | MET |
+| `/` throttled warm | Timeline | 2388.8 / 2398.3 | 2373.8 / 2398.0 | -0.6% | -15.0 (-23.4 to 0.7) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold | FCP | 1024.0 / 1032.0 | 1588.0 / 1596.0 | +55.1% | 564.0 (556.0 to 572.0) | <= +5.0% | MISSED |
+| `/o/:org/c/:channel` throttled cold | Timeline | 3635.3 / 3644.0 | 3719.1 / 3727.1 | +2.3% | 81.9 (72.4 to 112.8) | improves, CI < 0 | MISSED |
+| `/o/:org/c/:channel` throttled warm | FCP | 240.0 / 244.0 | 240.0 / 248.0 | +0.0% | 4.0 (-4.0 to 8.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled warm | Timeline | 2377.9 / 2399.9 | 2368.2 / 2386.3 | -0.4% | -10.2 (-23.2 to -6.5) | <= +5.0% | MET |
+
+**Reading:**
+- **Throttled cold:** the wasm fetch ends about 200 ms earlier (`wasmEndMs` p50 about 1,795 → 1,595 ms). But on the 1.6 Mbps profile the preload competes with the critical CSS and JS, so FCP moves out to about the wasm end (+564 ms), and Timeline is 82–86 ms later. That is the opposite of the expected 0.4–0.8 s improvement.
+- **Unthrottled:** Timeline improves by about 335 ms (−77%) on every unthrottled cell, and warm throttled cells are unchanged.
+- **Outlier:** one unthrottled warm `/o/:org/c/:channel` round had a Timeline p95 of 422.7 ms in A; the median p50 is unaffected.
+
+**Raw data:** per-arm `results.json` and `run.log`, the chain log and `fp-evaluation.json` are kept outside Git on the maintainer's Mac. sha256 values:
+- `chain.ts` `2be6a769…`
+- `chain.log` `78aa63eb…`
+- `fp-evaluation.json` `18e2ecba…`
+
+Reproduce each arm with `FIRST_PAINT_IMAGE=fukulow-954:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`, interleaved as above.
+
+## Early Channel list (#954 PR-1, 2026-11-25)
+
+PR #978 starts the Channel list read at startup. It ran on 2026-11-25 11:00–11:31 JST on the Mac (M5) with Docker Desktop, the Caddy profile and Node 26.13.1. It followed the plan fixed on the PR before any run: PR #962's conditions, the same 8 cells, 5 runs per cell and the same statistics.
+- **Arms:** B is `main` at `8a460b99`. A is the PR head `b9b801ed`, which is that `main` merged in.
+- **Images:** `fukulow-978:{before,after}` were built once before timing.
+- **Rounds:** 5 interleaved rounds, B/A in round 1 with the order swapped each round. No cell was INCONCLUSIVE, so the extension to 9 rounds did not run.
+- **Host:** AC power on before and after all 10 arms. Load average 1.56–3.35; timing started at 2.93.
+
+Result: **Target 1 MET on both routes. Target 2 MET in every other cell.** MAC-RELATIVE.
+
+| Cell | Metric | B p50 / p95 | A p50 / p95 | Change | Paired Δ p50 (95% CI), ms | Target | Status |
+|---|---|---:|---:|---:|---|---|---|
+| `/` unthrottled cold | FCP | 60.0 / 60.0 | 56.0 / 56.0 | -6.7% | -4.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled cold | Timeline | 441.4 / 446.3 | 105.0 / 106.6 | -76.2% | -336.7 (-347.6 to -331.7) | improves, CI < 0 | MET |
+| `/` unthrottled warm | FCP | 52.0 / 56.0 | 52.0 / 52.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled warm | Timeline | 438.4 / 440.9 | 100.0 / 101.6 | -77.2% | -339.0 (-341.1 to -330.5) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | FCP | 56.0 / 60.0 | 56.0 / 56.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | Timeline | 442.3 / 445.4 | 105.7 / 422.7 | -76.1% | -336.4 (-337.7 to -329.1) | improves, CI < 0 | MET |
+| `/o/:org/c/:channel` unthrottled warm | FCP | 52.0 / 52.0 | 52.0 / 52.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled warm | Timeline | 434.9 / 439.1 | 101.8 / 104.7 | -76.6% | -333.2 (-336.2 to -326.6) | <= +5.0% | MET |
+| `/` throttled cold | FCP | 1032.0 / 1044.0 | 1032.0 / 1040.0 | +0.0% | 0.0 (-8.0 to 4.0) | <= +5.0% | MET |
+| `/` throttled cold | Timeline | 3649.5 / 3657.0 | 2644.2 / 2654.0 | -27.5% | -1001.7 (-1011.5 to -997.4) | <= +5.0% | MET |
+| `/` throttled warm | FCP | 240.0 / 244.0 | 240.0 / 248.0 | +0.0% | 0.0 (-4.0 to 8.0) | <= +5.0% | MET |
+| `/` throttled warm | Timeline | 2390.1 / 2405.3 | 2376.4 / 2397.6 | -0.6% | -16.5 (-30.5 to 1.6) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold | FCP | 1040.0 / 1044.0 | 1040.0 / 1048.0 | +0.0% | 0.0 (-8.0 to 8.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold | Timeline | 3640.8 / 3652.0 | 2652.2 / 2661.6 | -27.2% | -990.7 (-998.6 to -983.1) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled warm | FCP | 240.0 / 248.0 | 240.0 / 244.0 | +0.0% | -4.0 (-8.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled warm | Timeline | 2389.6 / 2393.7 | 2377.4 / 2389.7 | -0.5% | -7.5 (-26.2 to 1.6) | <= +5.0% | MET |
+
+**Reported, not gated (fixed before the run):**
+- **Throttled cold Timeline against the Issue's expected 0.4–0.8 s:** about -1.0 s on both routes (`/` -1,001.7 ms, `/o/:org/c/:channel` -990.7 ms). That is more than expected; the plan had expected no throttled gain, because three Channel list reads gate it.
+- **Startup Channel list reads** (per round, B → A):
+
+| Cell | B | A |
+|---|---|---|
+| `/` unthrottled cold / warm | 3,3,3,3,3 / 3,3,3,3,3 | 2,2,2,2,3 / 2,2,3,2,3 |
+| `/o/:org/c/:channel` unthrottled cold / warm | 3,3,3,3,3 / 3,3,3,3,3 | 3,3,2,3,2 / 2,3,2,3,2 |
+| `/` throttled cold / warm | 3,4,4,3,3 / 3,3,3,3,3 | 2,2,2,2,2 / 3,4,4,3,3 |
+| `/o/:org/c/:channel` throttled cold / warm | 3,4,3,3,3 / 3,3,3,3,3 | 2,2,2,2,2 / 3,4,3,3,3 |
+
+**Reading:**
+- Throttled cold cells drop to 2 reads in every round, which matches the -1.0 s. Warm throttled cells keep 3–4 reads and do not change.
+- **Residual tail:** on `/o/:org/c/:channel` unthrottled cold, rounds 1, 2 and 4 each had one run with the B-like Timeline (round p95 422.7, 443.3, 438.7 ms against p50 about 105 ms). Each of those rounds shows a third read in A, but other cells with 3 reads in A show no tail, so a third read is necessary but not sufficient for it. The review traced the third read to a coalescing race between the connect-edge refresh and `activity_ready`. The p50 gate is unaffected.
+
+**Raw data:** per-arm `results.json` and `run.log`, the chain log and `fp-evaluation.json` are kept outside Git on the maintainer's Mac. sha256 values:
+- `chain.ts` `b3e6314f…`
+- `chain.log` `60dc95dc…`
+- `fp-evaluation.json` `84136e83…`
+
+Reproduce each arm with `FIRST_PAINT_IMAGE=fukulow-978:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`, interleaved as above.
+
+## Ubuntu host qualification (#796, 2026-11-25)
+
+Superseded summary from `docs/measurements.md`, kept verbatim:
+
+> **#796:** first FAIL stands. Control INVALID (F1 CPU 0). Option A `e54d8d0a` STOPped at idle reference 1 (CPU 6 755 ms, CPU 0 586 ms per 120 s). Each stage needs a go. Go B needs reviewed floors.
+
+Formal qualification: three runs, each once with no rerun, at harness `2b441bd9`. Each run had its own go (Go B). `stability.ts --stage formal` against the frozen floors gave PASS, with no reasons. The limits are pre-registered in `load/sql-probes/519-unread-counts/stability-chain.ts` and were unchanged.
+
+| Run | current TPS | current WAL B/send | final TPS | final WAL B/send | max Tctl |
+|---|---|---|---|---|---|
+| formal-1 | 7,420.4 | 1,787.2 | 6,209.9 | 2,025.8 | 52.3 °C |
+| formal-2 | 7,369.8 | 1,787.5 | 6,194.9 | 2,021.9 | 53.6 °C |
+| formal-3 | 7,413.1 | 1,787.2 | 6,200.1 | 2,027.8 | 53.6 °C |
+
+- **Spread.** TPS spread was 0.68 % for current and 0.24 % for final, against a 5 % limit. WAL/send spread was 0.017 % for current and 0.29 % for final, against a 2 % limit.
+- **Starting temperatures.** formal-1 started from a cold idle host: the cool-down gate read 18.4 °C and the host record read 18.8 °C. formal-2 and formal-3 started at 45–46 °C.
+- **Clean-up.** Every run left 0 containers.
+- **Evidence.** Result: [comment 7164817955](https://github.com/tkakkie/fukulow/issues/796#issuecomment-7164817955). Report SHA-256 `cb639ff1…`, kept on the host.
+
+## d3r Message search rehearsal (#689, 2026-11-23 JST, Mac)
+
+Superseded summary from `docs/measurements.md` (the formal PASS stays there), kept verbatim:
+
+> The 2026-11-23 JST **rehearsal** recorded 299,830,174 term rows, 28.5 GB `message_search_terms` table, 34.8 GB lookup index, 2.3 GB maintenance index, 1.69 TB backfill WAL and 67.5 GB `pg_basebackup` archive. [Rehearsal record](https://github.com/tkakkie/fukulow/issues/689#issuecomment-7089274722)
+
+## Raw-data notes (#515 slice 5, #519 A3)
+
+Removed from both sections of `docs/measurements.md` (covered by its header's raw-data line), kept verbatim:
+
+> Raw data not stored (R2 not set up). SHA-256 and retention end n/a.
+
+## Readiness connection setup (#1066, 2026-11-26, Ubuntu)
+
+Maintainer go 2026-11-26 (#1066). Decision rule fixed before any results: p99.9 under 50 ms both idle and under load -> option 3 (document the constraint); otherwise the maintainer chooses option 1 (`min_connections(1)`) or option 2.
+
+- **Harness.** PR #1079 at `b730f181`, detached worktree on the Ubuntu host in the #796 boot state (boost 0, performance profile, `fukulow796.slice`). Full-size rehearsal first (launcher exit 0, verdict option 3), then one recorded run (launcher exit 0).
+- **Path.** `measure_conn_setup` runs in the app container against `db:5432` on the Compose backend network with SCRAM-SHA-256 and the app startup parameters. It times `pool.acquire()` from a lazy pool verified empty before each sample, the path `database::ready` takes with no idle connection.
+- **Load.** The #351 light profile; 960/960 sends offered and accepted, every loaded sample inside the offered window.
+
+| State | Samples | p50 ms | p99 ms | p99.9 ms | Max ms | >= 200 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| idle | 1000 | 3.04 | 4.00 | 4.69 | 5.34 | 0 |
+| loaded | 1000 | 3.16 | 4.12 | 4.75 | 4.82 | 0 |
+
+- **Verdict.** Option 3: p99.9 about 4.7 ms in both states, about 40x under the 200 ms readiness bound.
+- **Limits.** One host, one recorded run, local Compose network; no production database exists yet. The VPS idle repeat waits for #431.
+- **Evidence.** [Result comment](https://github.com/tkakkie/fukulow/issues/1066#issuecomment-7203718181). Raw samples on the host: `idle.jsonl` SHA-256 `7a53dc641fa7c46d…`, `loaded.jsonl` `0005f8e0dbb4b52c…`.
+
+## wasm merge Map (#488, 2026-11-27, Mac)
+
+[Pre-registration](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7196115679) · [Result](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7198767241) · [Cause](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7205140175). Harness `web/scripts/measure-wasm-core.ts` (#466/#487), Node 26.13.1. Arms: B = main `aca632bc`, W = PR #1073 `ff681721` (lazy per-Channel Map of prior Messages on every splice), R = #466 TS `117e75a1`. INCONCLUSIVE after 5 rounds, so the pre-committed extension to 9 rounds ran. 27 runs exited 0, G3 passed.
+
+| Metric | W vs B (median paired delta, 9 rounds) | Status |
+|---|---|---|
+| `step()` p50 / p95 / p99 | +20.7% (CI +18.6% to +25.9%) / -0.1% / +0.5% | MISSED (p50) |
+| Sustained 100 msg/s p95 | -3.5%, queue 0 | MET |
+| Max sustainable rate | 8000 msg/s (B and W) | MET |
+| Bulk receipt | -9% to -20% on every sub-metric | INCONCLUSIVE (`baselineNoisy` on 4) |
+| Steady / peak memory | -0.2% / -24.9% | MET |
+| Growth slope | 252.7 B/msg, +0 pages (B 257.2) | HOLD |
+
+- W was slower than B in `step()` p50 in every round (+17.5% to +26.2%, about +5.2 µs on 25.2 µs).
+- Deviation: rounds 4–6 ran on battery power. AC-only rounds alone are all above +10%, so the verdict does not depend on them.
+- Likely cause: the Map was built even for single-Message splices. The fix keeps `find` below 8 inserted Messages per Channel (`3482ee02`).
+
+**Re-measurement of the fix** ([updated pre-registration](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7205700871) · [Result](https://github.com/tkakkie/fukulow/issues/488#issuecomment-7207832835)). Same harness, B, R and rules; only W changed, to `3482ee02`. No W metric was INCONCLUSIVE after 5 rounds, so there was no extension. 15 runs exited 0, G3 passed, and every run was on AC power.
+
+| Metric | W vs B (median paired delta, 5 rounds) | Status |
+|---|---|---|
+| `step()` p50 / p95 / p99 | +1.0% / +0.9% / +0.5% | MET |
+| Sustained 100 msg/s p95 | -1.0%, queue 0 | MET |
+| Max sustainable rate | 8000 msg/s (B and W) | MET |
+| Bulk receipt | -5.6% to -17.2% (p50) | MET |
+| Steady / peak memory | +0.0% / +0.3% | MET |
+| Growth slope | 257.1 B/msg, +0 pages (B 256.9) | HOLD |
+
+- The slope HOLD is the absolute rule, which B does not meet either. W equals B within 0.3 B/msg. The `ff681721` MISSED above stands.
+
+## Startup Channel list reads (#983, 2026-11-26 to 2026-11-27, Mac)
+
+Closed on the maintainer's decision (chat, 2026-11-27) after plan v4. **Not an overall PASS.** Harness `web/scripts/first-paint.ts` at `7696be3c` with the per-plan evaluator `ab983v<N>.ts`, Mac M5, MAC-RELATIVE, `FIRST_PAINT_RUNS=5`, 5 → 9 rounds rule. Target 1: at most 2 counted startup Channel list reads in every valid arm-A run. Target 2: unthrottled and throttled `fcpMs` / `timelineVisibleMs` p50 within +5.0 %, by paired round-delta bootstrap 95 % CI.
+
+| Plan | Verdict | Record |
+|---|---|---|
+| v2 | **FAIL** (Target 1 MISSED) | [Result](https://github.com/tkakkie/fukulow/issues/983#issuecomment-7201134857) |
+| v3 | **INCONCLUSIVE** (Target 1 MET; 3 unthrottled Timeline cells INCONCLUSIVE after 9 rounds) | [Result](https://github.com/tkakkie/fukulow/issues/983#issuecomment-7209263866) |
+| v4 (rev 4.1) | **INCONCLUSIVE** (Target 1 MET; 5 Target 2 cells INCONCLUSIVE, 0 MISSED) | [Plan](https://github.com/tkakkie/fukulow/issues/983#issuecomment-7209528574) · [Result](https://github.com/tkakkie/fukulow/issues/983#issuecomment-7216088299) |
+
+**v4 scored run.** Arms are measurement-only commits, never merged: B′ `fe626ee6`, A′ `75652db1`, which remove the #1033 ~250 ms step from both arms. One attempt, 9 rounds, 0 void, 360 valid arm-A runs, 0 invalid, no rerun.
+
+- **Step check HOLDS.** The highest unthrottled round p95 was 146.0 ms (A′) and 143.3 ms (B′), within the 200 ms HOLDS bound (above 300 ms would be FAILS). The ~250 ms step is gone in both arms.
+- **Target 1 MET.** At most 2 counted reads per valid run.
+- **Target 2: 11 MET, 5 INCONCLUSIVE, 0 MISSED.** All 8 throttled cells MET. INCONCLUSIVE: unthrottled cold `fcpMs` (`/` and Channel) and unthrottled `timelineVisibleMs` (`/` cold, Channel cold, Channel warm). CI upper ends were 4 ms (FCP, bound 2.8 ms) and 7.2–9.9 ms (Timeline, bounds 6.3–6.6 ms).
+
+**Limits.** These runs do not show that #983 has no first-display cost. Target 2 stays uncertain in the 5 cells above. `fcpMs` is reported in 4 ms steps, below which the unthrottled bounds (2.6–2.8 ms) sit. One non-zero round delta therefore leaves those cells INCONCLUSIVE, even with equal medians (56 ms in both cold cells). No v5 plan or further #983 measurement is planned.
+
+**Raw data:** the v4 bundle (`fp983v4/` with per-round results and `attempt-1/`, chain log, host records, queue, plan and the `ab983v4.ts` evaluator with its tests) is kept outside Git on the maintainer's Mac, retained at least until 2027-11-27. sha256 values:
+
+- Bundle `chain-983v4r3-mac-fp983v4.tar.gz`: `7d971d11cca7e95b684e251277271fdfdc9b7f21f80c20690250791c02d32da5`
+- `fp-evaluation.json`: `fb5ab69bba97e464b0619211811717f892b81892058d7522aa229ed96919012a`
+- `ab.log`: `9668d388432684f7d6b9f2618669c9ebca4e68b3e21c28dff3b7b094c306f433`
+- `chain.log`: `3b3bdec96ef20bc1d6137a3baf81b6177d5fbf1fade43a75026a958a01a90b3b`
+- `ab983v4.ts`: `fb7e7571bc839fa3ca56b9e8d837399076541023ddb4dfe929e75435dc515d13`
+
+## Release Wasm size (#1128)
+
+#1128 release Wasm (`a878e090`): 558,619 B raw, 161,082 B gzip (level 6). macOS 27.0.1 arm64 (M5), Rust 1.100.0, wasm-bindgen 0.2.130, Node 26.13.1. From root run `(cd web && node ../scripts/build-wasm.ts)` then `node scripts/check-wasm-budget.ts web/wasm`. CI reuses `npm --prefix web run build` on `ubuntu-latest` and skips the PR delta to avoid a second build.

@@ -10,7 +10,8 @@ use std::{
 };
 
 const INTERVAL: Duration = Duration::from_secs(1);
-const WAIT_US: &[u64] = &[
+// Each array maps to 12 fields in the pool_stats event.
+const WAIT_US: &[u64; 12] = &[
     100,
     500,
     1_000,
@@ -24,7 +25,7 @@ const WAIT_US: &[u64] = &[
     5_000_000,
     u64::MAX,
 ];
-const ACTIVE: &[u64] = &[0, 1, 2, 4, 8, 16, 24, 32, 48, 64, 100, u64::MAX];
+const ACTIVE: &[u64; 12] = &[0, 1, 2, 4, 8, 16, 24, 32, 48, 64, 100, u64::MAX];
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 
 pub(crate) async fn acquire(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
@@ -161,6 +162,10 @@ impl Drop for Wait<'_> {
 }
 
 pub async fn report_pool_periodically(pool: PgPool) {
+    #[cfg(test)]
+    if let Ok(stats) = TEST_STATS.try_with(std::sync::Arc::clone) {
+        return report(&stats, &pool).await;
+    }
     report(&STATS, &pool).await;
 }
 

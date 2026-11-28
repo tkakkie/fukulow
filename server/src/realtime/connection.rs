@@ -1,17 +1,32 @@
+mod heartbeat;
+
+#[cfg(test)]
+use super::tests::hooks::{self, Phase};
 use super::{CLOSE_QUEUE_OVERFLOW, ClientMessage, ServerEvent};
 use crate::{
     AppState,
     auth::Auth,
-    channels::activity::NoticeFrame,
-    messages::{self, LiveQueue, MessageError},
-    observability::{REVOCATION_MEASUREMENT_TARGET, measurement_ms},
+    channels::{AccessWatch, activity::Registration},
+    messages::{self, LIVE_QUEUE_CAPACITY, LiveQueue, MessageError},
 };
 use axum::extract::ws::{Message as Frame, WebSocket};
+use heartbeat::Heartbeat;
 use std::{collections::HashMap, time::Duration};
-use tokio::time::{Instant, MissedTickBehavior};
 use uuid::Uuid;
 
 const MAX_SUBSCRIPTIONS: usize = 256;
+
+fn database_failure(operation: &'static str, error: &sqlx::Error) -> u16 {
+    tracing::info_span!(target: "fukulow", "database", operation)
+        .in_scope(|| crate::observability::database_failure(error));
+    1011
+}
+
+enum SubscriptionVisibility {
+    Visible(Uuid),
+    HistoryGenerationChanged,
+    NotFound,
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Lifecycle {
@@ -29,15 +44,30 @@ impl Default for Lifecycle {
 }
 
 pub(super) struct Connection<'a> {
-    pub state: &'a AppState,
-    pub auth: &'a Auth,
-    pub queue: LiveQueue,
-    pub cursors: HashMap<Uuid, i64>,
-    pub access: HashMap<Uuid, crate::channels::AccessWatch>,
-    pub permit: super::limits::Permit,
+    state: &'a AppState,
+    auth: &'a Auth,
+    pub(super) queue: LiveQueue,
+    cursors: HashMap<Uuid, i64>,
+    access: HashMap<Uuid, AccessWatch>,
+    permit: super::limits::Permit,
 }
 
-impl Connection<'_> {
+impl<'a> Connection<'a> {
+    pub(super) fn new(state: &'a AppState, auth: &'a Auth, permit: super::limits::Permit) -> Self {
+        Self {
+            state,
+            auth,
+            queue: state.message_delivery.queue(
+                auth.identity.organization.organization_id,
+                (auth.identity.member.id, auth.membership_revision),
+                LIVE_QUEUE_CAPACITY,
+            ),
+            cursors: HashMap::new(),
+            access: HashMap::new(),
+            permit,
+        }
+    }
+
     async fn protected_event(
         &mut self,
         socket: &mut WebSocket,
@@ -87,8 +117,8 @@ impl Connection<'_> {
     }
     async fn protected(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<bool, u16> {
         match self.access.get(&channel).map(|watch| watch.status()) {
-            Some(0) => Ok(true),
-            Some(1) => {
+            Some(AccessWatch::ACTIVE) => Ok(true),
+            Some(AccessWatch::CHANNEL_LOST) => {
                 self.unsubscribe(channel);
                 Self::event(
                     socket,
@@ -99,20 +129,19 @@ impl Connection<'_> {
                 .await?;
                 Ok(false)
             }
-            Some(3) => Err(super::CLOSE_ORGANIZATION_UNAVAILABLE),
-            Some(_) => Err(1011),
+            Some(AccessWatch::MEMBERSHIP_LOST) => Err(super::CLOSE_ORGANIZATION_UNAVAILABLE),
+            Some(AccessWatch::RECHECK_FAILED) => Err(1011),
             None => Ok(false),
         }
     }
     async fn refresh(&mut self, socket: &mut WebSocket, channel: Uuid) -> Result<bool, u16> {
         if let Some(watch) = self.access.get(&channel) {
             #[cfg(test)]
-            super::tests::access_loss::pause(channel, "refresh", 0).await;
-            watch.refresh(&self.state.pool).await.map_err(|error| {
-                tracing::info_span!(target: "fukulow", "database", operation = "websocket_refresh")
-                    .in_scope(|| crate::observability::database_failure(&error));
-                1011u16
-            })?;
+            hooks::pause(channel, Phase::Refresh, 0).await;
+            watch
+                .refresh(&self.state.pool)
+                .await
+                .map_err(|error| database_failure("websocket_refresh", &error))?;
         }
         self.protected(socket, channel).await
     }
@@ -120,7 +149,7 @@ impl Connection<'_> {
         let lost: Vec<_> = self
             .access
             .iter()
-            .filter(|(_, watch)| watch.status() != 0)
+            .filter(|(_, watch)| watch.status() != AccessWatch::ACTIVE)
             .map(|(id, _)| *id)
             .collect();
         for channel in lost {
@@ -128,8 +157,11 @@ impl Connection<'_> {
         }
         Ok(())
     }
-    async fn access_changed(access: &mut HashMap<Uuid, crate::channels::AccessWatch>) {
-        if access.values().any(|watch| watch.status() != 0) {
+    async fn access_changed(access: &mut HashMap<Uuid, AccessWatch>) {
+        if access
+            .values()
+            .any(|watch| watch.status() != AccessWatch::ACTIVE)
+        {
             return;
         }
         let mut waits: Vec<_> = access
@@ -153,7 +185,7 @@ impl Connection<'_> {
         message: std::sync::Arc<messages::LiveMessage>,
     ) -> Result<(), u16> {
         #[cfg(test)]
-        super::tests::access_loss::pause(message.channel_id, "live", message.seq).await;
+        hooks::pause(message.channel_id, Phase::Live, message.seq).await;
         if !self.protected(socket, message.channel_id).await? {
             return Ok(());
         }
@@ -185,53 +217,12 @@ impl Connection<'_> {
         Self::send(socket, Self::event_frame(&event)?).await
     }
 
-    fn event_frame(event: &ServerEvent) -> Result<Frame, u16> {
+    pub(super) fn event_frame(event: &ServerEvent) -> Result<Frame, u16> {
         let json = serde_json::to_string(event).map_err(|_| 1011u16)?;
         Ok(Frame::Text(json.into()))
     }
 
-    async fn activity_notice(
-        pool: &sqlx::PgPool,
-        socket: &mut WebSocket,
-        notice: NoticeFrame,
-    ) -> Result<(), u16> {
-        let mut sent = None;
-        let timing = &mut sent;
-        if let Some(result) = notice
-            .handoff(pool, |notice| async move {
-                let event = ServerEvent::from(notice);
-                let frame = Self::event_frame(&event)?;
-                // A buffered write can span polls. Bound it from entry through successful flush.
-                let started = if let ServerEvent::ChannelAccessRevoked { channel_id } = event
-                    && tracing::event_enabled!(target: REVOCATION_MEASUREMENT_TARGET, tracing::Level::TRACE)
-                {
-                    Some((channel_id, measurement_ms()))
-                } else {
-                    None
-                };
-                Self::send(socket, frame).await?;
-                *timing = started.map(|(channel_id, before_ms)| (channel_id, before_ms, measurement_ms()));
-                Ok::<(), u16>(())
-            })
-            .await
-        {
-            result?;
-        }
-        // Keep log I/O outside the gate that protects the first write poll.
-        if let Some((channel_id, before_ms, after_ms)) = sent {
-            tracing::trace!(
-                target: REVOCATION_MEASUREMENT_TARGET,
-                event = "channel_access_revoked_sent",
-                %channel_id,
-                before_ms,
-                after_ms,
-                after_hold = notice.is_held_retry()
-            );
-        }
-        Ok(())
-    }
-
-    async fn send(socket: &mut WebSocket, frame: Frame) -> Result<(), u16> {
+    pub(super) async fn send(socket: &mut WebSocket, frame: Frame) -> Result<(), u16> {
         tokio::time::timeout(Duration::from_secs(5), socket.send(frame))
             .await
             .map_err(|_| CLOSE_QUEUE_OVERFLOW)?
@@ -253,8 +244,12 @@ impl Connection<'_> {
         .await
     }
 
-    async fn visible(&self, channel: Uuid, generation: Option<Uuid>) -> Result<Uuid, MessageError> {
-        messages::history::authorized_generation(
+    async fn visible(
+        &self,
+        channel: Uuid,
+        generation: Option<Uuid>,
+    ) -> Result<SubscriptionVisibility, u16> {
+        match messages::history::authorized_generation(
             &self.state.pool,
             self.auth.identity.organization.organization_id,
             (self.auth.identity.member.id, self.auth.membership_revision),
@@ -262,6 +257,20 @@ impl Connection<'_> {
             generation,
         )
         .await
+        {
+            Ok(generation) => Ok(SubscriptionVisibility::Visible(generation)),
+            Err(MessageError::HistoryGenerationChanged) => {
+                Ok(SubscriptionVisibility::HistoryGenerationChanged)
+            }
+            Err(MessageError::NotFound) => Ok(SubscriptionVisibility::NotFound),
+            Err(MessageError::OrganizationUnavailable) => {
+                Err(super::CLOSE_ORGANIZATION_UNAVAILABLE)
+            }
+            Err(MessageError::Database(error)) => {
+                Err(database_failure("websocket_authorize", &error))
+            }
+            Err(_) => Err(1011),
+        }
     }
 
     // Subscription replay also handles a cursor gap after access was lost and restored.
@@ -283,21 +292,17 @@ impl Connection<'_> {
             .message_delivery
             .latest_seq(&self.state.pool, organization, channel)
             .await
-            .map_err(|error| {
-                tracing::info_span!(target: "fukulow", "database", operation = "websocket_latest_seq")
-                    .in_scope(|| crate::observability::database_failure(&error));
-                1011u16
-            })?;
+            .map_err(|error| database_failure("websocket_latest_seq", &error))?;
         if !self.refresh(socket, channel).await? {
             return Ok(());
         }
         after = after.min(through);
         self.cursors.insert(channel, after);
         #[cfg(test)]
-        super::tests::replay_gate(channel).await;
+        hooks::pause_replay(channel).await;
         while after < through {
             #[cfg(test)]
-            super::tests::access_loss::pause(channel, "snapshot", after).await;
+            hooks::pause(channel, Phase::Snapshot, after).await;
             let page = match messages::authorized_replay_page(
                 &self.state.pool,
                 organization,
@@ -322,9 +327,7 @@ impl Connection<'_> {
                     return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                 }
                 Err(MessageError::Database(error)) => {
-                    tracing::info_span!(target: "fukulow", "database", operation = "websocket_replay")
-                        .in_scope(|| crate::observability::database_failure(&error));
-                    return Err(1011);
+                    return Err(database_failure("websocket_replay", &error));
                 }
                 Err(_) => return Err(1011),
             };
@@ -332,10 +335,10 @@ impl Connection<'_> {
                 return Err(1011);
             }
             #[cfg(test)]
-            super::tests::access_loss::pause(channel, "page", after).await;
+            hooks::pause(channel, Phase::Page, after).await;
             for message in page {
                 #[cfg(test)]
-                super::tests::access_loss::pause(channel, "frame", message.seq).await;
+                hooks::pause(channel, Phase::Frame, message.seq).await;
                 if !self.protected(socket, channel).await? {
                     return Ok(());
                 }
@@ -360,180 +363,171 @@ impl Connection<'_> {
 
     async fn control(&mut self, socket: &mut WebSocket, control: ClientMessage) -> Result<(), u16> {
         match control {
-            ClientMessage::Unsubscribe { channel_id } => self.unsubscribe(channel_id),
+            ClientMessage::Unsubscribe { channel_id } => {
+                self.unsubscribe(channel_id);
+                Ok(())
+            }
             ClientMessage::Subscribe {
                 channel_id,
                 after_seq,
                 history_generation,
             } => {
-                // Duplicate controls never replay or change the cursor. A carried epoch
-                // still requires fresh authorization before it can be compared.
                 if self.cursors.contains_key(&channel_id) {
-                    if history_generation.is_some() {
-                        match self.visible(channel_id, history_generation).await {
-                            Ok(_) => {}
-                            Err(MessageError::HistoryGenerationChanged) => {
-                                self.unsubscribe(channel_id);
-                                return Self::error(
-                                    socket,
-                                    Some(channel_id),
-                                    "history_generation_changed",
-                                )
-                                .await;
-                            }
-                            Err(MessageError::NotFound) => {
-                                self.unsubscribe(channel_id);
-                                return Self::error(socket, Some(channel_id), "channel_not_found")
-                                    .await;
-                            }
-                            Err(MessageError::OrganizationUnavailable) => {
-                                return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
-                            }
-                            Err(_) => return Err(1011),
-                        }
-                    }
-                    return Ok(());
-                }
-                if after_seq < 0 {
-                    return Self::error(socket, Some(channel_id), "invalid_input").await;
-                }
-                if self.cursors.len() >= MAX_SUBSCRIPTIONS {
-                    return Self::error(socket, Some(channel_id), "subscription_limit").await;
-                }
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "authorize", 0).await;
-                match self.visible(channel_id, history_generation).await {
-                    Ok(_) => {}
-                    Err(MessageError::HistoryGenerationChanged) => {
-                        return Self::error(socket, Some(channel_id), "history_generation_changed")
-                            .await;
-                    }
-                    Err(MessageError::NotFound) => {
-                        return Self::error(socket, Some(channel_id), "channel_not_found").await;
-                    }
-                    Err(MessageError::OrganizationUnavailable) => {
-                        return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
-                    }
-                    Err(MessageError::Database(error)) => {
-                        tracing::info_span!(
-                            target: "fukulow", "database", operation = "websocket_authorize"
-                        )
-                        .in_scope(|| crate::observability::database_failure(&error));
-                        return Err(1011);
-                    }
-                    Err(_) => return Err(1011),
-                }
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "access_subscribe", 0).await;
-                let watch = self
-                    .state
-                    .message_delivery
-                    .channel_access
-                    .subscribe(
-                        &self.state.pool,
-                        self.auth.identity.organization.organization_id,
-                        (self.auth.identity.member.id, self.auth.membership_revision),
-                        channel_id,
-                    )
-                    .await
-                    .map_err(|error| {
-                        tracing::info_span!(
-                            target: "fukulow", "database", operation = "websocket_subscribe"
-                        )
-                        .in_scope(|| crate::observability::database_failure(&error));
-                        1011u16
-                    })?;
-                let Some(watch) = watch else {
-                    return Self::error(socket, Some(channel_id), "channel_not_found").await;
-                };
-                self.access.insert(channel_id, watch);
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "registered", 0).await;
-                self.queue.subscribe(channel_id);
-                self.cursors.insert(channel_id, after_seq);
-                self.catch_up(socket, channel_id).await?;
-                // Flush the bounded set queued during history. New arrivals stay queued for live.
-                let queued = self.queue.events.len();
-                for _ in 0..queued {
-                    if let Ok(message) = self.queue.events.try_recv() {
-                        self.live(socket, message).await?;
-                    }
-                }
-                if !self.refresh(socket, channel_id).await? {
-                    return Ok(());
-                }
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "subscribed_seq", 0).await;
-                if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
-                    #[cfg(test)]
-                    self.state.message_delivery.record_watermark_caller(
-                        &self.state.pool,
-                        self.auth.identity.organization.organization_id,
-                        channel_id,
-                        "confirmation",
-                    );
-                    let latest = self
-                        .state
-                        .message_delivery
-                        .latest_seq(
-                            &self.state.pool,
-                            self.auth.identity.organization.organization_id,
-                            channel_id,
-                        )
+                    self.subscribe_again(socket, channel_id, history_generation)
                         .await
-                        .map_err(|error| {
-                            tracing::info_span!(target: "fukulow", "database", operation = "websocket_subscribed_seq")
-                                .in_scope(|| crate::observability::database_failure(&error));
-                            1011u16
-                        })?;
-                    if !self.protected(socket, channel_id).await? {
-                        return Ok(());
-                    }
-                    #[cfg(test)]
-                    super::tests::access_loss::pause(channel_id, "handoff_generation", 0).await;
-                    let history_generation = match self.visible(channel_id, None).await {
-                        Ok(generation) => generation,
-                        Err(MessageError::NotFound) => {
-                            self.unsubscribe(channel_id);
-                            return Self::event(
-                                socket,
-                                ServerEvent::ChannelAccessLost { channel_id },
-                            )
-                            .await;
-                        }
-                        Err(MessageError::OrganizationUnavailable) => {
-                            return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
-                        }
-                        Err(MessageError::Database(error)) => {
-                            tracing::info_span!(target: "fukulow", "database", operation = "websocket_authorize")
-                                .in_scope(|| crate::observability::database_failure(&error));
-                            return Err(1011);
-                        }
-                        Err(_) => return Err(1011),
-                    };
-                    self.protected_event(
-                        socket,
-                        channel_id,
-                        ServerEvent::Subscribed {
-                            history_generation,
-                            channel_id,
-                            caught_up_seq: caught_up_seq.min(latest),
-                        },
-                    )
-                    .await?;
+                } else {
+                    self.subscribe(socket, channel_id, after_seq, history_generation)
+                        .await
+                }
+            }
+        }
+    }
+
+    async fn subscribe_again(
+        &mut self,
+        socket: &mut WebSocket,
+        channel_id: Uuid,
+        history_generation: Option<Uuid>,
+    ) -> Result<(), u16> {
+        // Duplicate controls never replay or change the cursor. A carried epoch
+        // still requires fresh authorization before it can be compared.
+        if history_generation.is_some() {
+            match self.visible(channel_id, history_generation).await? {
+                SubscriptionVisibility::Visible(_) => {}
+                SubscriptionVisibility::HistoryGenerationChanged => {
+                    self.unsubscribe(channel_id);
+                    return Self::error(socket, Some(channel_id), "history_generation_changed")
+                        .await;
+                }
+                SubscriptionVisibility::NotFound => {
+                    self.unsubscribe(channel_id);
+                    return Self::error(socket, Some(channel_id), "channel_not_found").await;
                 }
             }
         }
         Ok(())
     }
 
-    pub async fn run(&mut self, socket: &mut WebSocket, lifecycle: Lifecycle) -> Result<(), u16> {
-        let activity = self
+    async fn subscribe(
+        &mut self,
+        socket: &mut WebSocket,
+        channel_id: Uuid,
+        after_seq: i64,
+        history_generation: Option<Uuid>,
+    ) -> Result<(), u16> {
+        if after_seq < 0 {
+            return Self::error(socket, Some(channel_id), "invalid_input").await;
+        }
+        if self.cursors.len() >= MAX_SUBSCRIPTIONS {
+            return Self::error(socket, Some(channel_id), "subscription_limit").await;
+        }
+        #[cfg(test)]
+        hooks::pause(channel_id, Phase::Authorize, 0).await;
+        match self.visible(channel_id, history_generation).await? {
+            SubscriptionVisibility::Visible(_) => {}
+            SubscriptionVisibility::HistoryGenerationChanged => {
+                return Self::error(socket, Some(channel_id), "history_generation_changed").await;
+            }
+            SubscriptionVisibility::NotFound => {
+                return Self::error(socket, Some(channel_id), "channel_not_found").await;
+            }
+        }
+        #[cfg(test)]
+        hooks::pause(channel_id, Phase::AccessSubscribe, 0).await;
+        let watch = self
             .state
             .message_delivery
             .channel_access
-            .activity
-            .register(self.auth);
+            .subscribe(
+                &self.state.pool,
+                self.auth.identity.organization.organization_id,
+                (self.auth.identity.member.id, self.auth.membership_revision),
+                channel_id,
+            )
+            .await
+            .map_err(|error| database_failure("websocket_subscribe", &error))?;
+        let Some(watch) = watch else {
+            return Self::error(socket, Some(channel_id), "channel_not_found").await;
+        };
+        self.access.insert(channel_id, watch);
+        #[cfg(test)]
+        hooks::pause(channel_id, Phase::Registered, 0).await;
+        self.queue.subscribe(channel_id);
+        self.cursors.insert(channel_id, after_seq);
+        self.catch_up(socket, channel_id).await?;
+        // Flush the bounded set queued during history. New arrivals stay queued for live.
+        let queued = self.queue.events.len();
+        for _ in 0..queued {
+            if let Ok(message) = self.queue.events.try_recv() {
+                self.live(socket, message).await?;
+            }
+        }
+        self.confirm_subscribed(socket, channel_id).await
+    }
+
+    async fn confirm_subscribed(
+        &mut self,
+        socket: &mut WebSocket,
+        channel_id: Uuid,
+    ) -> Result<(), u16> {
+        if !self.refresh(socket, channel_id).await? {
+            return Ok(());
+        }
+        #[cfg(test)]
+        hooks::pause(channel_id, Phase::SubscribedSeq, 0).await;
+        if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
+            #[cfg(test)]
+            self.state.message_delivery.record_watermark_caller(
+                &self.state.pool,
+                self.auth.identity.organization.organization_id,
+                channel_id,
+                "confirmation",
+            );
+            let latest = self
+                .state
+                .message_delivery
+                .latest_seq(
+                    &self.state.pool,
+                    self.auth.identity.organization.organization_id,
+                    channel_id,
+                )
+                .await
+                .map_err(|error| database_failure("websocket_subscribed_seq", &error))?;
+            if !self.protected(socket, channel_id).await? {
+                return Ok(());
+            }
+            #[cfg(test)]
+            hooks::pause(channel_id, Phase::HandoffGeneration, 0).await;
+            let history_generation = match self.visible(channel_id, None).await? {
+                SubscriptionVisibility::Visible(generation) => generation,
+                SubscriptionVisibility::NotFound => {
+                    self.unsubscribe(channel_id);
+                    return Self::event(socket, ServerEvent::ChannelAccessLost { channel_id })
+                        .await;
+                }
+                // Handoff carries no expected epoch, so a mismatch here is internal.
+                SubscriptionVisibility::HistoryGenerationChanged => return Err(1011),
+            };
+            self.protected_event(
+                socket,
+                channel_id,
+                ServerEvent::Subscribed {
+                    history_generation,
+                    channel_id,
+                    caught_up_seq: caught_up_seq.min(latest),
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn run(
+        &mut self,
+        socket: &mut WebSocket,
+        activity: Registration,
+        lifecycle: Lifecycle,
+    ) -> Result<(), u16> {
         #[cfg(test)]
         crate::channels::activity::test_pause(
             self.auth.identity.organization.organization_id,
@@ -543,10 +537,7 @@ impl Connection<'_> {
         )
         .await;
         Self::event(socket, ServerEvent::ActivityReady).await?;
-        let mut ping_sent_at: Option<Instant> = None;
-        let mut next_ping = Instant::now() + lifecycle.ping_interval;
-        let mut heartbeat = tokio::time::interval_at(next_ping, lifecycle.ping_interval);
-        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut heartbeat = Heartbeat::new(lifecycle);
         loop {
             let frame = tokio::select! {
                 biased;
@@ -557,17 +548,13 @@ impl Connection<'_> {
                 },
                 frame = socket.recv() => frame,
                 _ = heartbeat.tick() => {
-                    if ping_sent_at.is_some_and(|sent| sent.elapsed() >= lifecycle.idle_timeout) {
+                    if heartbeat.idle_expired() {
                         // Replay may have delayed reading a queued pong or other client frame.
                         tokio::time::timeout(Duration::ZERO, socket.recv())
                             .await.map_err(|_| 1001u16)?
                     } else {
                         Self::send(socket, Frame::Ping(Default::default())).await?;
-                        let sent = Instant::now();
-                        // Replay/live work can delay this tick: grace starts only after a Ping.
-                        let first_ping = *ping_sent_at.get_or_insert(sent);
-                        next_ping = sent + lifecycle.ping_interval;
-                        heartbeat.reset_at(next_ping.min(first_ping + lifecycle.idle_timeout));
+                        heartbeat.ping_sent();
                         continue;
                     }
                 },
@@ -577,8 +564,7 @@ impl Connection<'_> {
                 },
             };
             if matches!(frame, Some(Ok(_))) {
-                ping_sent_at = None;
-                heartbeat.reset_at(next_ping);
+                heartbeat.frame_received();
             }
             if matches!(frame, Some(Ok(Frame::Text(_) | Frame::Binary(_)))) && !self.permit.charge()
             {

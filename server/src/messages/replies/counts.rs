@@ -70,8 +70,8 @@ pub async fn reply_counts(
     let organization = auth.identity.organization.organization_id;
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
-    tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        topics::watermark(&state, organization, channel).await?;
+    admission::within_work_deadline(async {
+        watermark::read(&state, organization, channel).await?;
         crate::database::organization_read_only(
             &state.pool,
             organization,
@@ -96,19 +96,14 @@ pub async fn reply_counts(
                     })
                     .fetch_all(&mut *tx)
                     .await?;
-                Ok((
-                    [(header::CACHE_CONTROL, "no-store")],
-                    Json(ReplyCountPage {
-                        history_generation,
-                        as_of_seq: w,
-                        counts,
-                    }),
-                )
-                    .into_response())
+                Ok(no_store_json(ReplyCountPage {
+                    history_generation,
+                    as_of_seq: w,
+                    counts,
+                }))
             },
         )
         .await
     })
     .await
-    .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
 }

@@ -1,4 +1,4 @@
-import { replyPage } from './topic-test-helpers'
+import { deferred, replyPage } from './topic-test-helpers'
 import { describe, expect, it, vi } from 'vitest'
 import { createSession, type SessionOptions } from './session'
 import { createMembers } from './members'
@@ -107,6 +107,89 @@ it('a Move refusal leaves the Channel available and Organization loss follows th
   expect(session.sync.get().organization).toBe('unavailable')
   expect(onEnded).not.toHaveBeenCalled()
   session.close()
+})
+
+describe('request deadlines and Account Session end', () => {
+  const unauthorized = { ok: false, kind: 'http', status: 401 } as const
+
+  it('ends the Account Session on a 401 after a Channel Member mutation deadline', async () => {
+    vi.useFakeTimers()
+    const result = deferred<api.Result<undefined>>()
+    const add = vi.spyOn(api, 'addChannelMember').mockReturnValue(result.promise)
+    const { session, onEnded } = open()
+    try {
+      const panel = session.channelMembers('A')
+      const mutation = panel.add('other')
+      expect(add).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(10_000)
+      await mutation
+      expect(panel.get()).toMatchObject({
+        busy: false,
+        error: 'サーバーに接続できません。もう一度お試しください。',
+      })
+      expect(onEnded).not.toHaveBeenCalled()
+      result.resolve(unauthorized)
+      await settle()
+      expect(onEnded).toHaveBeenCalledOnce()
+    } finally { session.close(); add.mockRestore(); vi.useRealTimers() }
+  })
+
+  it('ends the Account Session on a 401 after a Move deadline', async () => {
+    vi.useFakeTimers()
+    const result = deferred<api.Result<api.MoveChainResponse>>()
+    const moveChainApi = vi.fn<MoveChainApi>().mockReturnValue(result.promise)
+    const { net, session, onEnded } = open({ moveChainApi })
+    try {
+      const anchor = record(100), history_generation = anchor.history_generation
+      net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [anchor], has_more: false })
+      net.replyChains[`A:${anchor.id}`] = ok(replyPage({ history_generation, as_of_seq: 100, root_id: anchor.id, messages: [anchor], has_more: false }))
+      net.lists[0].resolve(ok({ history_generation, channels: [channel('A')] }))
+      await settle(); net.subscribed('A', 100)
+      await session.replies.open('A', anchor)
+
+      const moving = session.moveChain('A', anchor.id, { topicId: 'T' })
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(moveChainApi).toHaveBeenCalledOnce()
+      await expect(moving).resolves.toMatchObject({ kind: 'unknown' })
+      expect(onEnded).not.toHaveBeenCalled()
+      result.resolve(unauthorized)
+      await settle()
+      expect(onEnded).toHaveBeenCalledOnce()
+    } finally { session.close(); vi.useRealTimers() }
+  })
+
+  it('ends the Account Session on a 401 after a held Activity deadline', async () => {
+    vi.useFakeTimers()
+    const { net, session, onEnded } = open()
+    try {
+      const pending = net.lists[0]
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(session.channels.get().status).toBe('error')
+      expect(session.channels.activityTarget?.failure()).toEqual({ ok: false, kind: 'network' })
+      expect(onEnded).not.toHaveBeenCalled()
+      pending.resolve(unauthorized)
+      await settle()
+      expect(onEnded).toHaveBeenCalledOnce()
+    } finally { session.close(); vi.useRealTimers() }
+  })
+
+  it('ends the Account Session on a 401 after a navigation hint deadline', async () => {
+    vi.useFakeTimers()
+    const result = deferred<api.Result<api.ReplyChainPage>>()
+    const listReplyChain = vi.fn().mockReturnValue(result.promise)
+    const { session, onEnded } = open({ repliesApi: { listReplyChain } })
+    try {
+      const loading = session.navigationTargets.load({ organizationId: 'org', channelId: 'A', topicId: null, panel: 'reply:message' })
+      expect(listReplyChain).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(10_000)
+      await loading
+      expect(session.navigationTargets.get().reply.status).toBe('error')
+      expect(onEnded).not.toHaveBeenCalled()
+      result.resolve(unauthorized)
+      await settle()
+      expect(onEnded).toHaveBeenCalledOnce()
+    } finally { session.close(); vi.useRealTimers() }
+  })
 })
 
 it('ordinary REST organization_unavailable ends only its Organization', async () => {

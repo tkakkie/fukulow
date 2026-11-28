@@ -1,0 +1,30 @@
+name: cache-prune
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+# #926: deletes superseded main rust-cache keys (scripts/actions-cache-prune.ts). Deleting needs the actions write permission,
+# so only this job gets it, only on main. It runs repository code with SHA-pinned actions, installs nothing,
+# keeps the token out of .git/config and passes it as GH_TOKEN only to the prune step.
+permissions: {}
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+jobs:
+  prune:
+    # A dispatch from another branch would run that branch's script with the write token.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version-file: .node-version }
+      - name: Delete superseded rust-cache keys
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/actions-cache-prune.ts --apply

@@ -1,6 +1,8 @@
 import * as api from './api'
 import { createRequestDeadlines } from './request-deadlines'
 import { knownMessageState } from './identity-order'
+import { observeGeneration } from './observe-generation'
+import { isBelowMutationFloor, observeReadAccess } from './projection-read-fences'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
 import { REPLY_MESSAGE_LIMIT, type ChannelState } from './protocol-types'
@@ -33,7 +35,7 @@ const chain = (anchor: Message, channel: ChannelState | undefined) => ({ anchor,
 type Chain = ReturnType<typeof chain>
 
 /** One open chain per Channel; projection records settle sends but never enter sync's confirmed window. */
-export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionEnded?: () => void; requestTimeoutMs?: number }) {
+export function createReplies(sync: Sync, options: { api: RepliesApi; requestTimeoutMs?: number }) {
   const canonical = (channel: string, held: Message | undefined, incoming: Message) =>
     knownMessageState(sync.get().channels[channel], held, incoming)
   const chains = new Map<string, Chain>()
@@ -159,7 +161,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     if (!w || !current(channel, w) || w.loading || (!w.hasMore && !w.restart)) return
     const requestedAfter = w.restart ? w.restartAfter : w.after
     const requestedW = w.restart ? undefined : w.asOfSeq
-    const mutationFloor = sync.get().channels[channel]?.mutationSeq ?? 0
+    const startedMutationSeq = sync.get().channels[channel]?.mutationSeq ?? 0
     const versionEpoch = sync.get().channels[channel]?.versionEpoch
     const token = Symbol(), session = sessionToken
     w.read = token; w.loading = true; w.error = false; notify(new Set([channel]))
@@ -167,23 +169,21 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     const anchor = w.anchor.id, generation = sync.get().historyGeneration
     const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, anchor, { history_generation: generation, as_of_seq: requestedW, after_seq: requestedAfter }))
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
-    // C6 late 401 and C10 remain authoritative for this Account Session, even after timeout or unwatch.
-    void operation.then(r => {
-      if (session !== sessionToken) return
-      if (!r.ok && r.kind === 'http' && r.status === 401) { void sync.close(); options.onSessionEnded?.() }
-      else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
-    })
+    observeReadAccess(sync, operation, session, () => sessionToken)
     const apply = operation.then(result => {
       if (!isCurrent()) return
       w.loading = false
-      const generation = result.ok ? result.data.history_generation : undefined
-      if (generation !== undefined && !sync.observeHistoryGeneration(generation)) return
-      if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
+      const observed = observeGeneration(sync, result, data => {
+        const generation = data.history_generation
+        if (generation !== undefined) return { generation }
+      })
+      if (observed === 'stale') return
       const state = sync.get().channels[channel]
-      const mutationSeq = state?.mutationSeq ?? 0
-      const floor = mutationFloor < mutationSeq ? mutationSeq : state?.moveSeq ?? 0
-      if (result.ok && result.data.as_of_seq < floor) result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
+      if (result.ok && isBelowMutationFloor(result.data.as_of_seq, startedMutationSeq, state)) {
+        result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
+      }
       if (!result.ok && result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) {
+        const mutationSeq = state?.mutationSeq ?? 0
         w.messages.clear(); w.asOfSeq = undefined; w.moveBaseline = undefined; w.after = 0; w.hasMore = true
         if (!w.restart) { w.restart = true; w.restartAfter = 0 }
         // Edit/Delete can leave complete current stream records. A Move restart keeps the chain hidden until its page arrives.
@@ -194,8 +194,8 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       }
       if (!result.ok) {
         w.error = true
-        if (!api.isOrganizationUnavailable(result) && result.kind === 'http' && [403, 404].includes(result.status) &&
-          result.error !== 'reply_chain_not_found') {
+        if (!api.isOrganizationUnavailable(result) &&
+          api.isChannelDenial(result, { statuses: [403, 404], localNotFound: 'reply_chain_not_found' })) {
           void sync.channelUnavailable(channel)
         }
       } else if (result.data.root_id !== w.rootId) {

@@ -399,30 +399,21 @@ impl Drop for Lead {
     }
 }
 
+#[cfg(test)]
+use crate::test_support::{Gate, Gates};
+
 /// Test hook: holds the leader of `key` after its charge, before admission.
 #[cfg(test)]
-static CHARGE_GATES: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<Uuid, Arc<super::delivery::PublicationGate>>>,
-> = std::sync::LazyLock::new(Default::default);
+static CHARGE_GATES: Gates<Uuid> = Gates::new();
 
 #[cfg(test)]
-pub(crate) fn pause_after_charge(key: Uuid) -> Arc<super::delivery::PublicationGate> {
-    let gate = Arc::new(super::delivery::PublicationGate {
-        entered: tokio::sync::Semaphore::new(0),
-        release: tokio::sync::Semaphore::new(0),
-        task: Mutex::new(None),
-    });
-    CHARGE_GATES.lock().unwrap().insert(key, gate.clone());
-    gate
+pub(crate) fn pause_after_charge(key: Uuid) -> Arc<Gate> {
+    CHARGE_GATES.register(key)
 }
 
 #[cfg(test)]
 pub(crate) async fn charged(key: Uuid) {
-    let gate = CHARGE_GATES.lock().unwrap().remove(&key);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    CHARGE_GATES.pause(key).await;
 }
 
 #[cfg(test)]

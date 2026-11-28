@@ -3,14 +3,16 @@ import { createAuth, type AuthDeps, type SessionModel } from './auth.svelte'
 import { tokenizeMessageBody } from './message-format'
 import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
-import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
-import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
-import { listReplyChain, type lookupAuthors, type listMembers, type MemberList, type Result } from './api'
+import { createInviteAcceptance } from './invite-acceptance'
+import { inviteAcceptanceAdapter } from './invite-acceptance.svelte'
+import { createMembers, watchMemberAccess } from './members'
+import { membersAdapter } from './members.svelte'
+import { listReplyChain, type ChannelList, type lookupAuthors, type listMembers, type MemberList, type Result, type TimelinePage } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
-import type { AuthState } from './auth'
+import { sessionEndedMessage, type AuthState } from './auth'
 import { replyPage } from './topic-test-helpers'
 
 beforeEach(() => vi.useFakeTimers())
@@ -37,20 +39,21 @@ function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false, replyFetch
     setupAndSignIn: vi.fn(),
     signOut: vi.fn(async () => true),
     getOrganization: vi.fn(async () => ok(member(signedIn))),
-    openSession(selfId, onEnded, organizationId, drafts, _onIdentity, _initialRole, accountSignal): SessionModel {
+    openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels): SessionModel {
       if (drafts) stores.push(drafts)
       const net = fakeNetwork()
       nets.push(net)
       ended.push(onEnded)
       const options = net.options(selfId)
-      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, sync: { ...options.sync, drafts },
+      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, initialRole, initialCanCreateChannels, initialChannels,
+        onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { ...options.sync, drafts },
         repliesApi: replyFetch ? { listReplyChain: (channel, anchor, query, signal) =>
           listReplyChain(organizationId, channel, anchor, query, replyFetch, signal) } : options.repliesApi })
       sessions.push(session)
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
-      return { holdActivity: holdMemberLists ? session.holdActivity : undefined, onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
+      return { holdActivity: holdMemberLists ? session.holdActivity : undefined, onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener), channels: channelsAdapter(session.channels, session.channelCreation), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
     },
     ...over,
   }
@@ -60,8 +63,9 @@ type Stack = ReturnType<typeof stack>
 
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>(done => { resolve = done })
-  return { promise, resolve }
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 it.each(['sign-in', 'restore', 'setup', 'Invite'] as const)('%s releases cookie mutation busy before a delayed Organization lookup, allowing switching and sign-out', async action => {
@@ -395,6 +399,8 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     await signInAs(s, 'm1')
     const net = await openChannelA(s)
     const session = s.auth.session!, members = s.auth.members!
+    expect(listMembers).not.toHaveBeenCalled()
+    await members.load()
     const ch = session.sync.channel('A')
     void ch.send('pending text')
     await settle()
@@ -421,7 +427,7 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     await vi.advanceTimersByTimeAsync(60_000)
     await settle()
     expect(lookup).toHaveBeenCalledTimes(2)
-    expect(listMembers).toHaveBeenCalledTimes(2) // Selection and initial Channel list change.
+    expect(listMembers).toHaveBeenCalledTimes(1)
     expect(net.history).toHaveLength(historyCount)
     expect(net.sends).toHaveLength(1)
     expect(net.sockets).toHaveLength(1)
@@ -1210,19 +1216,23 @@ it('Guest Organization selection and reconnect reload Members and stop old selec
     })),
   })
   await signInAs(s, 'guest')
-  expect(list).toHaveBeenCalledTimes(1)
+  expect(list).toHaveBeenCalledTimes(0)
   const old = s.nets[0]
   old.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await settle()
-  expect(list).toHaveBeenCalledTimes(2)
+  expect(list).toHaveBeenCalledTimes(0)
+  s.auth.members!.activate(); await settle()
+  expect(list).toHaveBeenCalledTimes(1)
   old.subscribed('A', 0); await settle()
   old.socket.onClose(1011); await settle()
   await vi.advanceTimersByTimeAsync(1_000)
   old.socket.onReady(); await settle()
-  expect(list).toHaveBeenCalledTimes(3)
+  expect(list).toHaveBeenCalledTimes(2)
   await s.auth.selectOrganization('o'); await settle()
-  expect(list).toHaveBeenCalledTimes(4)
+  expect(list).toHaveBeenCalledTimes(2)
+  s.auth.members!.activate(); await settle()
+  expect(list).toHaveBeenCalledTimes(3)
   old.event({ type: 'channel_access_lost', channel_id: 'A' }); await settle()
-  expect(list).toHaveBeenCalledTimes(4)
+  expect(list).toHaveBeenCalledTimes(3)
   await s.auth.signOut()
 })
 
@@ -1231,7 +1241,6 @@ it('channel_access_lost alone withholds a Guest directory and fences its in-flig
   const peer = { id: 'peer', name: '佐藤', role: 'member' as const }
   const stale = deferred<Result<MemberList>>()
   const list = vi.fn<typeof listMembers>()
-    .mockResolvedValueOnce(ok({ members: [self, peer] }))
     .mockResolvedValueOnce(ok({ members: [self, peer] }))
     .mockReturnValueOnce(stale.promise)
     .mockResolvedValue(ok({ members: [self] }))
@@ -1248,9 +1257,11 @@ it('channel_access_lost alone withholds a Guest directory and fences its in-flig
     await settle()
     net.subscribed('A', 0); await settle()
     const directory = s.auth.members!
+    expect(list).toHaveBeenCalledTimes(0)
+    await directory.load()
     expect(directory.state.members).toEqual([self, peer])
     const pending = directory.load()
-    expect(list).toHaveBeenCalledTimes(3)
+    expect(list).toHaveBeenCalledTimes(2)
 
     net.event({ type: 'channel_access_lost', channel_id: 'A' })
     await settle()
@@ -1259,21 +1270,77 @@ it('channel_access_lost alone withholds a Guest directory and fences its in-flig
     stale.resolve(ok({ members: [self, peer] }))
     await pending
     expect(directory.state.members, 'after the pre-loss response').toEqual([])
-    expect(list).toHaveBeenCalledTimes(3)
+    expect(list).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(200)
     expect(directory.state.members).toEqual([self])
-    expect(list).toHaveBeenCalledTimes(4)
+    expect(list).toHaveBeenCalledTimes(3)
+  } finally { await s.auth.signOut() }
+})
+
+it('defers the Member directory through startup, initial Channel additions, connect edge, activity_ready and invalidations until activation', async () => {
+  const self = { id: 'm1', name: '自分', role: 'member' as const }
+  const list = vi.fn<typeof listMembers>(async () => ok({ members: [self] }))
+  const lookup = vi.fn<typeof lookupAuthors>(async () => ok({ identities: [{ id: 'other', name: '佐藤', deactivated: false }] }))
+  const s = stack({
+    getOrganization: async () => ok({ ...member('m1'), member: self }),
+    openMembers: (org, ended, unavailable, access) => membersAdapter(createMembers(org, ended, unavailable, {
+      listMembers: list, lookupAuthors: lookup, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    }, access)),
+  }, true)
+  try {
+    await signInAs(s, 'm1')
+    const net = s.nets[0]
+    // Connect edge
+    net.socket.onReady(); await settle()
+    // Initial Channel additions
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 0); await settle()
+    // activity_ready and later invalidations before activation
+    net.socket.onEvent({ type: 'activity_ready' })
+    net.socket.onEvent({ type: 'members_changed' })
+    net.socket.onEvent({ type: 'channel_access_gained', channel_id: 'B' })
+    net.socket.onEvent({ type: 'channel_access_revoked', channel_id: 'B' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    await settle()
+    expect(list).not.toHaveBeenCalled()
+
+    // Scoped author lookup works independently while the directory is still deferred.
+    s.auth.members!.authors.watch(['other'])
+    await settle()
+    expect(lookup).toHaveBeenCalledExactlyOnceWith('o', { ids: ['other'] })
+    expect(list).not.toHaveBeenCalled()
+
+    // Activate once; repeated activate() calls do not re-fetch.
+    s.auth.members!.activate()
+    s.auth.members!.activate()
+    await settle()
+    expect(list).toHaveBeenCalledTimes(1)
+
+    // Once active, later invalidations reload the directory normally.
+    net.socket.onEvent({ type: 'members_changed' })
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(list).toHaveBeenCalledTimes(2)
   } finally { await s.auth.signOut() }
 })
 
 describe('sync controllers wait for the core, REST reads do not (#466)', () => {
   const restored = () => vi.fn(async () => ({ screen: 'app' as const, identity: identity('owner') }))
+  const generation = '00000000-0000-4000-8000-000000000515'
+  const list = (id: string, historyGeneration = generation) => ok<ChannelList>({
+    history_generation: historyGeneration,
+    channels: [{ ...channel(id), history_generation: historyGeneration, as_of_seq: 0, read_seq: 0,
+      unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 }],
+  })
   it('reads the Organization while the core loads and opens exactly one session once it is ready', async () => {
     const core = deferred<void>()
-    const s = stack({ restore: restored(), coreReady: () => core.promise })
+    const readInitialChannels = vi.fn(async () => list('initial'))
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
     const loading = s.auth.load()
     await settle()
     expect(s.deps.getOrganization).toHaveBeenCalledOnce()
+    expect(readInitialChannels).toHaveBeenCalledExactlyOnceWith('o', expect.any(AbortSignal))
     expect(s.nets).toHaveLength(0)
     expect(s.auth.session).toBeNull()
     expect(s.auth.organizationStatus).toBe('loading')
@@ -1281,24 +1348,227 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     expect(s.nets).toHaveLength(1)
     expect(s.auth.organizationStatus).toBe('ready')
     expect(s.nets[0].socket.closed).toBe(false)
+    expect(s.sessions[0].channels.get().channels.map(c => c.id)).toEqual(['initial'])
+    expect(s.nets[0].lists).toHaveLength(0)
+  })
+  it.each([
+    { order: 'activity_ready arrives while the connect-edge refresh is in flight', mode: 'in-flight' as const },
+    { order: 'activity_ready arrives after the connect-edge refresh is accepted', mode: 'accepted' as const },
+    { order: 'activity_ready arrives before the connect-edge refresh starts', mode: 'before' as const },
+  ])('bounds startup Channel list reads to at most 2 when $order', async ({ mode }) => {
+    const core = deferred<void>()
+    // An empty list isolates startup and socket refreshes from Channel selection and history reads.
+    const channels = ok<ChannelList>({ history_generation: generation, channels: [] })
+    const reads = vi.fn(async () => channels)
+    const net = fakeNetwork()
+    const options = net.options()
+    const s = stack({
+      restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
+      openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+        const session = createSession({
+          ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
+          // Exercise the production path where Unread refreshes the Channel list through the activity target.
+          channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
+          sync: { ...options.sync, random: () => 0.5 },
+        })
+        return {
+          channels: channelsAdapter(session.channels, session.channelCreation), sync: syncAdapter(session.sync),
+          topics: id => topicsAdapter(session.topics, id), close: session.close,
+        }
+      },
+    })
+    try {
+      const loading = s.auth.load()
+      await settle()
+      expect(reads).toHaveBeenCalledOnce()
+      core.resolve(); await loading; await settle()
+      await vi.advanceTimersByTimeAsync(100)
+
+      const refresh = deferred<typeof channels>()
+      reads.mockReturnValueOnce(refresh.promise)
+      net.socket.onReady()
+      if (mode !== 'before') await settle()
+      if (mode === 'accepted') { refresh.resolve(channels); await settle() }
+      net.event({ type: 'activity_ready' })
+      if (mode !== 'accepted') refresh.resolve(channels)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(reads).toHaveBeenCalledTimes(2)
+    } finally { await s.auth.signOut() }
+  })
+  it('retains post-connect unwatched baselines across covered activity_ready and refetches on reconnect', async () => {
+    const core = deferred<void>()
+    const makeList = (asOfSeq: number, unreadCount: number) => ok<ChannelList>({
+      history_generation: generation,
+      channels: [
+        { ...channel('watched'), history_generation: generation, as_of_seq: asOfSeq, read_seq: 0,
+          unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 },
+        { ...channel('unwatched'), history_generation: generation, as_of_seq: asOfSeq, read_seq: 2,
+          unread_count: unreadCount, main_unread_count: unreadCount, mention_unread_count: 0, main_mention_unread_count: 0 },
+      ],
+    })
+    let phase: 'initial' | 'postConnect' | 'reconnected' = 'initial'
+    const reads = vi.fn(async (): Promise<Result<ChannelList>> => phase === 'initial'
+      ? makeList(2, 0) : phase === 'postConnect' ? makeList(5, 3) : makeList(8, 6))
+    const net = fakeNetwork()
+    const options = net.options()
+    let sessionRef!: ReturnType<typeof createSession>
+    const s = stack({
+      restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
+      openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+        sessionRef = createSession({
+          ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
+          channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
+          sync: { ...options.sync, random: () => 0.5 },
+        })
+        return {
+          channels: channelsAdapter(sessionRef.channels, sessionRef.channelCreation), sync: syncAdapter(sessionRef.sync),
+          topics: id => topicsAdapter(sessionRef.topics, id), close: sessionRef.close,
+        }
+      },
+    })
+    try {
+      const loading = s.auth.load()
+      await settle()
+      core.resolve(); await loading; await settle()
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      phase = 'postConnect'
+      expect(reads).toHaveBeenCalledOnce()
+      net.socket.onReady()
+      await settle()
+      expect(reads).toHaveBeenCalledTimes(2)
+      net.event({ type: 'activity_ready' })
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(reads).toHaveBeenCalledTimes(2)
+      expect(sessionRef.unread.get('unwatched').unreadCount).toBe(3)
+
+      phase = 'reconnected'
+      net.socket.onClose(1006)
+      await vi.advanceTimersByTimeAsync(2_000)
+      net.socket.onReady()
+      net.event({ type: 'activity_ready' })
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(reads).toHaveBeenCalledTimes(3)
+      expect(sessionRef.unread.get('unwatched').unreadCount).toBe(6)
+    } finally { await s.auth.signOut() }
+  })
+  it.each([
+    { order: 'Workspace selects target after initial list accept and bootstrap completes before socket connect', selectAfterAccept: true, bootstrapBeforeConnect: true },
+    { order: 'Workspace selects target after initial list accept and socket connects before bootstrap completes', selectAfterAccept: true, bootstrapBeforeConnect: false },
+    { order: 'target is hinted before initial list accept and bootstrap completes before socket connect', selectAfterAccept: false, bootstrapBeforeConnect: true },
+  ])('bounds startup Channel list reads to at most 2 with a populated direct-link Channel when $order', async ({ selectAfterAccept, bootstrapBeforeConnect }) => {
+    const core = deferred<void>()
+    const initial = deferred<Result<ChannelList>>()
+    const listResponse = ok<ChannelList>({
+      history_generation: generation,
+      channels: [
+        { ...channel('general'), history_generation: generation, as_of_seq: 0, read_seq: 0,
+          unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 },
+        { ...channel('target'), history_generation: generation, as_of_seq: 1, read_seq: 1,
+          unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 },
+      ],
+    })
+    const reads = vi.fn(async () => listResponse).mockReturnValueOnce(initial.promise)
+    const net = fakeNetwork()
+    const options = net.options()
+    const history = deferred<Result<TimelinePage>>()
+    const listTimeline = vi.fn<NonNullable<typeof options.topicsApi>['listTimeline']>((id, query) =>
+      id === 'target' ? history.promise : options.topicsApi!.listTimeline(id, query))
+    let sessionRef!: ReturnType<typeof createSession>
+    const s = stack({
+      restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
+      openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+        sessionRef = createSession({
+          ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
+          channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
+          topicsApi: { ...options.topicsApi!, listTimeline },
+          sync: { ...options.sync, random: () => 0.5 },
+        })
+        return {
+          channels: channelsAdapter(sessionRef.channels, sessionRef.channelCreation), sync: syncAdapter(sessionRef.sync),
+          topics: id => topicsAdapter(sessionRef.topics, id), close: sessionRef.close,
+        }
+      },
+    })
+    try {
+      const loading = s.auth.load()
+      await settle()
+      expect(reads).toHaveBeenCalledOnce()
+
+      core.resolve(); await loading
+      if (selectAfterAccept) {
+        initial.resolve(listResponse)
+        await settle()
+        expect(sessionRef.channels.get().selectedId).toBe('general')
+      } else expect(sessionRef.channels.get().status).toBe('loading')
+      sessionRef.channels.selectHint('target')
+      void sessionRef.unread.enter({ channel: 'target', topicId: null })
+      if (!selectAfterAccept) initial.resolve(listResponse)
+      await settle()
+      expect(listTimeline).toHaveBeenCalledWith('target', expect.any(Object))
+      const target = () => sessionRef.sync.get().channels.target
+      expect(target().cursor).toBeNull()
+
+      const bootstrapPage = ok<TimelinePage>({
+        history_generation: generation,
+        as_of_seq: 1,
+        items: [{ kind: 'message', message: record(1, 'target') }],
+        has_more: false,
+      })
+      if (bootstrapBeforeConnect) {
+        history.resolve(bootstrapPage)
+        await settle()
+        expect(target().cursor).toBe(1)
+        expect(sessionRef.sync.get().connected).toBe(false)
+        await vi.advanceTimersByTimeAsync(250)
+        net.socket.onReady()
+        await settle()
+        net.event({ type: 'activity_ready' })
+      } else {
+        net.socket.onReady()
+        await settle()
+        net.event({ type: 'activity_ready' })
+        await settle()
+        expect(target().cursor).toBeNull()
+        expect(sessionRef.sync.get().connected).toBe(true)
+        history.resolve(bootstrapPage)
+      }
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(target().cursor).toBe(1)
+      expect(reads).toHaveBeenCalledTimes(2)
+    } finally { await s.auth.signOut() }
   })
   it('never opens a session when the core fails to load', async () => {
-    const s = stack({ restore: restored(), coreReady: () => Promise.reject(new Error('invalid wasm')) })
-    await s.auth.load(); await settle()
+    const core = deferred<void>()
+    const channels = deferred<Result<ChannelList>>()
+    const readInitialChannels = vi.fn(() => channels.promise)
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
+    const loading = s.auth.load()
+    await settle()
     expect(s.deps.getOrganization).toHaveBeenCalledOnce()
+    expect(readInitialChannels).toHaveBeenCalledOnce()
+    core.reject(new Error('invalid wasm'))
+    await loading
+    channels.resolve(list('late'))
+    await settle()
     expect(s.nets).toHaveLength(0)
     expect(s.auth.session).toBeNull()
   })
   it('a switch or sign-out while the core loads leaves at most the latest selection, opened once', async () => {
     const core = deferred<void>()
-    const s = stack({ restore: restored(), coreReady: () => core.promise })
+    const stale = deferred<Result<ChannelList>>()
+    const readInitialChannels = vi.fn(async (id: string) => id === 'o' ? stale.promise : list('current'))
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
     const first = s.auth.load()
     await settle()
     const second = s.auth.selectOrganization('other')
     await settle()
+    expect(readInitialChannels.mock.calls).toEqual([['o', expect.any(AbortSignal)], ['other', expect.any(AbortSignal)]])
     core.resolve(); await first; await second; await settle()
+    stale.resolve(list('stale')); await settle()
     expect(s.nets).toHaveLength(1)
     expect(s.auth.selectedOrganizationId).toBe('other')
+    expect(s.sessions[0].channels.get().channels.map(c => c.id)).toEqual(['current'])
     expect(await s.auth.signOut()).toBe(true)
 
     const late = deferred<void>()
@@ -1309,6 +1579,41 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     late.resolve(); await pending; await settle()
     expect(t.nets).toHaveLength(0)
     expect(t.auth.session).toBeNull()
+  })
+
+  it('a Channel list 401 from a superseded Organization ends the Account Session before the core is ready', async () => {
+    const core = deferred<void>()
+    const channels = deferred<Result<ChannelList>>()
+    const readInitialChannels = vi.fn(async (id: string) => id === 'o' ? channels.promise : list('current'))
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
+    const first = s.auth.load()
+    await settle()
+    const second = s.auth.selectOrganization('other')
+    await settle()
+    channels.resolve({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(s.auth.view).toEqual({ screen: 'signin', notice: sessionEndedMessage })
+    core.resolve(); await first; await second
+    expect(s.nets).toHaveLength(0)
+  })
+
+  it('a pending initial list cannot supersede the core’s known history generation', async () => {
+    const core = deferred<void>()
+    const channels = deferred<Result<ChannelList>>()
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels: () => channels.promise })
+    const loading = s.auth.load()
+    await settle()
+    core.resolve(); await loading; await settle()
+    const session = s.sessions[0], net = s.nets[0]
+    expect(net.lists).toHaveLength(0)
+
+    expect(session.sync.get().historyGeneration).toBe(generation)
+    channels.resolve(list('stale', '00000000-0000-4000-8000-000000000516')); await settle()
+    expect(session.sync.get().historyGeneration).toBe(generation)
+    expect(session.channels.get().channels).toEqual([])
+    expect(net.lists).toHaveLength(1)
+    net.lists[0].resolve(list('current')); await settle()
+    expect(session.channels.get().channels.map(c => c.id)).toEqual(['current'])
   })
 })
 
@@ -1339,4 +1644,36 @@ it('sign-out, expiry, 401, Account replacement and Organization switch clear the
     expect(tokenizeMessageBody(body), event).not.toBe(before)
     if (s.auth.view.screen === 'app') await s.auth.signOut()
   }
+})
+
+it('hides Invite, Role and deactivation Capabilities during routine Channel creation revalidation', async () => {
+  const s = stack()
+  await signInAs(s, 'owner')
+  try {
+    expect(s.auth.organization?.organization.capabilities).toMatchObject({
+      can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_deactivate_members: { allowed: true },
+    })
+    s.nets[0].socket.onEvent({ type: 'activity_ready' })
+    expect(s.auth.session?.channels.creationAccess).toBe('revalidating')
+    expect(s.auth.organization?.organization.capabilities).toMatchObject({
+      can_invite: { allowed: false }, can_manage_roles: { allowed: false }, can_deactivate_members: { allowed: false },
+    })
+  } finally { await s.auth.signOut() }
+})
+
+it.each(['Organization switch', 'Account replacement'] as const)('cancels a held Channel creation on %s', async replacement => {
+  const s = stack()
+  await signInAs(s, 'owner')
+  try {
+    const [old] = s.sessions
+    const [net] = s.nets
+    net.socket.onEvent({ type: 'activity_ready' })
+    expect(old.channelCreation.get()).toBe('revalidating')
+    const submission = s.auth.session!.channels.create('retired', 'private')
+    if (replacement === 'Organization switch') await s.auth.selectOrganization('other')
+    else await signInAs(s, 'another')
+    expect(await submission).toBe(false)
+    expect(net.creates).toHaveLength(0)
+    expect(s.auth.session?.channels.creationAccess).toBe('allowed')
+  } finally { await s.auth.signOut() }
 })

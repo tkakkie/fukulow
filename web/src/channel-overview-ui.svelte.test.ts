@@ -234,39 +234,39 @@ describe('ChannelOverview UI', () => {
       // Open archive confirmation, then cancel via button
       btn('アーカイブ')!.click()
       flushSync()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toContain('チャンネルをアーカイブしますか？')
+      expect(host.querySelector('dialog:modal')?.textContent).toContain('チャンネルをアーカイブしますか？')
       btn('キャンセル')!.click()
       flushSync()
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
       expect(onarchive).not.toHaveBeenCalled()
 
       // Open archive confirmation again, then cancel via Escape
       btn('アーカイブ')!.click()
       flushSync()
-      const dialog = host.querySelector('[role="dialog"]')!
+      const dialog = host.querySelector('dialog:modal')!
       dialog.keydown('Escape')
       flushSync()
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
       expect(onarchive).not.toHaveBeenCalled()
 
       // Open archive confirmation and confirm: pending disables double submit & Escape
       btn('アーカイブ')!.click()
       flushSync()
-      const confirmBtn = host.querySelector('[role="dialog"]')!.querySelectorAll('button').find(b => b.textContent.trim() === 'アーカイブ')!
+      const confirmBtn = host.querySelector('dialog:modal')!.querySelectorAll('button').find(b => b.textContent.trim() === 'アーカイブ')!
       confirmBtn.click()
       flushSync()
       expect(onarchive).toHaveBeenCalledTimes(1)
       expect(confirmBtn.disabled).toBe(true)
       confirmBtn.click()
-      host.querySelector('[role="dialog"]')!.keydown('Escape')
+      host.querySelector('dialog:modal')!.keydown('Escape')
       flushSync()
       expect(onarchive).toHaveBeenCalledTimes(1)
-      expect(host.querySelector('[role="dialog"]')).not.toBeNull()
+      expect(host.querySelector('dialog:modal')).not.toBeNull()
 
       archiveDeferred.resolve(null)
       await flush()
       flushSync()
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
       expect(onannounce).toHaveBeenCalledWith('チャンネルをアーカイブしました。')
       await unmount(inst)
 
@@ -288,8 +288,8 @@ describe('ChannelOverview UI', () => {
       flushSync()
       btn('復元')!.click()
       flushSync()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toContain('チャンネルを復元しますか？')
-      const confirmRestore = host.querySelector('[role="dialog"]')!.querySelectorAll('button').find(b => b.textContent.trim() === '復元')!
+      expect(host.querySelector('dialog:modal')?.textContent).toContain('チャンネルを復元しますか？')
+      const confirmRestore = host.querySelector('dialog:modal')!.querySelectorAll('button').find(b => b.textContent.trim() === '復元')!
       confirmRestore.click()
       await flush()
       flushSync()

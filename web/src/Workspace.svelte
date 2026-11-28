@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte'
+  import { onDestroy, tick, untrack } from 'svelte'
   import type { Navigation } from './navigation'
   import { navigationAdapter } from './navigation.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
-  import { createSubscriber, MediaQuery } from 'svelte/reactivity'
+  import { MediaQuery } from 'svelte/reactivity'
   import { BREAKPOINT_QUERIES, resolveViewportClass, type ViewportClass } from './breakpoints'
-  import { createAnnouncementController } from './announcements'
   import type { MentionName } from './mentions'
   import { senderName } from './authors'
-  import type { Channel, DmDiscovery, Identity, Message, SearchHit } from './api'
+  import type { Channel, ChannelVisibility, DmDiscovery, Identity, Message, SearchHit } from './api'
+  import type { ChannelCreationBlocked } from './channel-creation'
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
@@ -23,11 +23,14 @@
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
-  import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
-  import { createSearchController, type SearchTarget } from './search'
-  import { searchAdapter } from './search.svelte'
-  import { createDefaultSearchSource, type SearchSource } from './search-source'
+  import type { SearchTarget } from './search'
+  import type { SearchSource } from './search-source'
+  import { watchWorkspaceAuthors } from './workspace-authors'
+  import { createWorkspaceController } from './workspace-controller'
+  import { channelMemberTarget, createSearchRouteSync } from './workspace-lifetimes'
+  import { resolveReplyTarget, resolveWorkspaceReplyAnchor } from './workspace-replies'
+  import { workspaceAnnouncementsAdapter, workspaceLifetimesAdapter, workspaceRepliesAdapter } from './workspace-adapter.svelte'
   import WorkspaceChannelColumn from './WorkspaceChannelColumn.svelte'
   import WorkspaceMainView from './WorkspaceMainView.svelte'
   import WorkspacePanelContent from './WorkspacePanelContent.svelte'
@@ -36,8 +39,6 @@
     parsePanelTab,
     parseReplyMessageId,
     resolveMobileLevel,
-    resolveReplyAnchor,
-    shouldClosePanelForDm,
   } from './workspace-routing'
   import Button from './ui/Button.svelte'
   import Panel from './ui/Panel.svelte'
@@ -46,7 +47,6 @@
   let {
     session,
     navigation,
-    canCreateChannels = true,
     members = null,
     organization = null,
     organizations = [],
@@ -63,7 +63,6 @@
   }: {
     navigation: Navigation
     session: SessionModel
-    canCreateChannels?: boolean | null
     members?: ReturnType<typeof membersAdapter> | null
     organization?: Identity | null
     organizations?: Organization[]
@@ -80,17 +79,23 @@
   } = $props()
 
   const channels = $derived(session.channels)
-  const channelCreation = $state({ name: '', visibility: 'public' as Channel['visibility'], error: '', busy: false })
-  let creationAllowed = $state(false)
+  const creationAccess = $derived(channels.creationAccess)
+  const channelCreation = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '',
+    permissionError: null as ChannelCreationBlocked['blocked'] | null, busy: false })
   $effect(() => {
-    if (canCreateChannels !== null) creationAllowed = canCreateChannels
+    if (creationAccess === 'allowed' && channelCreation.permissionError) channelCreation.permissionError = null
   })
+  const creationLifetime = new AbortController()
+  onDestroy(() => creationLifetime.abort())
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
   const sectionsState = $derived(session.sections?.state)
   const dmState = $derived(session.dms?.state)
   const channelListStatus = $derived(s.status)
   const currentOrganizationId = $derived(selectedOrganizationId || organization?.organization.organization_id || '')
+  const workspace = createWorkspaceController()
+  const lifetimes = workspaceLifetimesAdapter()
+  const replies = workspaceRepliesAdapter()
   const nav = navigationAdapter(() => navigation)
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
@@ -127,31 +132,28 @@
         loadNewer: session.searchAnchor.loadNewer, latest: navigation.leaveSearchResult }
     : undefined)
   const searchReply = $derived(Boolean(searchResult?.replyRootId))
-  let lastOpenedAnchor = $state<Message | null>(null)
   const inMemoryReplyAnchor = $derived(
-    resolveReplyAnchor({
+    replies.resolveInMemory({
       activeReplyMessageId,
       selectedChannelId: selected?.id,
-      lastOpenedAnchor: () => lastOpenedAnchor,
       timelineMessages: () => currentTimeline?.messages,
       topicLines: () => currentTopicsState?.lines,
       routedTopicMessages: () => (route?.topicId && currentTopicsState ? currentTopicsState.topic(route.topicId).messages : undefined),
       replies: () => currentRepliesState,
     }),
   )
-  const replyTargetState = $derived(
-    searchReply
-      ? { status: searchView?.status === 'missing' ? 'unavailable' as const : searchView?.status ?? 'loading' as const,
-          anchor: searchView?.reply }
-      : session.navigationTargets &&
-      (!session.navigationTargets.state.reply.targetId ||
-        session.navigationTargets.state.reply.targetId === activeReplyMessageId)
-      ? session.navigationTargets.state.reply
-      : { status: 'idle' as const, name: '' },
-  )
-  const resolvedReplyAnchor = $derived(
-    (searchReply ? searchView?.reply : inMemoryReplyAnchor ?? replyTargetState.anchor) ?? null,
-  )
+  const replyTargetState = $derived(resolveReplyTarget(
+    searchReply,
+    () => searchView,
+    () => session.navigationTargets?.state.reply,
+    () => activeReplyMessageId,
+  ))
+  const resolvedReplyAnchor = $derived(resolveWorkspaceReplyAnchor(
+    searchReply,
+    () => searchView?.reply,
+    () => inMemoryReplyAnchor,
+    () => replyTargetState.anchor,
+  ))
   const allTopicsKnown = $derived(
     currentTopicsState
       ? currentTopicsState.list.asOfSeq !== undefined
@@ -169,20 +171,14 @@
   const organizationUnavailable = $derived(session.sync.unavailable)
   const otherOrg = $derived(organizations.find((o) => o.organization_id !== currentOrganizationId))
 
-  const announcementController = createAnnouncementController({
-    onAnnounce: (msg) => onannounce?.(msg),
-  })
-  const subscribeAnnouncements = createSubscriber((update) => announcementController.subscribe(update))
-  const announcementView = $derived.by(() => {
-    subscribeAnnouncements()
-    return announcementController.get()
-  })
+  const announcements = workspaceAnnouncementsAdapter({ onAnnounce: msg => onannounce?.(msg) })
+  const announcementView = $derived(announcements.state)
 
   let drawerOpen = $state(false)
   const panelOpen = $derived(!!route?.panel)
   const activePanelTab = $derived(parsePanelTab(route?.panel))
   $effect(() => {
-    if (shouldClosePanelForDm(selected?.kind, () => route?.panel)) nav.navigate({ type: 'close' })
+    workspace.syncDmPanel(selected?.kind, () => route?.panel, nav.navigate)
   })
   const phoneQuery = new MediaQuery(BREAKPOINT_QUERIES.phone, false)
   const tabletQuery = new MediaQuery(BREAKPOINT_QUERIES.tablet, false)
@@ -200,6 +196,7 @@
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let mainHeadingRef = $state<HTMLElement | null>(null)
   let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let mainTimelineRef = $state<{ isPositioning(): boolean } | null>(null)
   let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let searchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let channelListSearchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
@@ -211,19 +208,11 @@
   let navFocusBaseline: { revision: number; active: Element | null } = { revision: -1, active: null }
   const topicSummaryFocus = createTopicSummaryFocusController()
 
-  let activeSearch = $state.raw<{
-    organizationId: string
-    source: SearchSource | undefined
-    controller: ReturnType<typeof createSearchController>
-  } | undefined>(undefined)
   const resolvedSearchSource = $derived(searchSource ?? session.searchSource)
-  const searchModel = $derived(
-    activeSearch &&
-      activeSearch.organizationId === currentOrganizationId &&
-      activeSearch.source === resolvedSearchSource
-      ? searchAdapter(activeSearch.controller)
-      : undefined,
-  )
+  const searchModel = $derived(lifetimes.search({
+    get organizationId() { return currentOrganizationId },
+    get source() { return resolvedSearchSource },
+  }))
   const searchState = $derived(searchModel?.state)
   const searchOpen = $derived(Boolean(searchState?.open && !organizationUnavailable))
   const effectiveMobileLevel = $derived(resolveMobileLevel(route, () => searchOpen))
@@ -237,99 +226,155 @@
       panelOpen,
     }),
   )
+  $effect(() => lifetimes.mountSearch(
+    { organizationId: currentOrganizationId, source: resolvedSearchSource },
+    {
+      onOpenResult: handleOpenSearchResult,
+      onAnnounce: message => onannounce?.(message),
+      onChannelRevoked: revoke => session.onChannelRevoked?.(revoke),
+    },
+  ))
+  const syncSearchRoute = createSearchRouteSync()
   $effect(() => {
-    const orgId = currentOrganizationId
-    const providedSource = resolvedSearchSource
-    const controller = createSearchController({
-      source: providedSource ?? createDefaultSearchSource(orgId),
-      onOpenResult: (target) => handleOpenSearchResult(orgId, target),
-      onAnnounce: (message) => onannounce?.(message),
-    })
-    const stopRevoke = session.onChannelRevoked?.((channelId) => controller.revokeChannel(channelId))
-    const entry = { organizationId: orgId, source: providedSource, controller }
-    activeSearch = entry
-    return () => {
-      stopRevoke?.()
-      controller.destroy()
-      if (activeSearch === entry) activeSearch = undefined
-    }
-  })
-  let lastSearchMainKey: string | null = null
-  $effect(() => {
-    const mainKey = `${route?.organizationId ?? ''}:${route?.channelId ?? ''}:${route?.topicId ?? ''}`
-    if (lastSearchMainKey !== null && mainKey !== lastSearchMainKey) {
-      untrack(() => searchModel?.close())
-    }
-    lastSearchMainKey = mainKey
+    syncSearchRoute(route, () => untrack(() => searchModel?.close()))
   })
 
   const selectedChannelId = $derived(selected?.id)
   const selectedKind = $derived(selected?.kind)
-  const channelMemberTarget = $derived(
-    panelOpen && activePanelTab === 'members' && selectedChannelId && selectedKind !== 'dm'
-      ? selectedChannelId
-      : null,
-  )
-  let activeChannelMembers = $state.raw<{
-    session: SessionModel
-    organizationId: string
-    channelId: string
-    controller: ReturnType<NonNullable<SessionModel['channelMembers']>>
-  } | undefined>(undefined)
-  const channelMemberModel = $derived(
-    activeChannelMembers &&
-      activeChannelMembers.session === session &&
-      activeChannelMembers.organizationId === currentOrganizationId &&
-      activeChannelMembers.channelId === channelMemberTarget
-      ? channelMembersAdapter(activeChannelMembers.controller)
-      : undefined,
-  )
+  const memberTarget = $derived(channelMemberTarget(panelOpen, () => activePanelTab, () => selectedChannelId, () => selectedKind))
+  const channelMemberModel = $derived(lifetimes.channelMembers({
+    get session() { return session },
+    get organizationId() { return currentOrganizationId },
+    get channelId() { return memberTarget },
+  }))
   $effect(() => {
-    const currentSession = session
-    const orgId = currentOrganizationId
-    const channelId = channelMemberTarget
-    const open = currentSession.channelMembers
-    if (!channelId || !open) {
-      activeChannelMembers = undefined
-      return
-    }
-    const controller = untrack(() => {
-      void members?.load()
-      return open(channelId)
-    })
-    const entry = { session: currentSession, organizationId: orgId, channelId, controller }
-    activeChannelMembers = entry
-    return () => {
-      controller.close()
-      if (activeChannelMembers === entry) activeChannelMembers = undefined
-    }
+    const scope = { session, organizationId: currentOrganizationId, channelId: memberTarget }
+    const open = scope.session.channelMembers
+    return untrack(() => lifetimes.mountChannelMembers(scope, open, () => members?.load()))
   })
-  let lastViewId = $state('')
-  // A cold descendant URL can resolve to its root before its own body is paged in.
-  let openedReplyTarget = ''
 
   const authorIdentities = $derived(members?.authors.identities)
   const resolveMentionName: MentionName = (id, fallback, mentions) => members?.authors.mentionName(id, fallback, mentions) ?? fallback
   const memberNames = $derived(new Map((members?.state.members ?? []).map(member => [member.id, member.name])))
+  // Read projections only when needed so the controller preserves the effect's dependencies.
   $effect(() => {
-    const ids: string[] = []
-    for (const line of currentTopicsState?.lines ?? []) {
-      ids.push(line.kind === 'message' ? line.message.sender : line.latestMessage.sender)
-    }
-    for (const message of currentTimeline?.messages ?? []) ids.push(message.sender)
-    if (route?.topicId && currentTopicsState) {
-      for (const message of currentTopicsState.topic(route.topicId).messages) ids.push(message.sender)
-    }
-    for (const message of currentRepliesState?.messages ?? []) ids.push(message.sender)
-    for (const message of searchView?.messages ?? []) ids.push(message.sender)
-    if (searchOpen && searchState) {
-      for (const hit of searchState.items) ids.push(hit.message.sender)
-    }
-    if (resolvedReplyAnchor) ids.push(resolvedReplyAnchor.sender)
-    members?.authors.watch(ids)
+    watchWorkspaceAuthors({
+      topicLines: currentTopicsState?.lines,
+      timelineMessages: () => currentTimeline?.messages,
+      topicId: () => route?.topicId,
+      routedTopicMessages: id => currentTopicsState?.topic(id).messages,
+      replyMessages: () => currentRepliesState?.messages,
+      searchMessages: () => searchView?.messages,
+      searchLines: () => searchView?.lines,
+      isSearchOpen: () => searchOpen,
+      searchHits: () => searchState?.items,
+      replyAnchor: () => resolvedReplyAnchor,
+      authors: () => members?.authors,
+      selectedId: () => selectedChannelId,
+    })
   })
-  $effect(() => { void selectedChannelId; members?.authors.retry() })
-  $effect(() => { if (currentLive) members?.authors.retry() })
+  const initialDisplayViewKey = $derived(
+    selected && currentChannel && !search
+      ? `${currentOrganizationId}:${selected.id}:${route?.topicId ?? ''}`
+      : '',
+  )
+  const activeTopicView = $derived(
+    route?.topicId && currentTopicsState ? currentTopicsState.topic(route.topicId) : null,
+  )
+  const activeViewBaseReady = $derived.by(() => {
+    if (!selected || !currentChannel || search || organizationUnavailable) return false
+    if (route?.topicId && currentTopics) {
+      return Boolean(
+        activeTopicView?.initialized &&
+          !activeTopicView.notFound &&
+          currentTimeline?.status !== 'unavailable' &&
+          !currentTopicsState?.unavailable,
+      )
+    }
+    if (currentTimeline?.status !== 'ready' || currentTopicsState?.unavailable) return false
+    if (currentTopics) return currentTopicsState?.main.asOfSeq !== undefined
+    return true
+  })
+  const activeViewUnavailable = $derived(
+    Boolean(
+      organizationUnavailable ||
+        currentTimeline?.status === 'unavailable' ||
+        currentTopicsState?.unavailable ||
+        (route?.topicId && activeTopicView?.notFound),
+    ),
+  )
+  const initialViewSenderIds = $derived.by((): string[] => {
+    if (!initialDisplayViewKey || activeViewUnavailable || !members || resolveSenderName) return []
+    const selfId = organization?.member.id ?? ''
+    const ids = new Set<string>()
+    if (route?.topicId && activeTopicView) {
+      for (const message of activeTopicView.messages) {
+        if (message.sender !== selfId) ids.add(message.sender)
+      }
+    } else {
+      const lines = currentTopicsState?.lines ?? (currentTimeline?.messages ?? []).map(message => ({ kind: 'message' as const, message }))
+      for (const line of lines) {
+        if (line.kind === 'message' && line.message.sender !== selfId) ids.add(line.message.sender)
+      }
+    }
+    return [...ids]
+  })
+  let initialDisplayCompletedKey = $state('')
+  let reportedPositioning = $state<{ key: string; positioning: boolean }>({ key: '', positioning: false })
+  const activeViewPositioning = $derived(
+    Boolean(
+      initialDisplayViewKey &&
+        !activeViewUnavailable &&
+        (reportedPositioning.key !== initialDisplayViewKey || reportedPositioning.positioning),
+    ),
+  )
+  const awaitingInitialSenders = $derived(
+    Boolean(
+      initialDisplayViewKey &&
+        !activeViewUnavailable &&
+        members &&
+        !resolveSenderName &&
+        initialDisplayCompletedKey !== initialDisplayViewKey &&
+        !members.authors.isInitialDisplayTimedOut(initialDisplayViewKey) &&
+        initialViewSenderIds.some(id => !memberNames.has(id) && members.authors.isPending(id)),
+    ),
+  )
+  const firstDisplayReached = $derived.by(() => {
+    if (organizationUnavailable) return false
+    if (searchOpen) return true
+    if (selected && currentChannel) {
+      if (route?.topicId && currentTopics) {
+        const topicStatus = session.navigationTargets?.state.topic.status ?? 'idle'
+        const terminal = Boolean(
+          currentTimeline?.status === 'unavailable' ||
+            currentTopicsState?.unavailable ||
+            activeTopicView?.notFound ||
+            activeTopicView?.error ||
+            topicStatus === 'unavailable' ||
+            topicStatus === 'error',
+        )
+        return terminal || (activeViewBaseReady && !awaitingInitialSenders && !activeViewPositioning)
+      }
+      const terminal = Boolean(
+        currentTimeline?.status === 'unavailable' ||
+          currentTimeline?.status === 'error' ||
+          currentTopicsState?.unavailable ||
+          (currentTopics && currentTimeline?.status === 'ready' && currentTopicsState?.main.asOfSeq === undefined && currentTopicsState?.main.error),
+      )
+      return terminal || (activeViewBaseReady && !awaitingInitialSenders && !activeViewPositioning)
+    }
+    return channelListStatus === 'ready' || channelListStatus === 'error'
+  })
+  $effect(() => {
+    if (!members) return
+    members.authors.syncInitialDisplay(initialDisplayViewKey, awaitingInitialSenders)
+    if (initialDisplayViewKey && activeViewBaseReady && !awaitingInitialSenders && initialDisplayCompletedKey !== initialDisplayViewKey) {
+      initialDisplayCompletedKey = initialDisplayViewKey
+    }
+  })
+  $effect(() => {
+    if (firstDisplayReached) members?.scheduleActivate()
+  })
 
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
@@ -342,7 +387,7 @@
     return senderName(undefined)
   }
 
-  $effect(() => () => announcementController.destroy())
+  $effect(() => () => announcements.destroy())
 
   $effect(() => {
     skipTargetId = currentSkipTargetId
@@ -350,58 +395,51 @@
 
   // 10 s loading timeout for Channel list (docs/ui.md §5)
   $effect(() => {
-    announcementController.syncChannelListLoading(s.status === 'loading' && s.channels.length === 0)
+    announcements.syncChannelList(s)
   })
 
   $effect(() => {
-    if (s.status !== 'ready' || !currentOrganizationId) return
-    nav.initialize({ organizationId: currentOrganizationId, channelId: isPhone ? null : s.selectedId, topicId: null, panel: null })
+    workspace.initialize(s.status, () => currentOrganizationId, () => isPhone ? null : s.selectedId, nav.initialize)
   })
 
   $effect(() => {
-    if (channelListStatus !== 'ready' || route?.organizationId !== currentOrganizationId) return
-    // Follow URL changes; reacting to creation's selection would briefly reselect the old Channel.
-    if (route.channelId && route.channelId !== untrack(() => s.selectedId)) channels.selectHint(route.channelId)
-  })
-
-  $effect(() => {
-    if (route?.organizationId !== currentOrganizationId || organizationUnavailable) return
-    const skipReplyHint = searchReply || Boolean(currentReplies && activeReplyMessageId && untrack(() => inMemoryReplyAnchor))
-    void session.navigationTargets?.load(skipReplyHint ? { ...route, panel: null } : route)
-  })
-
-  $effect(() => {
-    const anchor = session.searchAnchor
-    const result = searchResult
-    anchor?.open(result)
-    if (result) drawerOpen = false
-  })
-
-  $effect(() => {
-    if (!currentReplies || !selected) return
-    if (!activeReplyMessageId) {
-      openedReplyTarget = ''
-      if (currentRepliesState?.anchor) currentReplies.dismiss()
-      return
-    }
-    if (organizationUnavailable || currentTimeline?.status === 'unavailable' || currentRepliesState?.unavailable) {
-      return
-    }
-    // Wait until the Channel timeline is watched before opening the Reply chain.
-    void currentTimeline?.status
-    const anchor = resolvedReplyAnchor
-    if (!anchor || anchor.channel_id !== selected.id) return
-    const targetRootId = anchor.reply_root_id ?? anchor.id
-    const targetKey = `${selected.id}:${activeReplyMessageId}`
-    const alreadyOpen = Boolean(
-      currentRepliesState?.anchor &&
-        currentRepliesState.rootId === targetRootId &&
-        openedReplyTarget === targetKey,
+    workspace.syncSelection(
+      channelListStatus,
+      () => route,
+      () => currentOrganizationId,
+      // Follow URL changes without reselecting the old Channel during creation.
+      () => untrack(() => s.selectedId),
+      channelId => channels.selectHint(channelId),
     )
-    if (!alreadyOpen) {
-      openedReplyTarget = targetKey
-      void currentReplies.open(anchor)
-    }
+  })
+
+  $effect(() => {
+    workspace.syncNavigationTargets({
+      route,
+      organizationId: currentOrganizationId,
+      organizationUnavailable: () => organizationUnavailable,
+      searchReply: () => searchReply,
+      replies: () => currentReplies,
+      activeReplyMessageId: () => activeReplyMessageId,
+      inMemoryReplyAnchor: () => untrack(() => inMemoryReplyAnchor),
+      load: target => session.navigationTargets?.load(target),
+    })
+  })
+
+  $effect(() => {
+    workspace.syncSearchAnchor(session.searchAnchor, searchResult, () => { drawerOpen = false })
+  })
+
+  $effect(() => {
+    replies.sync({
+      replies: currentReplies,
+      selected: () => selected,
+      activeReplyMessageId: () => activeReplyMessageId,
+      state: () => currentRepliesState,
+      organizationUnavailable: () => organizationUnavailable,
+      timelineStatus: () => currentTimeline?.status,
+      resolvedAnchor: () => resolvedReplyAnchor,
+    })
   })
 
   $effect(() => {
@@ -440,14 +478,11 @@
     void tick().then(() => {
       if (nav.state.revision !== revision || appliedFocusRevision === revision) return
       appliedFocusRevision = revision
+      const activeElement = document.activeElement
       if (
-        navFocusBaseline.revision === revision &&
-        typeof document !== 'undefined' &&
-        document.activeElement &&
-        document.activeElement !== document.body &&
-        document.activeElement !== document.documentElement &&
-        (document.activeElement as HTMLElement).isConnected !== false &&
-        document.activeElement !== navFocusBaseline.active
+        activeElement?.isConnected && activeElement !== document.body && activeElement !== document.documentElement &&
+        (state.focus === 'composer-if-unfocused' ||
+          (navFocusBaseline.revision === revision && activeElement !== navFocusBaseline.active))
       ) {
         focusTopicInputNext = false
         return
@@ -491,6 +526,7 @@
     ) {
       return
     }
+    if (mainTimelineRef?.isPositioning()) return
     const revision = state.revision
     void currentTimeline?.messages.length
     void currentTopicsState?.lines.length
@@ -506,16 +542,22 @@
         returningTopicId &&
           currentTimeline?.pending.some((p) => p.status === 'sending' && !p.replyTo && p.topicId === returningTopicId),
       ),
+      awaitingInitialSenders,
+      positioning: activeViewPositioning,
     })
     const composer = mainComposerRef
     let cancelled = false
     void tick().then(() => {
-      if (cancelled || nav.state.revision !== revision) return
+      if (cancelled || nav.state.revision !== revision || mainTimelineRef?.isPositioning()) return
       topicSummaryFocus.step({
         revision,
         status,
-        findSummary: (topic) =>
-          document.querySelector<HTMLElement>(`#main-content [data-topic-id="${CSS.escape(topic)}"]`),
+        findSummary: (topic) => {
+          if (activeViewPositioning) return null
+          const el = document.querySelector<HTMLElement>(`#main-content [data-topic-id="${CSS.escape(topic)}"]`)
+          if (!el || el.closest('[inert], [aria-busy="true"]')) return null
+          return el
+        },
         composer: mainComposerRef ?? composer,
       })
     })
@@ -525,95 +567,80 @@
   })
 
   $effect(() => {
-    if (!selected) { lastViewId = ''; return }
-    if (s.status === 'loading') return
-    const viewId = `${selected.id}/${route?.topicId ?? ''}`
-    if (route?.topicId && !resolvedTopicName && session.navigationTargets?.state.topic.status === 'loading') return
-    if (viewId === lastViewId) return
-    lastViewId = viewId
-    announcementController.onViewChanged({
-      viewId,
-      kind: route?.topicId ? 'topic' : selected.kind === 'dm' ? 'dm' : 'channel',
-      name: route?.topicId ? (resolvedTopicName || 'トピック') : conversationName,
+    announcements.syncView({
+      selected,
+      isChannelListLoading: () => s.status === 'loading',
+      topicId: () => route?.topicId,
+      topicName: () => resolvedTopicName,
+      isTopicLoading: () => session.navigationTargets?.state.topic.status === 'loading',
+      channelName: () => conversationName,
+      unnamedTopic: 'トピック',
     })
   })
 
   // Track timeline updates for live-message announcements and offline state (docs/ui.md §6)
   $effect(() => {
-    const viewId = selected ? `${selected.id}/${route?.topicId ?? ''}` : ''
-    if (!selected || !currentTimeline || viewId !== lastViewId) return
-    const replyChainIds =
-      activeReplyMessageId && currentRepliesState
-        ? new Set([
-            ...(currentRepliesState.rootId ? [currentRepliesState.rootId] : []),
-            ...currentRepliesState.messages.map((m) => m.id),
-          ])
-        : undefined
-    announcementController.onTimelineUpdated({
-      viewId,
-      topicId: route?.topicId ?? null,
-      status: currentTimeline.status,
-      live: currentLive,
-      messages: currentTimeline.messages,
-      replyChainIds,
-      selfId: organization?.member.id ?? '',
+    announcements.syncTimeline({
+      selected,
+      topicId: () => route?.topicId,
+      timeline: () => currentTimeline,
+      activeReplyMessageId: () => activeReplyMessageId,
+      replies: () => currentRepliesState,
+      live: () => currentLive,
+      selfId: () => organization?.member.id,
       resolveSenderName: resolveSender,
-      isSenderPending: (id) => !resolveSenderName && id !== organization?.member.id && (members?.authors.isPending(id) ?? false),
+      hasCustomSenderName: () => Boolean(resolveSenderName),
+      isAuthorPending: id => members?.authors.isPending(id) ?? false,
     })
   })
+
+  const isKnownChannel = (id: string) =>
+    s.channels.some(c => c.id === id) ||
+    Boolean(s.archivedList?.channels.some(c => c.id === id)) ||
+    s.openChannel?.id === id
+  const isDm = (id: string) => Boolean(dmState?.rows.some(row => row.identity.id === id))
 
   const handleSelectChannel = createChannelSelection({
     getOrganizationId: () => currentOrganizationId,
     getSelectedId: () => s.selectedId,
     getNavigation: () => nav,
     selectChannel: (id) => channels.select(id),
-    isKnownChannel: (id) =>
-      s.channels.some((c) => c.id === id) ||
-      Boolean(s.archivedList?.channels.some((c) => c.id === id)) ||
-      s.openChannel?.id === id,
+    isKnownChannel,
     selectChannelHint: (id) => channels.selectHint(id),
-    isDm: (id) => Boolean(dmState?.rows.some((row) => row.identity.id === id)),
+    isDm,
     selectDm: (id) => session.dms?.select(id),
     retryAuthors: () => { members?.authors.retry() },
     getCurrentUnread: () => currentUnread,
     onCloseDrawer: () => { drawerOpen = false },
   })
 
-  async function handleOpenDm(member: string, renew = false) {
-    await session.dms?.open(member, renew)
-    const id = session.dms?.state.selected
-    if (id && channels.state.selectedId === id) handleSelectChannel(id)
+  function handleOpenDm(member: string, renew = false) {
+    return workspace.openDm(
+      () => session.dms?.open(member, renew),
+      () => session.dms?.state.selected,
+      () => channels.state.selectedId,
+      handleSelectChannel,
+    )
   }
-  let recoveredSelection = ''
   $effect(() => {
-    const id = dmState?.recovered
-    if (!id) { recoveredSelection = ''; return }
-    if (id !== recoveredSelection && s.selectedId === id) {
-      recoveredSelection = id
-      untrack(() => handleSelectChannel(id))
-    }
+    workspace.syncRecoveredDm(dmState?.recovered, () => s.selectedId, id => untrack(() => handleSelectChannel(id)))
   })
 
   function handleSelectTopic(topicId: string) {
-    if (!selected || !currentOrganizationId) return
-    searchModel?.close()
-    const wasSameTopic = route?.topicId === topicId
-    nav.navigate({
-      type: 'topic',
-      topicId,
-      phone: isPhone,
+    workspace.selectTopic(topicId, {
+      selected,
+      organizationId: () => currentOrganizationId,
+      closeSearch: () => searchModel?.close(),
+      currentTopicId: () => route?.topicId,
+      phone: () => isPhone,
+      navigate: nav.navigate,
+      unread: () => currentUnread,
+      closeDrawer: () => { drawerOpen = false },
     })
-    if (wasSameTopic && currentUnread && (currentUnread.state.stopped || currentUnread.state.topics[topicId]?.stopped)) {
-      void currentUnread.enter(topicId)
-    }
-    drawerOpen = false
   }
 
   function handleOpenReplies(message: Message, opener?: HTMLElement | null) {
-    lastOpenedAnchor = message
-    openedReplyTarget = `${message.channel_id}:${message.id}`
-    void currentReplies?.open(message)
-    nav.navigate({ type: 'reply', messageId: message.id }, opener)
+    replies.open(message, anchor => currentReplies?.open(anchor), nav.navigate, opener)
   }
 
   function handleStartNewTopic() {
@@ -643,8 +670,10 @@
     }
   }
 
-  async function handleCreateChannel(name: string, visibility: 'public' | 'private'): Promise<string | null> {
-    const result = await channels.create(name, visibility)
+  async function handleCreateChannel(name: string, visibility: ChannelVisibility): Promise<string | ChannelCreationBlocked | null | false> {
+    const result = await channels.create(name, visibility, creationLifetime.signal)
+    if (!result || creationLifetime.signal.aborted) return false
+    if ('blocked' in result) return result
     if ('error' in result) return result.error
     handleSelectChannel(result.channel.id)
     return null
@@ -692,33 +721,15 @@
     return topicName ? `${base} › ${topicName}` : base
   }
 
-  function canOpenSearchTarget(target: SearchTarget): boolean {
-    const isDm = Boolean(dmState?.rows.some((row) => row.identity.id === target.channelId))
-    const hasChannel = Boolean(
-      isDm ||
-      s.channels.some((c) => c.id === target.channelId) ||
-      s.archivedList?.channels.some((c) => c.id === target.channelId) ||
-      s.openChannel?.id === target.channelId,
-    )
-    // A hit's kind comes from the server, which only returns readable Messages; an unloaded
-    // Channel or DM opens through the unknown-kind hint and the server decides availability.
-    if (!hasChannel && !target.channelKind) return false
-    if (!target.topicId) return true
-    if (isDm || target.channelKind === 'dm') return false
-    const topicsState = session.topics(target.channelId).state
-    if (topicsState.topic(target.topicId).notFound) return false
-    if (topicsState.topics.some((t) => t.topicId === target.topicId)) return true
-    const allKnown =
-      topicsState.list.asOfSeq !== undefined
-        ? !topicsState.list.hasMore
-        : topicsState.main.asOfSeq !== undefined && !topicsState.main.hasMore
-    return !allKnown
-  }
-
   function handleOpenSearchResult(organizationId: string, target: SearchTarget): boolean {
-    if (!organizationId || organizationId !== currentOrganizationId || organizationUnavailable || !canOpenSearchTarget(target)) return false
-    handleSelectChannel(target.channelId, target)
-    return true
+    return workspace.openSearchResult(organizationId, target, {
+      get currentOrganizationId() { return currentOrganizationId },
+      organizationUnavailable: () => organizationUnavailable,
+      isDm,
+      isKnownChannel,
+      topics: id => session.topics(id).state,
+      select: handleSelectChannel,
+    })
   }
 
   function handleSubmitSearch(value: string, origin: 'main' | 'channel-list') {
@@ -744,7 +755,7 @@
 
   function handleWindowKeydown(e: KeyboardEvent) {
     // A modal dialog is the topmost layer and handles its own Escape / Tab (docs/ui.md §9).
-    if (typeof document !== 'undefined' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
+    if (typeof document !== 'undefined' && document.querySelector('dialog:modal')) {
       return
     }
     if (shouldTogglePanelShortcut(e)) {
@@ -847,8 +858,7 @@
       {channelMentionUnreadCount}
       topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
       sections={session.sections}
-      showCreateChannel={Boolean(canCreateChannels ?? creationAllowed)}
-      createChannelDisabled={canCreateChannels !== true}
+      {creationAccess}
       createChannelDraft={channelCreation}
       archivedList={s.archivedList}
       dms={dmState && session.dms
@@ -869,7 +879,7 @@
       onsearchinput={(value) => searchModel?.setInput(value)}
       onsearchsubmit={(value) => handleSubmitSearch(value, 'channel-list')}
       onretrychannels={() => {
-        announcementController.resetChannelListTimeout()
+        announcements.resetChannelListTimeout()
         void channels.load()
       }}
       onselectchannel={handleSelectChannel}
@@ -920,6 +930,7 @@
       channelListStatus={s.status}
       {panelOpen}
       {mainViewSelected}
+      {awaitingInitialSenders}
       members={members?.state.members ?? []}
       resolveSenderName={resolveSender}
       {resolveSearchContext}
@@ -930,6 +941,7 @@
       bind:panelToggleBtn={panelToggleBtn}
       bind:composerRef={mainComposerRef}
       bind:topicInputRef={mainTopicInputRef}
+      bind:timelineRef={mainTimelineRef}
       onsearchinput={(value) => searchModel?.setInput(value)}
       onsearchsubmit={(value) => handleSubmitSearch(value, 'main')}
       onclosesearch={handleCloseSearch}
@@ -951,6 +963,9 @@
       ongoToChannelList={goToChannelList}
       onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
       onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+      onpositioningchange={(positioning) => {
+        reportedPositioning = { key: initialDisplayViewKey, positioning }
+      }}
     />
   </main>
 
@@ -1029,7 +1044,8 @@
     padding: var(--space-8);
     background-color: var(--app);
     min-width: 0;
-    overflow: hidden;
+    /* clip (not hidden) avoids creating a scroll container that focus() on a sliding-in panel can scroll sideways */
+    overflow: clip;
   }
 
   .workspace[data-panel-open='true'] {
@@ -1095,7 +1111,6 @@
     height: 100%;
     min-height: 0;
     min-width: 0;
-    transition: transform var(--duration-panel) var(--ease-out);
   }
 
   /* 960px - 1279px: right panel overlays main from the right (docs/ui.md §3) */

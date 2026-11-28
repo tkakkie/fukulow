@@ -4,11 +4,11 @@ import type { Topics, TopicsApi } from './topics'
 import type { createSync, SyncOptions } from './sync'
 
 /** Opt-in: pass an existing Topic/Reply composition to share its single Channel stream. */
-export function createUnreadSync(options: SyncOptions & { unreadApi?: UnreadApi; topicsApi?: TopicsApi; refreshList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean },
+export function createUnreadSync(options: SyncOptions & { unreadApi?: UnreadApi; readTopicSummary?: Topics['readTopicSummary']; topicsApi?: TopicsApi; refreshList?: () => Promise<void>; ensureList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean },
   composition: { sync: ReturnType<typeof createSync>; topics: Topics } = createTopicSync(options)) {
   const { sync, topics } = composition
-  const unread = createUnread(sync, { topics, api: options.unreadApi ?? unreadApi(options.organizationId ?? ''),
-    onSessionEnded: options.onSessionEnded, requestTimeoutMs: options.requestTimeoutMs, refreshList: options.refreshList, refreshArchived: options.refreshArchived, refreshDms: options.refreshDms, isDm: options.isDm })
+  const unread = createUnread(sync, { topics, readTopicSummary: options.readTopicSummary, api: options.unreadApi ?? unreadApi(options.organizationId ?? ''),
+    requestTimeoutMs: options.requestTimeoutMs, refreshList: options.refreshList, ensureList: options.ensureList, refreshArchived: options.refreshArchived, refreshDms: options.refreshDms, isDm: options.isDm })
   return { topics, unread, sync: { ...sync,
     replaceSession(selfId: string) { unread.replaceSession(); return sync.replaceSession(selfId) },
     async close() { unread.close(); await sync.close() },

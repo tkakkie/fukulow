@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 async fn counts(pool: &PgPool, org: Uuid, channel: Uuid) -> (i64, i64, i64) {
@@ -110,25 +111,13 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
 }
 
 pub(crate) async fn waiting(pool: &PgPool, pid: i32) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let blocked: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_locks w JOIN pg_locks h \
-                USING (locktype,database,classid,objid,objsubid) WHERE h.pid=$1 AND h.granted \
-                AND w.mode='ShareLock' AND NOT w.granted AND w.locktype='advisory')",
-            )
-            .bind(pid)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-            if blocked {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_blocked(
+        pool,
+        Blocked::Advisory(Advisory::SharedBehind(pid)),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
 }
 
 #[fukulow_test::test]

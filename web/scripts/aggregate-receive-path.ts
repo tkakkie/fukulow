@@ -2,16 +2,15 @@
 // Usage: node web/scripts/aggregate-receive-path.ts <dir>
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { medianOf, nearestRank } from './aggregate-wasm-core.ts'
+import { medianOf, nearestRank } from './measure-stats.ts'
+import { A2_FRAMES, BULK_CASES as A1_CASES } from './receive-cases.ts'
 
-export const A1_CASES = ['history_8x50', 'history_2x200', 'catchup_250', 'catchup_1000'] as const
-export const A2_FRAMES = [250, 1000] as const
+export { A1_CASES, A2_FRAMES }
 const ROUNDS = 5, REPETITIONS = 100
 const NOISE_PCT = 10, OVERHEAD_PCT = 10, SHARE_MIN = 0.3, S1_SAVING_MS = 3, S2_TOTAL_MS = 100
 
 export type Status = 'MET' | 'NOT MET' | 'INCONCLUSIVE'
-export type RoundMetric = { median: number; min: number; max: number; spreadPct: number; noisy: boolean; rounds: number[] }
+type RoundMetric = { median: number; min: number; max: number; spreadPct: number; noisy: boolean; rounds: number[] }
 type A1Trial = { total: number; input: number; wasm: number; output: number; steps: number }
 type A2Trial = { total: number; parse: number; validate: number; stepInput: number; wasm: number; output: number; controller: number; steps: number }
 type Scenario = { plainP95: number; totalP95: number; iP95: number; iShare: number; parts: Record<string, number> }
@@ -74,7 +73,7 @@ function parseRound(file: string): RoundFile {
   return { round: finite(file, 'meta.round', meta.round), arm: String(meta.arm), a1, a2 }
 }
 
-export type ScenarioResult = {
+type ScenarioResult = {
   plainP95: RoundMetric; totalP95: RoundMetric; iP95: RoundMetric; iShare: RoundMetric; parts: Record<string, RoundMetric>
   overheadPct: number; overheadOk: boolean; status: Status | 'REPORT-ONLY'
 }
@@ -124,7 +123,7 @@ export function aggregateReceivePath(dir: string) {
   return summary
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (import.meta.main) {
   const dir = process.argv[2]
   if (!dir) { console.error('Usage: node web/scripts/aggregate-receive-path.ts <dir>'); process.exit(1) }
   console.log(aggregateReceivePath(resolve(dir)).markdownTable)

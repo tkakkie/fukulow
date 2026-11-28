@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isNight, nights, partA, partC, replayPosition, requireMergedHarness, timelineEnv, type Arm } from './config.ts';
-import { judgePartA, judgePartB, judgePartC, judgePartD, parseTimeline, timelineTopics, sustainable, compare, closedLoopNonSuccess, vacuumCost, worst,
+import { isNight, nights, partA, partC, partD, replayPosition, requireMergedHarness, timelineEnv, type Arm } from './config.ts';
+import { classifyPartDFailure, judgePartA, judgePartB, judgePartC, judgePartD, parseTimeline, timelineTopics, sustainable, compare, closedLoopNonSuccess, vacuumCost, worst,
   type Counts, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 
 const commit = { B: 'b975ffa0de92a256ffeb82f63af798e4c41f00f4', A: 'f7fe08a000000000000000000000000000000000' };
@@ -303,4 +303,90 @@ test('Part D artifacts with only a nonzero exit are INVALID and require investig
   const verdict = judgePartD(runs)[0];
   assert.equal(verdict.status, 'INVALID');
   assert.match(verdict.reasons[0], /A1: unknown.*investigate.*101/);
+});
+
+const exit = { exitCode: 101, signal: null, timedOut: false };
+const alive = { Running: true, OOMKilled: false, ExitCode: 0, Health: 'healthy' };
+const password = 'test-only-password';
+const running = '    Running unittests src/lib.rs (target/release/deps/fukulow_server-abcdef)';
+const target = `messages::tests::topics::measurement::${partD.target}`;
+const assertionLog = `${running}
+thread '${target}' (234) panicked at server/src/messages/tests/topics/measurement.rs:140:5:
+assertion failed: ${password}`;
+const summary = `running 1 test
+test ${target} ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 123 filtered out`;
+const compileLog = 'error[E0308]: mismatched types\nerror: could not compile `fukulow-server` (lib test) due to 1 previous error';
+const panicWith = (message: string) => ({ stderr: assertionLog.replace(`assertion failed: ${password}`, message) });
+const gateMiss = panicWith('feasibility gate missed: stop; do not add a limit');
+
+test('classification requires a target-test panic, failed libtest summary and evidence the test binary ran', () => {
+  const log = `${assertionLog}\n${summary}`;
+  assert.deepEqual(classifyPartDFailure(exit, log, alive), { ...exit, cause: 'assertion',
+    evidence: ['Running unittests', 'target test panicked at', 'test result: FAILED'] });
+  assert.equal(classifyPartDFailure(exit, log.replace(running, ''), alive)?.cause, 'assertion');
+  for (const incomplete of [log.replace(running, '').replace('running 1 test', ''), log.replace(`thread '${target}'`, "thread 'other_test'"),
+    log.replace('test result: FAILED', ''), `${log}\n${compileLog}`.replace('test result: FAILED', ''),
+    log.replace(`assertion failed: ${password}`, '')]) {
+    assert.equal(classifyPartDFailure(exit, incomplete, alive)?.cause, 'unknown');
+  }
+});
+
+test('review 3: an inline gate miss with FAILED survives later infrastructure and termination markers', () => {
+  const inline = gateMiss.stderr.replace(':5:\n', ':5: ');
+  const postgres = { ...alive, Running: false, OOMKilled: true };
+  const log = `${inline}\n${summary}\nerror: process didn't exit successfully: target (signal: 9, SIGKILL)`;
+  for (const termination of [exit, { exitCode: null, signal: 'SIGTERM', timedOut: true, nightDeadline: true } as const]) {
+    const failure = classifyPartDFailure(termination, log, postgres, ['out of memory']);
+    assert.equal(failure?.cause, 'assertion');
+    assert.ok(failure.evidence.includes('feasibility gate missed'));
+  }
+  assert.equal(classifyPartDFailure(exit, inline, postgres)?.cause, 'infrastructure');
+});
+
+test('explicit gate miss and FAILED beat unknown PostgreSQL state', () => {
+  const failure = classifyPartDFailure(exit, `${gateMiss.stderr}\n${summary}`);
+  assert.equal(failure?.cause, 'assertion');
+  assert.ok(failure.evidence.includes('feasibility gate missed'));
+  assert.ok(failure.evidence.includes('PostgreSQL state unknown'));
+  assert.equal(classifyPartDFailure(exit, gateMiss.stderr)?.cause, 'unknown');
+  assert.equal(classifyPartDFailure(exit, `${gateMiss.stderr} (other)\n${summary}`)?.cause, 'unknown');
+});
+
+test('explicit gate miss and FAILED beat timeout, night deadline and process/binary signals', () => {
+  const termination = { exitCode: null, signal: 'SIGTERM', timedOut: true, nightDeadline: true } as const;
+  const log = `${gateMiss.stderr}\n${summary}\nerror: process didn't exit successfully: target (signal: 9, SIGKILL)`;
+  const failure = classifyPartDFailure(termination, log);
+  assert.equal(failure?.cause, 'assertion');
+  for (const marker of ['feasibility gate missed', 'runner timeout fired', 'night-deadline',
+    'process terminated by signal', 'test binary terminated by signal 9'])
+    assert.ok(failure.evidence.includes(marker));
+});
+
+test('explicit database, IO and pool panic markers exclude assertions with live PostgreSQL', () => {
+  for (const message of ['Database(PgDatabaseError { message: "could not write" })', 'Io(Custom { kind: Other })',
+    'Protocol("invalid response")', 'Tls("handshake failed")', 'WorkerCrashed', 'PoolTimedOut', 'PoolClosed',
+    'Connection reset by peer', 'Connection refused', 'Connection closed', 'Connection is closed', 'Connection aborted', 'Connection timed out',
+    'Broken pipe', 'Unexpected EOF', 'Unexpected end of file', 'server closed the connection unexpectedly', 'No space left on device',
+    'I/O error', 'IO error', 'error communicating with database', 'pool timed out', 'pool closed', 'pool is closed',
+    'timed out while waiting for an open connection']) {
+    const failure = classifyPartDFailure(exit, `${panicWith(`unwrap failed:\n  ${message}`).stderr}\n${summary}`, alive);
+    assert.equal(failure?.cause, 'unknown', message);
+    assert.ok(failure.evidence.includes('database/IO/pool panic'), message);
+  }
+  const unrelated = `thread 'other_test' panicked at src/lib.rs:1:1:\nPoolClosed`;
+  assert.equal(classifyPartDFailure(exit, `${assertionLog}\n${unrelated}\n${summary}`, alive)?.cause, 'assertion');
+});
+
+test('classification recognizes build and compile markers before the test binary runs', () => {
+  assert.deepEqual(classifyPartDFailure(exit, compileLog, alive)?.evidence.slice(-2), ['compiler error[E…]', 'could not compile']);
+  for (const log of ['error: could not compile `fukulow-server`', 'error: failed to run custom build command for `dep`']) {
+    assert.equal(classifyPartDFailure(exit, log)?.cause, 'infrastructure');
+  }
+  assert.equal(classifyPartDFailure(exit, `running 1 test\n${compileLog}`)?.cause, 'unknown');
+});
+
+test('an exit code alone gives unknown with a missing summary marker', () => {
+  assert.deepEqual(classifyPartDFailure(exit, '', alive), { ...exit, cause: 'unknown', evidence: ['missing libtest summary'] });
+  assert.equal(classifyPartDFailure({ ...exit, exitCode: 0 }, ''), null);
 });

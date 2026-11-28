@@ -1,10 +1,13 @@
 //! #314 step 4: production RLS policies, exercised as the restricted test role.
-use super::context::pools;
 use crate::database;
-use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
+use crate::database::test_support::{pools, single_connection_pool};
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-const TABLES: [&str; 17] = [
+mod coverage;
+mod dm_sections;
+
+const TABLES: &[&str] = &[
     "organizations",
     "users",
     "channels",
@@ -22,16 +25,29 @@ const TABLES: [&str; 17] = [
     "topic_read_positions",
     "invites",
     "invite_tombstones",
+    // Parent rows precede dependent rows for INSERT. DELETE uses the reverse order.
+    "dm_discovery_counters",
+    "dm_discovery",
+    "member_sections",
+    "member_section_ids",
+    "member_section_placements",
+    "member_section_generations",
 ];
 
 struct Tenant {
     organization: Uuid,
     account: Uuid,
     member: Uuid,
+    channel: Uuid,
 }
 
-/// One row (or more) in every target table, written as the owner.
 async fn tenant(admin: &PgPool) -> Tenant {
+    let tenant = tenant_base(admin).await;
+    dm_sections::seed(admin, &tenant).await;
+    tenant
+}
+
+async fn tenant_base(admin: &PgPool) -> Tenant {
     let (organization, account, member, channel, topic) = (
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -53,11 +69,11 @@ async fn tenant(admin: &PgPool) -> Tenant {
         "INSERT INTO users (organization_id, id, account_id, name, role) VALUES ($1, $3, $2, 'Member', 'owner')",
         "INSERT INTO channels (organization_id, id, name, visibility) VALUES ($1, $4, 'general', 'public')",
         "INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $4, $3)",
-        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 1)",
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 2)",
         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) VALUES ($1, $4, $5, 'topic', 1, 1, 1)",
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id) VALUES ($1, gen_random_uuid(), $4, 1, $3, gen_random_uuid(), 'hello', $5)",
         "INSERT INTO message_search_terms (organization_id, channel_id, term, created_at, message_id) SELECT $1,$4,'he',created_at,id FROM messages WHERE organization_id=$1 AND channel_id=$4",
-        "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$4",
+        "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,operation_id,destination_topic_id) SELECT organization_id,channel_id,2,'move',id,sender,gen_random_uuid(),$5 FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO operation_receipts (organization_id,actor,operation_id,kind,channel_id,target_id,intent_digest,outcome_version,outcome_deleted) SELECT $1,$3,gen_random_uuid(),'edit',$4,id,sha256('intent'::bytea),1,false FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$4,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$4",
         // message_append_counts rows come from the Message trigger; a correction needs a Move or Delete.
@@ -81,6 +97,7 @@ async fn tenant(admin: &PgPool) -> Tenant {
         organization,
         account,
         member,
+        channel,
     }
 }
 
@@ -107,7 +124,6 @@ fn sqlstate(error: &sqlx::Error) -> Option<String> {
         .map(|code| code.into_owned())
 }
 
-/// Copy one visible row of `table` with `organization_id` replaced.
 /// Copies one visible row of `table` with `organization_id` = $1, listing only
 /// insertable (non-generated) columns.
 async fn copy_sql(admin: &PgPool, table: &str) -> String {
@@ -132,17 +148,33 @@ async fn insertable(admin: &PgPool, table: &str) -> String {
 #[fukulow_test::test]
 async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(pool: PgPool) {
     let pools = pools(pool).await;
-    let (a, b) = (tenant(&pools.admin).await, tenant(&pools.admin).await);
-    database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
-        for (table, (all, own)) in TABLES.iter().zip(counts(tx, a.organization).await) {
-            assert!(own > 0, "{table}: own rows visible");
-            assert_eq!(all, own, "{table}: only own Organization visible");
+    let (a, b) = (
+        tenant_base(&pools.admin).await,
+        tenant_base(&pools.admin).await,
+    );
+    dm_sections::check_inserts(&pools, a.organization, &b).await;
+    let mut admin = pools.admin.acquire().await.unwrap();
+    let b_counts = counts(&mut admin, b.organization).await;
+    drop(admin);
+
+    // Before A is seeded in the six tables, a blind write should reach zero rows.
+    dm_sections::check_blind_updates_and_deletes(&pools.app, a.organization).await;
+    dm_sections::seed(&pools.admin, &a).await;
+    for id in [a.organization, b.organization] {
+        database::organization(&pools.app, id, async |tx: &mut PgConnection| {
+            for (table, (all, own)) in TABLES.iter().zip(counts(tx, id).await) {
+                assert!(own > 0, "{table}: own rows visible in {id}");
+                assert_eq!(all, own, "{table}: only own Organization visible in {id}");
+            }
+            Ok::<_, sqlx::Error>(())
+        })
+        .await
+        .unwrap();
+    }
+    for &table in TABLES {
+        if dm_sections::case(table).is_some() {
+            continue;
         }
-        Ok::<_, sqlx::Error>(())
-    })
-    .await
-    .unwrap();
-    for table in TABLES {
         let copy = copy_sql(&pools.admin, table).await;
         // Each case runs in its own transaction: an error aborts it.
         let insert =
@@ -159,15 +191,25 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
             Some("42501"),
             "{table}: INSERT other: {insert}"
         );
-        let moved =
+        let move_row = async |sql: &str| {
             database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
-                sqlx::query(&format!("UPDATE {table} SET organization_id = $1"))
-                    .bind(b.organization)
-                    .execute(&mut *tx)
-                    .await
+                sqlx::query(sql).bind(b.organization).execute(tx).await
             })
             .await
-            .unwrap_err();
+            .unwrap_err()
+        };
+        let blind_move = format!("UPDATE {table} SET organization_id = $1");
+        let moved = if table == "channels" {
+            let error = move_row(&blind_move).await;
+            assert!(
+                matches!(sqlstate(&error).as_deref(), Some("23514" | "42501")),
+                "{table}: blind UPDATE move: {error}"
+            );
+            // An ordinary Channel must reach RLS even if a DM triggers first above.
+            move_row("UPDATE channels SET organization_id = $1 WHERE kind = 'channel'").await
+        } else {
+            move_row(&blind_move).await
+        };
         // users' identity trigger rejects organization_id changes before RLS.
         let expected = if table == "users" { "P0001" } else { "42501" };
         assert_eq!(
@@ -175,15 +217,24 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
             Some(expected),
             "{table}: UPDATE move: {moved}"
         );
-        if table == "channel_log" {
-            continue; // UPDATE/DELETE are privilege-denied even within the tenant.
-        }
-        database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
-            for sql in [
-                format!("UPDATE {table} SET organization_id = organization_id WHERE organization_id = $1"),
+        let statements = match table {
+            "channel_log" => continue, // UPDATE/DELETE are denied even within the tenant.
+            "messages" => {
+                vec!["UPDATE messages SET body = body WHERE organization_id = $1".to_owned()]
+            }
+            _ => vec![
+                format!(
+                    "UPDATE {table} SET organization_id = organization_id WHERE organization_id = $1"
+                ),
                 format!("DELETE FROM {table} WHERE organization_id = $1"),
-            ] {
-                let affected = sqlx::query(&sql).bind(b.organization).execute(&mut *tx).await?;
+            ],
+        };
+        database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
+            for sql in statements {
+                let affected = sqlx::query(&sql)
+                    .bind(b.organization)
+                    .execute(&mut *tx)
+                    .await?;
                 assert_eq!(affected.rows_affected(), 0, "{table}: {sql}");
             }
             Ok::<_, sqlx::Error>(())
@@ -191,12 +242,13 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
         .await
         .unwrap();
     }
-    // The owner still sees B intact.
     let mut admin = pools.admin.acquire().await.unwrap();
-    for (table, (_, own)) in TABLES.iter().zip(counts(&mut admin, b.organization).await) {
-        assert!(own > 0, "{table}: B rows survive");
+    let after = counts(&mut admin, b.organization).await;
+    for (table, ((_, before), (_, after))) in TABLES.iter().zip(b_counts.into_iter().zip(after)) {
+        assert_eq!(after, before, "{table}: B's row count changed");
     }
     drop(admin);
+    dm_sections::check_updates_and_deletes(&pools.app, a.organization, b.organization).await;
     pools.app.close().await;
 }
 
@@ -215,13 +267,21 @@ async fn rls_without_context_reads_nothing_and_writes_nothing(pool: PgPool) {
             format!("DELETE FROM {table}"),
         ] {
             let result = sqlx::query(&sql).execute(&mut *connection).await;
-            if *table == "channel_log" {
+            if matches!(*table, "channel_log" | "messages") {
                 assert_eq!(sqlstate(&result.unwrap_err()).as_deref(), Some("42501"));
             } else {
                 assert_eq!(result.unwrap().rows_affected(), 0, "{table}: {sql}");
             }
         }
     }
+    assert_eq!(
+        sqlx::query("UPDATE messages SET body = body")
+            .execute(&mut *connection)
+            .await
+            .unwrap()
+            .rows_affected(),
+        0
+    );
     drop(connection);
     // Copy as the owner-visible row: INSERT without context fails WITH CHECK.
     for table in TABLES {
@@ -325,12 +385,8 @@ async fn rls_account_context_reads_only_own_members_and_writes_nothing(pool: PgP
 #[fukulow_test::test]
 async fn rls_context_never_survives_commit_rollback_or_abort_on_a_reused_connection(pool: PgPool) {
     let pools = pools(pool).await;
-    let a = tenant(&pools.admin).await;
-    let single = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(pools.app.connect_options().as_ref().clone())
-        .await
-        .unwrap();
+    let a = tenant_base(&pools.admin).await;
+    let single = single_connection_pool(&pools.app).await;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&single)
         .await
@@ -376,7 +432,7 @@ async fn setup_required_is_boolean_only_and_executable_only_by_the_app_role(pool
         .await
         .unwrap();
     assert!(required);
-    tenant(&pools.admin).await;
+    tenant_base(&pools.admin).await;
     let required: bool = sqlx::query_scalar("SELECT fukulow_setup_required()")
         .fetch_one(&pools.app)
         .await

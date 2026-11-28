@@ -16,13 +16,13 @@ export const BUDGETS_KIB = new Map<string, number>([
   ['docs/decisions/web.md', 10],
   ['docs/invariants.md', 3],
   ['docs/invariants/auth.md', 34],
-  ['docs/invariants/channels.md', 22],
+  ['docs/invariants/channels.md', 23],
   ['docs/invariants/deployment.md', 33],
   ['docs/invariants/messages.md', 29],
-  ['docs/invariants/realtime.md', 37],
+  ['docs/invariants/realtime.md', 39],
   ['docs/invariants/replies.md', 25],
   ['docs/invariants/sections.md', 7],
-  ['docs/invariants/sync.md', 31],
+  ['docs/invariants/sync.md', 32],
   ['docs/invariants/topics.md', 12],
   ['docs/invariants/unread.md', 16],
   ['docs/invariants/web.md', 28],
@@ -40,7 +40,7 @@ export const BUDGETS_KIB = new Map<string, number>([
 
 // #562 final size (8def9c2: 636,734 bytes over 29 files) plus 10%, rounded up to whole KiB. Fixed, never recomputed per PR (#603).
 export const TOTAL_BUDGET_KIB = 684
-export const RAISE_LABEL = 'docs:budget-raise'
+const RAISE_LABEL = 'docs:budget-raise'
 const RAISE_RULE = `needs the ${RAISE_LABEL} label and a linked maintainer approval (docs/workflow.md §13)`
 
 export function checkDocBudgets(

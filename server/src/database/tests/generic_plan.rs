@@ -1,15 +1,8 @@
-use super::context::{clean, pools};
+use crate::database::test_support::{clean, pools, single_connection_pool};
 use crate::database::{generic_plan, organization_statement_sql};
+use crate::test_support::{Blocked, Count, wait_blocked};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
-
-async fn single(app: &PgPool) -> PgPool {
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(app.connect_options().as_ref().clone())
-        .await
-        .unwrap()
-}
 
 async fn plan_cache_mode(pool: &PgPool) -> String {
     sqlx::query_scalar("SELECT current_setting('plan_cache_mode')")
@@ -21,7 +14,7 @@ async fn plan_cache_mode(pool: &PgPool) -> String {
 #[fukulow_test::test]
 async fn generic_statement_rolls_back_body_errors_to_a_clean_connection(pool: PgPool) {
     let pools = pools(pool).await;
-    let single = single(&pools.app).await;
+    let single = single_connection_pool(&pools.app).await;
     let pid = clean(&single).await;
     let org = Uuid::new_v4();
     // Positive control: the body runs read-only under a generic plan with the context.
@@ -102,7 +95,7 @@ async fn generic_statement_cancelled_during_rls_read_discards(pool: PgPool) {
     .execute(&pools.admin)
     .await
     .unwrap();
-    let single = single(&pools.app).await;
+    let single = single_connection_pool(&pools.app).await;
     let pid = clean(&single).await;
     let pending_pool = single.clone();
     let pending = tokio::spawn(async move {
@@ -115,23 +108,13 @@ async fn generic_statement_cancelled_during_rls_read_discards(pool: PgPool) {
         )
         .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let sleeping: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event='PgSleep')",
-            )
-            .bind(pid)
-            .fetch_one(&pools.admin)
-            .await
-            .unwrap();
-            if sleeping {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("RLS row was read before cancellation during pg_sleep");
+    wait_blocked(
+        &pools.admin,
+        Blocked::PidEvent(pid, "PgSleep"),
+        Count::AtLeast(1),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
     pending.abort();
     assert!(pending.await.unwrap_err().is_cancelled());
     let replacement = tokio::time::timeout(std::time::Duration::from_secs(5), clean(&single))
@@ -160,7 +143,7 @@ async fn generic_statement_context_dependent_error_rolls_back_to_a_clean_connect
         .execute(&pools.admin)
         .await
         .unwrap();
-    let single = single(&pools.app).await;
+    let single = single_connection_pool(&pools.app).await;
     let pid = clean(&single).await;
     let sql = "SELECT 1 / CASE WHEN current_setting('fukulow.organization_id', true) = $1::uuid::text \
                THEN (SELECT count(*) FROM organizations) - 1 ELSE 1 END";

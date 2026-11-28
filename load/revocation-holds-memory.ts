@@ -23,12 +23,25 @@ export function rssDeltaKb(run: Pick<HoldsRun, 'rss' | 'times'>, recovery: numbe
 }
 
 export type MemoryResult = { result: 'FAIL' | 'measured within bound' | 'upper bound only (never PASS)' | 'NOT EVALUATED'; dKb?: number; nKb?: number; bKb?: number; upperBoundKb?: number };
+export type RssCorrectionKb = [low: number, high: number];
+
+export function stableMemoryVerdict(result: MemoryResult['result'], [low, high]: [number, number], noise: number, bound: number) {
+  if (result === 'FAIL') return low - noise > bound;
+  if (result === 'measured within bound') return low > noise && high + noise <= bound;
+  const couldMeasure = bound - noise > noise && high > noise && low <= bound - noise;
+  return result === 'upper bound only (never PASS)' && high - noise <= bound && !couldMeasure;
+}
+
 /** D, N and B as pre-registered, over exactly three valid fault runs and three valid controls. */
 export function memoryVerdict(faults: { deltaKb: number; hwm: number }[], controlDeltasKb: number[]): MemoryResult {
   if (faults.length !== REPEATS || controlDeltasKb.length !== REPEATS || [...faults.flatMap(f => [f.deltaKb, f.hwm]), ...controlDeltasKb].some(v => !Number.isFinite(v))) return { result: 'NOT EVALUATED' };
   const dKb = median(faults.map(f => f.deltaKb)) - median(controlDeltasKb);
   const nKb = Math.max(...controlDeltasKb) - Math.min(...controlDeltasKb);
   const bKb = BOUND_KB_PER_CAP * Math.min(...faults.map(f => f.hwm)) / GLOBAL_CAP;
+  return classifyMemory(dKb, nKb, bKb);
+}
+
+export function classifyMemory(dKb: number, nKb: number, bKb: number): MemoryResult {
   if (dKb - nKb > bKb) return { result: 'FAIL', dKb, nKb, bKb };
   if (dKb > nKb && dKb + nKb <= bKb) return { result: 'measured within bound', dKb, nKb, bKb };
   return { result: 'upper bound only (never PASS)', dKb, nKb, bKb, upperBoundKb: Math.max(0, dKb + nKb) };
@@ -48,8 +61,8 @@ export function memoryEntry(run: HoldsRun, verdict: HoldsVerdict, hwm: number | 
   return { kind: run.kind, cell: run.cell, duration: run.duration, verdict, hwm, deltaKb };
 }
 
-const rank = (m: MemoryResult) => m.result === 'NOT EVALUATED' ? 3 : m.result === 'FAIL' ? 2 : m.result === 'upper bound only (never PASS)' ? 1 : 0;
-/** The less favourable of two results: NOT EVALUATED, then FAIL, then the larger upper bound. */
+const rank = (m: MemoryResult) => m.result === 'FAIL' ? 3 : m.result === 'NOT EVALUATED' ? 2 : m.result === 'upper bound only (never PASS)' ? 1 : 0;
+/** The less favourable of two results: FAIL, NOT EVALUATED, then the larger upper bound. */
 export function lessFavourable(a: MemoryResult, b: MemoryResult) {
   if (rank(a) !== rank(b)) return rank(a) > rank(b) ? a : b;
   return (b.upperBoundKb ?? -Infinity) > (a.upperBoundKb ?? -Infinity) ? b : a;
@@ -61,20 +74,25 @@ function choices(pairs: [number, number][]): number[][] {
 }
 
 /** Groups per cell x duration: the first three valid fault runs against the first three valid controls of the cell. */
+export function memoryForGroup(entries: MemoryEntry[], duration: Duration): MemoryResult {
+  const missing: [number, number] = [NaN, NaN];
+  const valid = entries.filter(e => e.verdict !== 'INVALID');
+  const faults = valid.filter(e => e.kind === 'fault' && e.duration === duration).slice(0, REPEATS);
+  const controls = valid.filter(e => e.kind === 'control').slice(0, REPEATS).map(e => e.deltaKb[duration] ?? missing);
+  if (faults.length !== REPEATS || controls.length !== REPEATS) return { result: 'NOT EVALUATED' };
+  const hwms = faults.map(e => e.hwm ?? NaN);
+  let worst: MemoryResult | undefined;
+  for (const f of choices(faults.map(e => e.deltaKb[duration] ?? missing))) for (const c of choices(controls)) {
+    const result = memoryVerdict(f.map((deltaKb, i) => ({ deltaKb, hwm: hwms[i] })), c);
+    worst = worst ? lessFavourable(worst, result) : result;
+  }
+  return worst ?? { result: 'NOT EVALUATED' };
+}
+
 export function memoryByCell(entries: MemoryEntry[]) {
   const groups: Record<string, MemoryResult> = {};
-  const missing: [number, number] = [NaN, NaN];
-  for (const cell of CELL_NAMES) for (const duration of ['short', 'long'] as Duration[]) {
-    const valid = entries.filter(e => e.cell === cell && e.verdict !== 'INVALID');
-    const faults = valid.filter(e => e.kind === 'fault' && e.duration === duration).slice(0, REPEATS);
-    const controls = valid.filter(e => e.kind === 'control').slice(0, REPEATS).map(e => e.deltaKb[duration] ?? missing);
-    const hwms = faults.map(e => e.hwm ?? NaN);
-    let worst: MemoryResult | undefined;
-    for (const f of choices(faults.map(e => e.deltaKb[duration] ?? missing))) for (const c of choices(controls)) {
-      const result = memoryVerdict(f.map((deltaKb, i) => ({ deltaKb, hwm: hwms[i] })), c);
-      worst = worst ? lessFavourable(worst, result) : result;
-    }
-    groups[`${cell}/${duration}`] = worst ?? { result: 'NOT EVALUATED' };
+  for (const cell of CELL_NAMES) for (const duration of ['short', 'long'] as const) {
+    groups[`${cell}/${duration}`] = memoryForGroup(entries.filter(e => e.cell === cell), duration);
   }
   return groups;
 }

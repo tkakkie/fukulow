@@ -61,7 +61,7 @@ async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
         let key = Uuid::new_v4();
         let gate = messages::pause_publication(key);
         send(&f, &f.token, f.channel, key, "held measurement").await;
-        publication_entered(&gate).await;
+        gate.entered().await;
         gates.push(gate);
     }
     started.set(std::time::Instant::now()).unwrap();
@@ -90,17 +90,9 @@ async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
         latency[count - 1]
     );
     for gate in gates {
-        gate.release.add_permits(1);
+        gate.release();
     }
     f.state.message_delivery.flush().await;
-}
-
-pub(super) async fn publication_entered(gate: &messages::PublicationGate) {
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
 }
 
 #[fukulow_test::test]
@@ -119,7 +111,7 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
     )
     .await
     .unwrap();
-    publication_entered(&gate).await;
+    gate.entered().await;
     assert_eq!(first["created_seq"], 1);
     let history = messages::replay_page(&pool, f.organization, f.channel, 0, 1)
         .await
@@ -148,7 +140,7 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
     while let Some(result) = sends.join_next().await {
         assert_eq!(result.unwrap().status(), StatusCode::CREATED);
     }
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let next = post(&f, f.channel).await;
     assert_eq!(event(&mut socket).await["message"], next);
@@ -170,10 +162,7 @@ async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturat
         ready(&mut socket, cold, 0).await;
         cold_sockets.push(socket);
     }
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
+    let gate = Arc::new(Gate::default());
     let holder = {
         let delivery = f.state.message_delivery.clone();
         let gate = gate.clone();
@@ -181,11 +170,11 @@ async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturat
         let channel = f.channel;
         tokio::spawn(async move {
             delivery
-                .hold_publication_cursor(organization, channel, &gate.entered, &gate.release)
+                .hold_publication_cursor(organization, channel, &gate)
                 .await;
         })
     };
-    entered(&gate).await;
+    gate.entered().await;
     for _ in 0..messages::MAX_IN_FLIGHT_NOTIFICATIONS {
         post(&f, f.channel).await;
     }
@@ -210,7 +199,7 @@ async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturat
     for socket in &mut cold_sockets {
         assert_eq!(event(socket).await["message"], own);
     }
-    gate.release.add_permits(1);
+    gate.release();
     holder.await.unwrap();
     f.state.message_delivery.flush().await;
     let mut recovered = f.server.connect(&f.token).await;
@@ -255,7 +244,7 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
         let key = Uuid::new_v4();
         let gate = messages::pause_publication(key);
         committed.push(send(&f, &f.token, f.channel, key, "held notification").await);
-        publication_entered(&gate).await;
+        gate.entered().await;
         gates.push(gate);
     }
     // All slots are occupied, but there is no failure or HTTP backpressure yet.
@@ -282,7 +271,7 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
     }
     ready(&mut reconnect, f.channel, committed.len() as i64).await;
     for gate in gates {
-        gate.release.add_permits(1);
+        gate.release();
     }
     f.state.message_delivery.flush().await;
     let next = post(&f, f.channel).await;
@@ -311,7 +300,7 @@ async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lo
         let key = Uuid::new_v4();
         let gate = messages::pause_publication(key);
         send(&f, &f.token, f.channel, key, "held").await;
-        publication_entered(&gate).await;
+        gate.entered().await;
         gates.push(gate);
     }
     let delivery = f.state.message_delivery.clone();
@@ -345,7 +334,7 @@ async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lo
         assert!(!*queue.overflow.borrow());
     }
     for gate in gates {
-        gate.release.add_permits(1);
+        gate.release();
     }
     f.state.message_delivery.flush().await;
 }
@@ -362,9 +351,9 @@ async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_recon
         subscribe(&mut live, f.channel, 0).await;
         ready(&mut live, f.channel, 0).await;
         let mut replaying = f.server.connect(&f.token).await;
-        let replay_gate = pause(f.channel);
+        let replay_gate = hooks::register_replay(f.channel);
         subscribe(&mut replaying, f.channel, 0).await;
-        entered(&replay_gate).await;
+        replay_gate.entered().await;
         let mut unrelated = f.server.connect(&f.token).await;
         subscribe(&mut unrelated, other_channel, 0).await;
         ready(&mut unrelated, other_channel, 0).await;
@@ -375,16 +364,19 @@ async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_recon
         let key = Uuid::new_v4();
         let gate = messages::pause_publication(key);
         let committed = send(&f, &f.token, f.channel, key, "response before failure").await;
-        publication_entered(&gate).await;
+        gate.entered().await;
         match failure {
-            "abort" => gate.task.lock().unwrap().as_ref().unwrap().abort(),
+            "abort" => {
+                let abort_handle = &gate.hook_state.abort_handle;
+                abort_handle.lock().unwrap().as_ref().unwrap().abort();
+            }
             "timeout" => {
                 tokio::time::pause();
                 tokio::time::advance(messages::NOTIFICATION_TIMEOUT).await;
                 tokio::time::resume();
             }
             // Fail inside the notification future, rather than the HTTP worker.
-            _ => gate.release.close(),
+            _ => gate.close(),
         }
         // No later publication is needed to expose this missing notification.
         closed(&mut live, 1011).await;
@@ -415,20 +407,19 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
     let first_key = Uuid::new_v4();
     let dropped = messages::pause_publication(first_key);
     send(&f, &f.token, f.channel, first_key, "dropped notification").await;
-    publication_entered(&dropped).await;
+    dropped.entered().await;
     // Retain the Channel's lagging publication cursor across the old socket exit.
     let late_key = Uuid::new_v4();
     let late = messages::pause_publication(late_key);
     send(&f, &f.token, f.channel, late_key, "late notification").await;
-    publication_entered(&late).await;
-    dropped.task.lock().unwrap().as_ref().unwrap().abort();
+    late.entered().await;
+    let abort_handle = &dropped.hook_state.abort_handle;
+    abort_handle.lock().unwrap().as_ref().unwrap().abort();
     closed(&mut before_failure, 1011).await;
 
     let through = LIVE_QUEUE_CAPACITY as i64 + 44;
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed backlog' FROM generate_series(3,$4::bigint) n")
         .bind(f.organization).bind(f.channel).bind(f.member).bind(through).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$2 ON CONFLICT DO NOTHING")
-        .bind(f.organization).bind(f.channel).execute(&pool).await.unwrap();
     sqlx::query(
         "UPDATE channel_message_sequences SET seq=$3 WHERE organization_id=$1 AND channel_id=$2",
     )
@@ -447,14 +438,14 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
 
     // A replay on another Channel prevents this socket from draining its live queue.
     let other = channel(&pool, f.organization, f.member, false).await;
-    let parked = pause(other);
+    let parked = hooks::register_replay(other);
     subscribe(&mut replayed, other, 0).await;
-    entered(&parked).await;
+    parked.entered().await;
     // Another subscriber has registered but is still inside this Channel's replay.
     let mut mid_replay = f.server.connect(&f.token).await;
-    let replay = pause(f.channel);
+    let replay = hooks::register_replay(f.channel);
     subscribe(&mut mid_replay, f.channel, 0).await;
-    entered(&replay).await;
+    replay.entered().await;
     let published = post(&f, f.channel).await;
     assert_eq!(published["created_seq"], through + 1);
     // Overflow has priority over failure: these real closes prove no 4008 was set.
@@ -468,7 +459,7 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
         assert_eq!(event(&mut recovered).await["message"]["created_seq"], seq);
     }
     ready(&mut recovered, f.channel, through + 1).await;
-    late.release.add_permits(1);
+    late.release();
     f.state.message_delivery.flush().await;
     // A late old notification is suppressed, and the advanced cursor permits live delivery.
     let next = post(&f, f.channel).await;
@@ -487,12 +478,12 @@ async fn notification_authorization_failure_closes_with_4008_and_reconnect_repla
     let key = Uuid::new_v4();
     let gate = messages::pause_publication(key);
     let committed = send(&f, &f.token, f.channel, key, "authorization unavailable").await;
-    publication_entered(&gate).await;
+    gate.entered().await;
     sqlx::query("ALTER TABLE channels RENAME COLUMN visibility TO unavailable_visibility")
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     closed(&mut socket, CLOSE_QUEUE_OVERFLOW).await;
     f.state.message_delivery.flush().await;
     sqlx::query("ALTER TABLE channels RENAME COLUMN unavailable_visibility TO visibility")
@@ -515,7 +506,7 @@ async fn notification_rechecks_public_visibility_after_http_response(pool: PgPoo
     let key = Uuid::new_v4();
     let gate = messages::pause_publication(key);
     let committed = send(&f, &f.token, f.channel, key, "public becomes private").await;
-    publication_entered(&gate).await;
+    gate.entered().await;
     sqlx::query(
         "UPDATE channels SET visibility = 'private' WHERE organization_id = $1 AND id = $2",
     )
@@ -524,7 +515,7 @@ async fn notification_rechecks_public_visibility_after_http_response(pool: PgPoo
     .execute(&pool)
     .await
     .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     access_loss::access_lost(&mut socket, f.channel).await;
     // An authorized public Channel supplies a FIFO silence barrier after fan-out finishes.

@@ -152,6 +152,7 @@ async fn registry_drop_never_requests_fatal_exit() {
         RECHECK_INTERVAL,
         CHECK_TIMEOUT,
         changes.subscriptions.clone(),
+        None,
         changes.gate.clone(),
     ));
     let supervisor = tokio::spawn(supervise(

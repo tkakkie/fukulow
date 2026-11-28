@@ -1,7 +1,6 @@
 // Release push (#808): upload verified OCI layouts by digest, then the index and its tags.
 // Build jobs stay read-only; only the publish job runs this with a packages:write token.
 import { appendFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
 import { buildIndex, extractLayout, imageRepository, indexType, platformDescriptor, sha256, type Layout } from './release-oci.ts'
 
 const accept = [indexType, 'application/vnd.oci.image.manifest.v1+json',
@@ -90,7 +89,7 @@ export async function publish(registry: Registry, layouts: Layout[], release: Re
   return { index: indexDigest, platforms: Object.fromEntries(layouts.map(layout => [layout.config.architecture, layout.manifest.digest])) }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (import.meta.main) {
   const [version, revision, license, tags, ...archives] = process.argv.slice(2)
   const { REGISTRY_USER: user, REGISTRY_PASSWORD: password, GITHUB_OUTPUT: output } = process.env
   if (!user || !password || !output || !archives.length) {

@@ -3,7 +3,9 @@ use super::{
     roles::{grant, revoke, role},
     *,
 };
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use sqlx::Row;
+use std::time::Duration;
 
 mod projection;
 
@@ -473,7 +475,11 @@ async fn a3_counts_stay_exact_under_concurrent_sends_marks_moves_and_ambiguous_c
         let target = world.members[2].0;
         let status = send(&world.app, &world.members[1].1, channel, json!({"client_message_id":key,"body":format!("@{{member:{target}}}"),"topic_name":"C1"})).await.status();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        let tx = pending.await.unwrap();
+        let mut tx = pending.await.unwrap();
+        let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(tx.connection().unwrap())
+            .await
+            .unwrap();
         let mut tasks = Vec::new();
         for task in 0..12usize {
             let world = world.clone();
@@ -501,7 +507,15 @@ async fn a3_counts_stay_exact_under_concurrent_sends_marks_moves_and_ambiguous_c
                 }
             }));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The pending send holds the Channel's writer permit, and the test pool
+        // lets two read marks reach the shared advisory lock at once.
+        wait_blocked(
+            &pool,
+            Blocked::Advisory(Advisory::SharedBehind(blocker)),
+            Count::Exactly(2),
+            Duration::from_secs(5),
+        )
+        .await;
         if commit {
             tx.commit().await.unwrap();
         } else {
@@ -550,6 +564,7 @@ async fn a3_migration_backfill_keeps_counts_of_a_populated_database(pool: PgPool
             .any(|row| row[3] > row[2] && row[5] > 0),
         "fixture needs Topic Unread and Mentions: {before:?}"
     );
+    seed_legacy_creates(&pool, world.org, &world.channels).await;
     sqlx::migrate!().run(&pool).await.unwrap();
     assert_check(&pool, world.org, "after backfill").await;
     assert_eq!(

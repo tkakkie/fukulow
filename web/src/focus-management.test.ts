@@ -374,6 +374,8 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     }
     expect(resolveMainTimelineFocusStatus(base)).toBe('ready')
     expect(resolveMainTimelineFocusStatus({ ...base, topicPendingSend: true })).toBe('loading')
+    expect(resolveMainTimelineFocusStatus({ ...base, awaitingInitialSenders: true })).toBe('loading')
+    expect(resolveMainTimelineFocusStatus({ ...base, positioning: true })).toBe('loading')
     expect(
       resolveMainTimelineFocusStatus({
         ...base,

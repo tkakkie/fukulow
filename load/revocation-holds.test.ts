@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { connect, createServer, type AddressInfo, type Socket } from 'node:net';
 import { test } from 'node:test';
 import { emptyLog, readLogLine, wallMs } from './revocation-holds-log.ts';
 import { CELL_NAMES, checkStall, parseOptions, planRuns, potentialHolds, restoreAccount, runId, socketAccount, stallBody, STALL_DEFAULT, targetSockets } from './revocation-holds-plan.ts';
 import { holdsEndSamples, retriesWithin, retryPeakPerSecond, timedSamples } from './revocation-holds-samples.ts';
-import { bytesBetween, StallProxy } from './revocation-holds-stall.ts';
 
 test('fixture shapes match the pre-registered matrix', () => {
   assert.deepEqual(CELL_NAMES.map(cell => [cell, targetSockets(cell), potentialHolds(cell)]), [
@@ -28,7 +25,7 @@ test('the default plan has 30 fault runs and 15 controls, interleaved', () => {
 
 test('options validate cells, durations, repeats, controls and the stall', () => {
   const defaults = parseOptions(['--out', '/x']);
-  assert.deepEqual(defaults, { out: '/x', cells: CELL_NAMES, durations: ['short', 'long'], repeats: 3, controls: true, rehearsal: false, stall: STALL_DEFAULT });
+  assert.deepEqual(defaults, { out: '/x', cells: CELL_NAMES, durations: ['short', 'long'], repeats: 3, controls: true, rehearsal: false, e6ObserveMs: 0, stall: STALL_DEFAULT });
   const rehearsal = parseOptions(['--out', '/x', '--cells', 'H512,Hcap', '--durations', 'long', '--repeats', '1', '--controls', 'off', '--rehearsal']);
   assert.deepEqual([rehearsal.cells, rehearsal.repeats, rehearsal.controls, rehearsal.rehearsal], [['H512', 'Hcap'], 1, false, true]);
   // A formal run is the registered 3 repeats with controls; a subset of cells is a formal rerun.
@@ -44,7 +41,7 @@ test('options validate cells, durations, repeats, controls and the stall', () =>
 });
 
 test('stall options stay within the send burst, the body limit and half the live queue', () => {
-  assert.equal(STALL_DEFAULT.senders * STALL_DEFAULT.messages, 80);
+  assert.equal(STALL_DEFAULT.senders * STALL_DEFAULT.messages, 120);
   assert.deepEqual(checkStall({ senders: 12, messages: 10, chars: 4000 }), { senders: 12, messages: 10, chars: 4000 });
   assert.throws(() => checkStall({ senders: 13, messages: 10, chars: 4000 }), /at most 128/);
   assert.throws(() => checkStall({ senders: 1, messages: 11, chars: 4000 }), /send limit/);
@@ -53,6 +50,23 @@ test('stall options stay within the send burst, the body limit and half the live
   const body = stallBody(4000);
   assert.equal([...body].length, 4000);
   assert.equal(Buffer.byteLength(body), 16_000);
+});
+
+test('stall overrides require rehearsal and leave the 120-Message formal fixture fixed', () => {
+  for (const args of [
+    ['--stall-senders', '10'], ['--stall-messages', '8'], ['--stall-chars', '1000'], ['--stall-messages=8'],
+  ]) {
+    assert.throws(() => parseOptions(['--out', '/x', ...args]), /stall-\* options require --rehearsal/);
+  }
+  const options = parseOptions(['--out', '/x', '--rehearsal', '--stall-senders', '10', '--stall-messages', '8', '--stall-chars', '1000']);
+  assert.deepEqual(options.stall, { senders: 10, messages: 8, chars: 1000 });
+});
+
+test('the saved overhead summary option takes a file for formal runs', () => {
+  const args = ['--out', '/x', '--overhead-summary'];
+  assert.throws(() => parseOptions(args), /saved overhead summary file/);
+  assert.throws(() => parseOptions([...args, 'summary.json', '--rehearsal']), /formal run/);
+  assert.equal(parseOptions([...args, 'summary.json']).overheadSummary, 'summary.json');
 });
 
 test('the log reader keeps holds samples, send records, clock samples and 60 s events', () => {
@@ -70,8 +84,9 @@ test('the log reader keeps holds samples, send records, clock samples and 60 s e
   readLogLine(log, 'not json', 9);
   assert.deepEqual(log, {
     clock: [4], clockWall: [Date.parse('2026-11-22T00:00:01Z') + 123.456], sends: [{ channelId: 'c', beforeMs: 5, afterMs: 6, afterHold: true }],
+    permits: [],
     holds: [{ serverMs: 12.5, activeHolds: 3, highWaterMark: 9, retryAttempts: 40 }],
-    pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }],
+    pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }], sendBuffers: [],
   });
 });
 
@@ -106,70 +121,13 @@ test('samples convert to the harness clock and bracket windows conservatively', 
   assert.deepEqual(timedSamples({ samples: [], sendTiming: undefined }), []);
 });
 
-async function proxied(t: { after: (fn: () => Promise<void> | void) => void }) {
-  const server = createServer();
-  const accepted = once(server, 'connection') as Promise<[Socket]>;
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  let now = 0;
-  const proxy = new StallProxy({ host: '127.0.0.1', port: (server.address() as AddressInfo).port }, () => now);
-  const port = await proxy.listen();
-  const client = connect(port, '127.0.0.1');
-  await once(client, 'connect');
-  const [upstream] = await accepted;
-  t.after(async () => { client.destroy(); upstream.destroy(); await proxy.close(); await new Promise<void>(r => server.close(() => r())); });
-  return { proxy, port, client, upstream, setNow: (value: number) => { now = value; } };
-}
-const settle = () => new Promise(r => setTimeout(r, 50));
-
-test('the stall proxy stops reading upstream while paused and records the backlog after resume', { timeout: 5000 }, async t => {
-  const { proxy, client, upstream, setNow } = await proxied(t);
-  let received = 0;
-  client.on('data', (chunk: Buffer) => { received += chunk.length; });
-  upstream.write(Buffer.alloc(1000)); await settle();
-  assert.equal(received, 1000);
-  setNow(10); proxy.pause();
-  upstream.write(Buffer.alloc(5000)); await settle();
-  assert.equal(received, 1000);
-  assert.equal(bytesBetween(proxy.record, 10, Infinity), 0);
-  // Client-to-server bytes keep flowing during the pause.
-  const toServer = once(upstream, 'data') as Promise<[Buffer]>;
-  client.write('pong');
-  assert.equal(String((await toServer)[0]), 'pong');
-  setNow(20); proxy.resume(); await settle();
-  assert.equal(received, 6000);
-  assert.equal(bytesBetween(proxy.record, 20, Infinity), 5000);
-  assert.equal(bytesBetween(proxy.record, 0, 10), 1000);
-  assert.deepEqual([proxy.record.pausedAt, proxy.record.resumedAt], [[10], [20]]);
-});
-
-test('a paused proxy backs up into the kernel: the server-side write stays queued, then every byte arrives', { timeout: 15_000 }, async t => {
-  const { proxy, client, upstream, setNow } = await proxied(t);
-  let received = 0;
-  client.on('data', (chunk: Buffer) => { received += chunk.length; });
-  setNow(10); proxy.pause();
-  const chunk = Buffer.alloc(64 * 1024);
-  let written = 0;
-  // Write until the bytes stay queued in user space after a pause of 200 ms: the kernel send and
-  // receive buffers are then full, because nothing reads the proxy's upstream socket.
-  for (let stuck = false; !stuck && written < 256 * 1024 * 1024;) {
-    upstream.write(chunk); written += chunk.length;
-    if (upstream.writableLength > 0) { await new Promise(r => setTimeout(r, 200)); stuck = upstream.writableLength > 0; }
+test('E6 observation is zero by default and only positive in rehearsal', () => {
+  const out = ['--out', '/x'];
+  assert.equal(parseOptions(out).e6ObserveMs, 0);
+  assert.equal(parseOptions([...out, '--e6-observe-ms', '0']).e6ObserveMs, 0);
+  assert.equal(parseOptions([...out, '--rehearsal', '--e6-observe-ms', '60000']).e6ObserveMs, 60_000);
+  assert.throws(() => parseOptions([...out, '--e6-observe-ms', '60000']), /requires --rehearsal/);
+  for (const value of [[], [''], ['NaN'], ['-1'], ['1.5'], ['--bogus']]) {
+    assert.throws(() => parseOptions([...out, '--rehearsal', '--e6-observe-ms', ...value]), /requires a non-negative integer/);
   }
-  assert.ok(upstream.writableLength > 0, 'the server-side write must stay queued while paused');
-  assert.equal(bytesBetween(proxy.record, 10, Infinity), 0, 'the proxy must not read while paused');
-  assert.equal(received, 0);
-  setNow(20); proxy.resume();
-  if (upstream.writableLength > 0) await once(upstream, 'drain');
-  while (received < written) await new Promise(r => setTimeout(r, 20));
-  assert.equal(received, written);
-  assert.equal(bytesBetween(proxy.record, 20, Infinity), written);
-});
-
-test('the stall proxy records closes and serves one WebSocket only', { timeout: 5000 }, async t => {
-  const { proxy, port, client, upstream, setNow } = await proxied(t);
-  const second = connect(port, '127.0.0.1');
-  await once(second, 'close');
-  setNow(30); upstream.destroy();
-  await once(client, 'close');
-  assert.deepEqual(proxy.record.closes, [{ at: 30, side: 'upstream' }]);
 });

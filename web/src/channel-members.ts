@@ -1,6 +1,8 @@
 import { createActivityTarget } from './activity'
 import * as api from './api'
-import { canLoadMemberList, memberError, type MemberListAccess } from './members'
+import { memberError } from './member-errors'
+import { canLoadMemberList, type MemberListAccess } from './members'
+import { createRequestDeadlines } from './request-deadlines'
 
 type Deps = Pick<typeof api, 'listChannelMembers' | 'addChannelMember' | 'removeChannelMember' | 'changeChannelManager'>
 export function channelMemberError(r: Exclude<api.Result<unknown>, { ok: true }>) {
@@ -21,16 +23,13 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
   memberListAccess: () => MemberListAccess = () => 'guest') {
   let state = { members: [] as api.ChannelMember[], loading: true, busy: false, error: '', unavailable: false, retryable: false }
   let generation = 0, closed = false
+  const deadlines = createRequestDeadlines()
   const listeners = new Set<() => void>()
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
   async function request<T>(run: () => Promise<api.Result<T>>, withTimeout = true): Promise<api.Result<T>> {
-    let timer: ReturnType<typeof setTimeout> | undefined
     // Keep same-session late 401 handling even after the display timeout or close.
     const pending = run().catch((): api.Result<T> => ({ ok: false, kind: 'network' })).then(r => { onResult(r); return r })
-    if (!withTimeout) return pending
-    try { return await Promise.race([pending, new Promise<api.Result<T>>(resolve => {
-      timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), 10_000)
-    })]) } finally { clearTimeout(timer) }
+    return withTimeout ? deadlines.wait(pending, { ok: false, kind: 'network' }, { timeoutMs: 10_000 }) : pending
   }
   const activityTarget = createActivityTarget({
     canLoad: () => canLoadMemberList(memberListAccess()),
@@ -48,7 +47,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
         set({ members: [], loading: false, unavailable: true, error: '', retryable: false })
       } else set({ members: [], loading: false, error: channelMemberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
     },
-    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+    terminal: r => !r.ok && r.kind === 'http' && (api.isSessionEnded(r) || r.status === 403 || r.status === 404),
   })
   const load = () => closed || state.unavailable ? Promise.resolve() : activityTarget.retryNow()
   async function mutate(run: () => Promise<api.Result<undefined>>, refreshChannels = false) {

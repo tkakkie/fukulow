@@ -1,21 +1,14 @@
-import { spawn, spawnSync } from 'node:child_process'
-import { constants, createReadStream } from 'node:fs'
-import { lstat, mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises'
-import { createHash, randomUUID } from 'node:crypto'
-import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import { backup } from './backup.ts'
-import { checksum, sha256, verifiedGeneration, type BackupBucket, type Manifest, parseManifest } from './backup-r2-model.ts'
+import type { Runner } from './backup-curl.ts'
+import { checksum, type BackupBucket, type Manifest } from './backup-r2-inventory.ts'
 import { listObjects } from './backup-r2-list.ts'
+import { sha256 } from './backup-r2-model.ts'
+import { fileDigest, publish, readbackDigest, type UploadBucket } from './backup-r2-publish.ts'
 import { acquireLocalLock, assertLocalLock, privateDirectory, sweepPartials } from './backup-safety.ts'
 
-export interface Request { method: 'PUT' | 'HEAD' | 'GET' | 'DELETE'; key: string; headers: Record<string, string>; query?: Record<string, string>; body?: Buffer; digestOnly?: boolean }
-export interface Response { status: number; headers: Record<string, string>; body: Buffer; digest?: { sha256: string; size: number } }
-export type Runner = (request: Request) => Promise<Response>
-export type UploadBucket = Pick<BackupBucket, 'put' | 'head' | 'get'> & {
-  readback?: (key: string) => Promise<{ sha256: string; size: number }>
-}
 export function objectTransport(run: Runner): BackupBucket & UploadBucket {
   return {
     list: () => listObjects(run),
@@ -47,92 +40,6 @@ export function objectTransport(run: Runner): BackupBucket & UploadBucket {
   }
 }
 
-// Config contains credentials only outside the checkout; curl diagnostics never escape.
-export async function privateCurlConfig(configFile: string): Promise<string> {
-  try {
-    const root = resolve(fileURLToPath(new URL('../', import.meta.url)))
-    const path = resolve(configFile), info = await lstat(path)
-    const canonical = await realpath(path)
-    if (canonical.startsWith(await realpath(root) + sep) || !info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600) throw new Error('Private external curl config required')
-    return path
-  } catch { throw new Error('Private external curl config required') }
-}
-// Operator JSON and recipient reads share the curl config privacy contract, with
-// descriptor checks so FIFOs and symlink replacements cannot block or escape it.
-export async function readPrivateFile(configFile: string): Promise<string> {
-  const path = await privateCurlConfig(configFile)
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-  try {
-    const info = await handle.stat()
-    if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o600 || info.size > 65_536) throw new Error('Private external config required')
-    return await handle.readFile('utf8')
-  } finally { await handle.close() }
-}
-export async function curlRunner(configFile: string, baseUrl: string, execute = executeCurl): Promise<Runner> {
-  const path = await privateCurlConfig(configFile)
-  if (!/^https:\/\//.test(baseUrl) || /[\r\n"\\]/.test(baseUrl)) throw new Error('Invalid transport configuration')
-  return async request => {
-    const directory = await mkdtemp(join(tmpdir(), 'backup-curl-'))
-    try {
-      const headersFile = join(directory, 'headers'), bodyFile = join(directory, 'body')
-      const args = ['--disable', '--config', path, '--aws-sigv4', 'aws:amz:auto:s3', '--silent', '--retry', '3', '--retry-all-errors', '--max-time', '120', '--retry-max-time', '480', '--dump-header', headersFile, '--output', bodyFile, '--request', request.method]
-      if (request.method === 'HEAD') args.push('--head')
-      for (const [key, value] of Object.entries(request.headers)) args.push('--header', `${key}: ${value}`)
-      // URL is supplied via stdin config, so private endpoints never enter argv.
-      const query = request.query ? '?' + new URLSearchParams(request.query).toString() : ''
-      const input = `url = "${baseUrl.replace(/\/$/, '')}/${request.key.split('/').map(encodeURIComponent).join('/')}${query}"\n`
-      if (request.body) {
-        const { writeFile } = await import('node:fs/promises')
-        const upload = join(directory, 'upload')
-        await writeFile(upload, request.body, { mode: 0o600 })
-        args.push('--data-binary', '@' + upload)
-      }
-      args.push('--config', '-')
-      await execute(args, input)
-      const raw = await readFile(headersFile, 'utf8')
-      const block = raw.trim().split(/\r?\n\r?\n/).at(-1)!
-      const headers = Object.fromEntries(block.split(/\r?\n/).slice(1).map(line => { const i = line.indexOf(':'); return [line.slice(0, i).toLowerCase(), line.slice(i + 1).trim()] }))
-      return { status: Number(block.split(' ')[1]), headers,
-        body: request.digestOnly ? Buffer.alloc(0) : await readFile(bodyFile),
-        ...(request.digestOnly ? { digest: await fileDigest(bodyFile) } : {}) }
-    } finally { await rm(directory, { recursive: true, force: true }) }
-  }
-}
-
-export async function publish(options: {
-  bucket: UploadBucket; ciphertext: Buffer; manifest: Manifest
-  now: () => number; attempt?: () => string
-}): Promise<string> {
-  const { bucket, ciphertext, manifest, now } = options
-  if (sha256(ciphertext) !== manifest.ciphertext.sha256 || ciphertext.length !== manifest.ciphertext.size) throw new Error('Local ciphertext mismatch')
-  const body = Buffer.from(JSON.stringify(manifest))
-  parseManifest(body)
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const suffix = (options.attempt ?? randomUUID)()
-    if (!/^[a-zA-Z0-9-]+$/.test(suffix)) throw new Error('Invalid attempt')
-    const prefix = `backups/${manifest.captureTime}-${suffix}/`
-    try {
-      for (const name of ['archive.dump.age', 'manifest.json', 'verified.json']) {
-        const bytes = name === 'archive.dump.age' ? ciphertext : name === 'manifest.json' ? body
-          : Buffer.from(JSON.stringify({ manifestSha256: sha256(body), verifiedTime: new Date(now()).toISOString() }))
-        try { await bucket.put(prefix + name, bytes) } catch { /* Lost PUT responses are resolved by HEAD. */ }
-        const stored = await bucket.head(prefix + name)
-        if (!stored || stored.size !== bytes.length || stored.checksum !== checksum(sha256(bytes))) throw new Error('Upload verification failed')
-        const readback = await readbackDigest(bucket, prefix + name)
-        if (readback.size !== bytes.length || readback.sha256 !== sha256(bytes)) throw new Error('Read-back mismatch')
-      }
-      await verifiedGeneration(bucket, prefix, now())
-      return prefix
-    } catch { /* Never overwrite an uncertain generation; use a new suffix. */ }
-  }
-  throw new Error('Backup upload failed')
-}
-
-export async function fileDigest(path: string) {
-  const hash = createHash('sha256'); let size = 0
-  for await (const chunk of createReadStream(path)) { hash.update(chunk); size += chunk.length }
-  return { sha256: hash.digest('hex'), size }
-}
 export async function runBackup(options: {
   directory: string; recipient: string; bucket: UploadBucket
   localLock?: () => void
@@ -180,7 +87,7 @@ async function runBackupLocked(options: Parameters<typeof runBackup>[0]) {
 }
 
 export async function recheckNewest(bucket: BackupBucket & UploadBucket, now: number) {
-  const { inventory } = await import('./backup-r2-model.ts')
+  const { inventory } = await import('./backup-r2-inventory.ts')
   const newest = (await inventory(bucket, now)).verified.find(g => g.prefix.startsWith('backups/'))
   if (!newest) throw new Error('No verified restore source')
   const body = await readbackDigest(bucket, newest.prefix + 'archive.dump.age')
@@ -205,20 +112,4 @@ export async function dailyBackup(options: Parameters<typeof runBackup>[0] & { b
     try { await options.notify('backup-failed') } catch { /* Keep notification diagnostics private. */ }
     throw new Error('Backup failed (diagnostics suppressed)')
   }
-}
-
-export async function executeCurl(args: string[], input: string): Promise<void> {
-  await new Promise<void>((accept, reject) => {
-    const child = spawn('curl', args, { stdio: ['pipe', 'ignore', 'ignore'] })
-    child.on('error', () => reject(new Error('Transport failed')))
-    child.on('close', code => code === 0 ? accept() : reject(new Error('Transport failed')))
-    child.stdin.on('error', () => {})
-    child.stdin.end(input)
-  })
-}
-
-async function readbackDigest(bucket: UploadBucket, key: string) {
-  if (bucket.readback) return bucket.readback(key)
-  const body = await bucket.get(key)
-  return { sha256: sha256(body), size: body.length }
 }

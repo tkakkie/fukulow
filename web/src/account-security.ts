@@ -1,4 +1,4 @@
-import { putPassword, revokeOtherSessions, type ChangePasswordRequest, type RevokeOtherSessionsRequest, type Result } from './api'
+import { isSessionEnded, putPassword, revokeOtherSessions, type ChangePasswordRequest, type RevokeOtherSessionsRequest, type Result } from './api'
 
 export type SecurityAction = 'password' | 'sessions'
 export type SecurityError = 'incorrect' | 'invalid_new' | 'invalid' | 'throttled' | 'unconfirmed' | null
@@ -18,7 +18,7 @@ export function createAccountSecurity(onEnded: () => void, deps: Dependencies = 
     update({ busy: true, error: null, success: null })
     const result = await call()
     if (closed) return false
-    if (!result.ok && result.kind === 'http' && result.status === 401) {
+    if (isSessionEnded(result)) {
       update({ busy: false, error: null, success: null })
       onEnded()
       return false

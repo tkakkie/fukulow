@@ -1,9 +1,9 @@
 // Publish gate (#808): the tagged commit is on main and its main push CI succeeded.
-import { pathToFileURL } from 'node:url'
 
-// Every workflow that runs on a main push. Their jobs include all required checks that
-// main commits get (web, server, docker, lint, migrations, checks, scan); smoke and
-// budget-changes run only on the pull request. e2e-compose is the release-candidate gate.
+// The workflows that verify a main push. Their jobs include all required checks that
+// main commits get (web, server, docker, lint, migrations, checks, scan); budget-changes
+// and smoke run only on the pull request. e2e-compose is the release-candidate gate.
+// docker-cache and e2e-cache only write caches on main (#926).
 export const requiredWorkflows = ['.github/workflows/ci.yml', '.github/workflows/e2e-compose.yml',
   '.github/workflows/gitleaks.yml', '.github/workflows/security.yml']
 
@@ -32,7 +32,7 @@ async function api(path: string): Promise<unknown> {
   return response.json()
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (import.meta.main) {
   const { GITHUB_REPOSITORY: repository, RELEASE_SHA: sha } = process.env
   if (!repository || !sha || !/^[0-9a-f]{40}$/.test(sha) || !process.env.GITHUB_TOKEN) {
     throw new Error('GITHUB_REPOSITORY, RELEASE_SHA (40 hex) and GITHUB_TOKEN are required')

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 pub(super) async fn topic_send(f: &Fixture, token: &str, channel: Uuid, key: Uuid) -> Value {
     let response = request(
@@ -14,6 +15,44 @@ pub(super) async fn topic_send(f: &Fixture, token: &str, channel: Uuid, key: Uui
 }
 
 #[fukulow_test::test]
+async fn newer_projections_leave_replay_cursor_unchanged(pool: PgPool) {
+    let f = fixture(&pool).await;
+    topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    let mut live = f.server.connect(&f.token).await;
+    subscribe(&mut live, f.channel, 1).await;
+    ready(&mut live, f.channel, 1).await;
+    drop(live);
+
+    let second = topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    let third = topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    for (route, field) in [("timeline", "items"), ("topics", "topics")] {
+        let response = request(
+            &f.app,
+            "GET",
+            &format!(
+                "/api/v1/channels/{}/{route}?as_of_seq=3&after_position=1",
+                f.channel
+            ),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(page["as_of_seq"], 3);
+        assert_eq!(page[field].as_array().unwrap().len(), 1);
+    }
+
+    let mut reconnect = f.server.connect(&f.token).await;
+    subscribe(&mut reconnect, f.channel, 1).await;
+    assert_eq!(event(&mut reconnect).await["message"], second);
+    assert_eq!(event(&mut reconnect).await["message"], third);
+    ready(&mut reconnect, f.channel, 3).await;
+}
+
+#[fukulow_test::test]
 async fn topic_ack_history_live_reconnect_and_shared_gap_payloads_are_identical(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut live = f.server.connect(&f.token).await;
@@ -22,14 +61,14 @@ async fn topic_ack_history_live_reconnect_and_shared_gap_payloads_are_identical(
     let first_key = Uuid::new_v4();
     let gate = messages::pause_publication(first_key);
     let first = topic_send(&f, &f.token, f.channel, first_key).await;
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     let second = topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
     // Second publication recovers the committed prefix through shared fan-out.
     assert_eq!(event(&mut live).await["message"], first);
     assert_eq!(event(&mut live).await["message"], second);
     assert!(first["topic_id"].is_string());
     assert_eq!(first["topic_id"], second["topic_id"]);
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let history = request(
         &f.app,
@@ -107,9 +146,9 @@ async fn topic_live_replay_member_revision_and_removed_grant_denials_have_positi
         subscribe(&mut live, target, 1).await;
         ready(&mut live, target, 1).await;
         let mut replay = f.server.connect(&token).await;
-        let gate = pause(target);
+        let gate = hooks::register_replay(target);
         subscribe(&mut replay, target, 0).await;
-        entered(&gate).await;
+        gate.entered().await;
         if loss == "grant" {
             sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(f.organization).bind(target).bind(viewer).execute(&pool).await.unwrap();
         } else {
@@ -130,7 +169,7 @@ async fn topic_live_replay_member_revision_and_removed_grant_denials_have_positi
                 .unwrap();
             }
         }
-        gate.release.add_permits(1);
+        gate.release();
         if loss == "grant" {
             access_loss::access_lost(&mut replay, target).await;
         } else {
@@ -185,14 +224,13 @@ async fn websocket_subscribe_succeeds_while_topic_projection_queries_are_in_flig
             .await
         });
     }
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND relation='topics'::regclass AND NOT granted")
-                .fetch_one(&pool).await.unwrap();
-            if waiting == 4 { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Relation("topics"),
+        Count::Exactly(4),
+        Duration::from_secs(2),
+    )
+    .await;
     let mut socket = f.server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
     tokio::time::timeout(Duration::from_secs(2), ready(&mut socket, f.channel, 0))

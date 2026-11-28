@@ -74,7 +74,6 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
             };
             sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed prefix',$4 FROM generate_series(1,121) n")
             .bind(org).bind(channel_id).bind(sender).bind(topic).execute(&pool).await.unwrap();
-            seed_channel_log(&pool).await;
             let first = replay_page(&pool, org, channel_id, 0, 1)
                 .await
                 .unwrap()
@@ -110,11 +109,7 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
             delivery
                 .notification(org, channel_id, 102)
                 .spawn(pool.clone(), page_two_target);
-            tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            gate.entered().await;
             if private {
                 sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                 .bind(org).bind(channel_id).bind(revoked_between_pages).execute(&pool).await.unwrap();
@@ -128,7 +123,7 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
                 .await
                 .unwrap();
             }
-            gate.release.add_permits(1);
+            gate.release();
             delivery.flush().await;
             let last = replay_page(&pool, org, channel_id, 120, 121)
                 .await
@@ -191,7 +186,6 @@ async fn shared_gap_recovery_accepts_one_page_and_latches_above_the_bound(pool: 
         assert!(!queue.notification_failed.is_failed());
         sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed prefix' FROM generate_series(1,$4::bigint) n")
             .bind(org).bind(channel).bind(sender).bind(gap + 2).execute(&pool).await.unwrap();
-        seed_channel_log(&pool).await;
         let last = replay_page(&pool, org, channel, gap, gap + 1)
             .await
             .unwrap()
@@ -240,7 +234,6 @@ async fn shared_gap_authorization_failure_sets_overflow_and_advances_cursor(pool
     early.complete();
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed prefix' FROM generate_series(1,4) n")
         .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
-    seed_channel_log(&pool).await;
     let target = replay_page(&pool, org, channel, 2, 3)
         .await
         .unwrap()
@@ -292,7 +285,6 @@ async fn shared_gap_query_failure_latches_only_affected_channel_for_replay(pool:
     other_org.subscribe(channel);
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),'committed prefix' FROM generate_series(1,3) n")
         .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
-    seed_channel_log(&pool).await;
     let last = replay_page(&pool, org, channel, 2, 3)
         .await
         .unwrap()

@@ -18,7 +18,7 @@ export type NavigationIntent =
   | { type: 'reply-back' }
   | { type: 'close' }
   | { type: 'list' }
-export type NavigationFocus = 'composer' | 'topic-summary' | 'heading' | 'tab' | 'reply-composer' | 'opener' | 'list'
+export type NavigationFocus = 'composer' | 'composer-if-unfocused' | 'topic-summary' | 'heading' | 'tab' | 'reply-composer' | 'opener' | 'list'
 export type NavigationSnapshot = { target: NavigationTarget | null; searchResult?: SearchResultTarget; previousTab: PanelTab | null; focus: NavigationFocus; revision: number }
 export type NavigationBrowser = Pick<Window, 'location' | 'history' | 'addEventListener' | 'removeEventListener'>
 
@@ -67,7 +67,8 @@ export function createNavigation(browser: NavigationBrowser = window) {
     initialize(target: NavigationTarget) {
       if (snapshot.target?.organizationId === target.organizationId) return
       browser.history.replaceState(null, '', serializeNavigation(target))
-      publish(target, 'composer')
+      // The initial Channel list can resolve after the user has started interacting.
+      publish(target, 'composer-if-unfocused')
     },
     getOpener: () => opener,
     getReturningTopicId: () => returningTopicId,

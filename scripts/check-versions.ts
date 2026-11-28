@@ -7,7 +7,7 @@ export type Entry = {
   latest?: { endoflife: string, lts?: boolean } | { github: string },
 }
 
-export const requiredComponents = ['Rust', 'Node.js', 'PostgreSQL', 'Debian runtime base', 'Caddy', 'nginx', 'k6',
+const requiredComponents = ['Rust', 'Node.js', 'PostgreSQL', 'Debian runtime base', 'Caddy', 'nginx', 'k6',
   'wasm-bindgen-cli', 'cargo-about', 'Playwright', 'axum', 'tokio', 'sqlx', 'Svelte', 'Vite', 'TypeScript']
 
 // versions.json (#512): every entry names the version pinned in its file; one capture of `pattern` must equal it.
@@ -92,14 +92,21 @@ export function checkVersions(files: {
   assert.match(files.acme, /^export const pebbleImage = 'ghcr\.io\/letsencrypt\/pebble:\d+\.\d+\.\d+@sha256:[a-f0-9]{64}'$/m, 'Pebble must pin exact tag and digest')
 }
 
-if (import.meta.main) {
-  const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
-  checkVersions({ rust: read('rust-toolchain.toml'), node: read('.node-version'),
+// The repository files checkVersions reads, shared by the CLI and its test.
+export const readRepoFile = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+
+export function readVersionInputs(): Parameters<typeof checkVersions>[0] {
+  const read = readRepoFile
+  return { rust: read('rust-toolchain.toml'), node: read('.node-version'),
     webNode: JSON.parse(read('web/package.json')).engines.node,
     loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
     playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
     webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
     makefile: read('Makefile'), dmsRecord: read('load/dms-record.ts'),
-    compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') })
-  checkInventory(JSON.parse(read('versions.json')).entries, read)
+    compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') }
+}
+
+if (import.meta.main) {
+  checkVersions(readVersionInputs())
+  checkInventory(JSON.parse(readRepoFile('versions.json')).entries, readRepoFile)
 }

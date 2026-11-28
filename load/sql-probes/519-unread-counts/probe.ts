@@ -1,17 +1,28 @@
 // Pure helpers for the #519 Channel-list counts probe (run.ts does the I/O).
+import { timed } from '../../harness-core/thermal.ts';
 
 export const organization = '00000000-0000-4000-8000-00000000000a';
 export const member = "md5('user-2')::uuid";
 export const channels = "(SELECT array_agg(md5('chan-'||g)::uuid ORDER BY g) FROM generate_series(1,200) g)::uuid[]";
 export type Arm = 'current' | 'a3';
 
-// The Channel-list counts SQL as committed in unread.rs at the pinned commit.
+// The Channel-list counts SQL at the pinned commit.
 export function extractListCounts(source: string): string {
-  const parts = source.split('pub(super) const LIST_COUNTS_SQL: &str = r#"');
+  const parts = source.split(/pub\((?:super|in crate::messages)\) const LIST_COUNTS_SQL: &str = r#"/);
   if (parts.length !== 2) throw new Error('LIST_COUNTS_SQL not found exactly once');
   const end = parts[1].indexOf('"#;');
   if (end < 0) throw new Error('LIST_COUNTS_SQL is not terminated');
   return parts[1].slice(0, end).trim();
+}
+
+export function listCountsAtCommit(git: (...args: string[]) => string, commit: string): string {
+  let source: string;
+  try {
+    source = git('show', `${commit}:server/src/messages/unread/counts.rs`);
+  } catch {
+    source = git('show', `${commit}:server/src/messages/unread.rs`);
+  }
+  return extractListCounts(source);
 }
 
 // Replace $1..$4 with literals so one checksum query can wrap the counts query.
@@ -70,6 +81,46 @@ export function logLatenciesMs(log: string): number[] {
     if (fields.length < 6 || !Number.isFinite(us)) throw new Error(`bad pgbench log line: ${line}`);
     return us / 1000;
   });
+}
+
+// pgbench's own measured interval from its per-transaction log (`client tx latency_us script
+// epoch_s epoch_us`, the stamp being the transaction's end): the earliest transaction start to the
+// latest end, on the kernel wall clock the launcher's thermal sampler also stamps (#796).
+export type PgbenchWindow = { startMs: number; endMs: number };
+export function logWindow(log: string): PgbenchWindow {
+  let startMs = Infinity;
+  let endMs = -Infinity;
+  for (const line of log.split('\n').filter(l => l.trim() !== '')) {
+    const f = line.trim().split(/\s+/).map(Number);
+    if (f.length < 6 || !f.slice(0, 6).every(Number.isFinite)) throw new Error(`bad pgbench log line: ${line}`);
+    const end = f[4] * 1000 + f[5] / 1000;
+    startMs = Math.min(startMs, end - f[2] / 1000);
+    endMs = Math.max(endMs, end);
+  }
+  if (!Number.isFinite(startMs)) throw new Error('empty pgbench log');
+  return { startMs, endMs };
+}
+
+// One measured pgbench run of a send block, in the order final.ts needs: the run itself (timed,
+// so the wrapper window covers the run only), then the post-run step (the WAL query), then the
+// per-transaction log, whose latencies and window are the block's records.
+export function measuredPgbench<T>(steps: { run: () => string; after: () => T; log: () => string }, clock?: Parameters<typeof timed>[1]) {
+  const { value: output, window: measuredWindow } = timed(steps.run, clock);
+  return pgbenchEvidence(output, measuredWindow, steps);
+}
+
+export function pgbenchEvidence<T>(output: string, measuredWindow: ReturnType<typeof timed>['window'],
+  steps: { after: () => T; log: () => string }) {
+  const after = steps.after();
+  const errors: string[] = [];
+  let latencies: number[] = [];
+  let pgbenchWindow: PgbenchWindow | null = null;
+  try {
+    const log = steps.log();
+    latencies = logLatenciesMs(log);
+    pgbenchWindow = logWindow(log);
+  } catch (e) { errors.push(`latency log: ${e instanceof Error ? e.message : String(e)}`); }
+  return { output, measuredWindow, after, latencies, pgbenchWindow, errors };
 }
 
 // §10 step 1 stop rule, fixed before the run: per pair, a3-final against current;
@@ -179,7 +230,12 @@ export type BlockOutcome<H> = { crossed: boolean; checkpointLog: CheckpointWindo
 export function runBlock<R extends { crossed: boolean; errors: string[] }, H extends { busy: boolean }>(steps: {
   label: string; measure: () => R; closeCheckpoint: () => CheckpointWindow; hostAfter?: () => H; keep: (row: R & BlockOutcome<H>) => void;
 }): R & BlockOutcome<H> {
-  const measured = steps.measure();
+  return finishBlock(steps.measure(), steps);
+}
+
+export function finishBlock<R extends { crossed: boolean; errors: string[] }, H extends { busy: boolean }>(measured: R, steps: {
+  label: string; closeCheckpoint: () => CheckpointWindow; hostAfter?: () => H; keep: (row: R & BlockOutcome<H>) => void;
+}): R & BlockOutcome<H> {
   const row: R & BlockOutcome<H> = { ...measured, checkpointLog: null, hostAfter: null, errors: [...measured.errors] };
   try {
     row.checkpointLog = steps.closeCheckpoint();
@@ -198,7 +254,7 @@ export function runBlock<R extends { crossed: boolean; errors: string[] }, H ext
 // Send blocks in run order: each pair keeps its fixed arm order, and every block gets its own
 // database cloned from the arm's template, so no block inherits rows or vacuum debt from another.
 export type SendBlock = { order: number; pair: number; arm: string; db: string };
-export function sendBlocks(pairs: string[][]): SendBlock[] {
+export function sendBlocks<A extends string>(pairs: A[][]): (SendBlock & { arm: A })[] {
   return pairs.flatMap((pair, i) => {
     if (pair.length !== 2 || new Set(pair).size !== 2) throw new Error('each pair needs both arms once');
     return pair.map(arm => ({ pair: i + 1, arm }));

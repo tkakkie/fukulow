@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -259,14 +260,13 @@ async fn invite_acceptance_rechecks_issuer_after_waiting_for_organization_lock(p
             let input = accept_input(&i, &email);
             async move { assert_issuer_denied(&app, &pool, org, Some(&recipient), input).await }
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT organization_id FROM organizations%')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting { break; }
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::LockQuery("SELECT organization_id FROM organizations%"),
+            Count::AtLeast(1),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         tx.commit().await.unwrap();
         task.await.unwrap();
     }
@@ -313,7 +313,7 @@ async fn members_invites_roles_and_capabilities_denial_matrix_has_positive_contr
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let org = org(&pool).await;
     let foreign = org_fn(&pool).await;
     let (_, target, _, _) = account(&pool, org, Role::Member).await;
@@ -476,7 +476,7 @@ async fn invite_existing_account_requires_signed_in_matching_account_and_is_sing
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let org = org(&pool).await;
     let other = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
@@ -585,7 +585,7 @@ async fn new_account_acceptance_is_atomic_and_concurrent_consumption_has_one_win
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let org = org(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let app = crate::app(AppState::for_test(pools.app.clone()).await);
@@ -858,9 +858,13 @@ async fn queued_invite_expiry_and_new_account_uniqueness_race_never_attach_by_em
     assert_eq!(memberships, 1);
     let (_, _, email, token) = account(&pool, other, Role::Member).await;
     let i = invite(&app, org, &owner, &email, Role::Member).await;
+    let invite_id = i["id"].as_str().unwrap().parse::<Uuid>().unwrap();
     let mut tx = pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
     members::lock_organization(&mut tx, org).await.unwrap();
-    sqlx::query("UPDATE invites SET expires_at=clock_timestamp()+interval '150 milliseconds' WHERE organization_id=$1 AND id=$2").bind(org).bind(i["id"].as_str().unwrap().parse::<Uuid>().unwrap()).execute(&pool).await.unwrap();
     let task = tokio::spawn({
         let app = app.clone();
         async move {
@@ -874,7 +878,24 @@ async fn queued_invite_expiry_and_new_account_uniqueness_race_never_attach_by_em
             .await
         }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    wait_blocked(
+        &pool,
+        Blocked::LockQueryBehind(
+            "SELECT organization_id FROM organizations%FOR NO KEY UPDATE",
+            blocker,
+        ),
+        Count::Exactly(1),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE invites SET expires_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(org)
+    .bind(invite_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(task.await.unwrap().status(), StatusCode::NOT_FOUND);
 }

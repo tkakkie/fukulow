@@ -37,6 +37,7 @@
 - #294 A (#315) limits Guest discovery to shared grantees and uses readable authors (#301) to resolve past names without widening access.
 - #305 Owner may deactivate another active Member and Admin only non-Owners. Authorize before disclosure and check target before guards to prevent leaks/self-lockout.
 - #305 owns the deactivation transaction and post-COMMIT signal in a detached task so cancellation cannot lose 4003.
+- #891 Compose table-owned `*_sql`/`*_SQL` for one authorization/data snapshot. Keep aliases `u` Member, `c` Channel, `cm` grant. Reuse Organization `$1` in the context wrapper. `current_member_sql` reserves `$2` Member, `$3` revision. `member_visibility_sql` adds `$4` Channel. `candidate_members_sql` binds IDs at `$3`, leaving `$2` Channel and `$4` revisions to its callers. Correlated candidates take caller columns. Role lists take no binds. Append binds after reserved slots.
 
 ## Password and other Sessions (#304)
 

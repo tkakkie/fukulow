@@ -10,11 +10,12 @@
   import { focusTarget, type SkipLinkTargetId } from './focus-management'
   import InviteAccept from './InviteAccept.svelte'
   import Logo from './Logo.svelte'
-  import { inviteFromLocation } from './members'
-  import { inviteAcceptanceAdapter } from './members.svelte'
+  import { inviteFromLocation } from './invite-acceptance'
+  import { inviteAcceptanceAdapter } from './invite-acceptance.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Input from './ui/Input.svelte'
+  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
   import Workspace from './Workspace.svelte'
@@ -22,7 +23,7 @@
 
   const invitation = inviteAcceptanceAdapter(inviteFromLocation())
   const navigation = createNavigation()
-  const auth = createAuth()
+  const auth = createAuth(undefined, navigation)
   $effect(() => () => navigation.destroy())
   $effect(() => navigation.subscribe(() => {
     const target = navigation.get().target
@@ -174,7 +175,6 @@
           <Workspace
             {session}
             {navigation}
-            canCreateChannels={auth.capabilitiesPending ? null : organization.organization.capabilities.can_create_channels.allowed}
             members={auth.members}
             {organization}
             organizations={identity.organizations}
@@ -216,15 +216,9 @@
           </header>
 
           {#if auth.organizationStatus === 'unavailable'}
-            <StatusBanner
-              tone="danger"
-              role="alert"
-              message="この組織は利用できません。"
-              detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-              actionLabel="メンバー資格を再確認"
-              onaction={() => void auth.selectOrganization(auth.selectedOrganizationId)}
-              secondaryActionLabel={otherOrg ? '組織を切り替える' : undefined}
-              onsecondaryaction={otherOrg ? () => void auth.selectOrganization(otherOrg.organization_id) : undefined}
+            <OrganizationUnavailableBanner
+              onrecheckmembership={() => void auth.selectOrganization(auth.selectedOrganizationId)}
+              onswitchorganization={otherOrg ? () => void auth.selectOrganization(otherOrg.organization_id) : undefined}
             />
           {:else if auth.organizationStatus === 'error' || loadingTimedOut}
             <StatusBanner

@@ -71,7 +71,6 @@ async fn skewed(pool: &PgPool) -> Skewed {
     .execute(pool)
     .await
     .unwrap();
-    seed_channel_log(pool).await;
     sqlx::query("ANALYZE messages, channel_log, channels, users, message_mentions")
         .execute(pool)
         .await
@@ -153,6 +152,21 @@ fn check_identity_reads(root: &Value, case: &str, positions: i64, failures: &mut
 #[fukulow_test::test]
 async fn page_mention_reads_are_key_bounded_under_skewed_organizations(pool: PgPool) {
     let s = skewed(&pool).await;
+    check_page_mention_reads(&pool, &s).await;
+}
+
+#[fukulow_test::test]
+async fn page_mention_reads_are_key_bounded_with_all_visible_mentions(pool: PgPool) {
+    let s = skewed(&pool).await;
+    // Make the Mention pages all-visible before planning, independent of autovacuum (#932).
+    sqlx::query("VACUUM message_mentions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    check_page_mention_reads(&pool, &s).await;
+}
+
+async fn check_page_mention_reads(pool: &PgPool, s: &Skewed) {
     let app = crate::test_app_pool(pool.clone()).await;
     let sql = crate::database::organization_statement_sql(&log::authorized_page_sql());
     // The REST page reads its 200-row limit plus one lookahead row.

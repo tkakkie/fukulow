@@ -1,7 +1,9 @@
-import { flushSync, mount, unmount } from 'svelte'
+import { flushSync, mount, tick, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import Composer from './Composer.svelte'
+import SectionDialogs, { type SectionDialogMode } from './SectionDialogs.svelte'
 import { installMiniDom, MiniDomEvent } from './svelte-dom-test-helpers'
+import Dialog from './ui/Dialog.svelte'
 import Input from './ui/Input.svelte'
 import MessageRow from './ui/MessageRow.svelte'
 
@@ -387,5 +389,544 @@ describe('MessageRow.svelte timestamp formatting (#833)', () => {
         process.env.TZ = prevTz
       }
     }
+  })
+})
+
+describe('Dialog form mode and SectionDialogs (#838)', () => {
+  it('renders without <form> by default and wraps body and actions in <form> when form=true', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const onconfirm = vi.fn()
+    const oncancel = vi.fn()
+    const state = $state({ form: false, busy: false })
+
+    const instance = mount(Dialog, {
+      target: host as unknown as Element,
+      props: {
+        open: true,
+        get form() { return state.form },
+        get busy() { return state.busy },
+        title: 'テスト',
+        confirmLabel: '確定',
+        onconfirm,
+        oncancel,
+      },
+    })
+    flushSync()
+
+    // Default: no <form>, confirm button is type="button".
+    expect(host.querySelector('form')).toBeNull()
+    const buttonsDefault = host.querySelectorAll('button')
+    expect(buttonsDefault).toHaveLength(2)
+    expect(buttonsDefault[0].getAttribute('type')).toBe('button')
+    expect(buttonsDefault[1].getAttribute('type')).toBe('button')
+    buttonsDefault[1].click()
+    expect(onconfirm).toHaveBeenCalledTimes(1)
+
+    // form=true: wraps actions (and body) in <form>, confirm button is type="submit".
+    onconfirm.mockClear()
+    state.form = true
+    flushSync()
+
+    const formEl = host.querySelector('form.ui-dialog__form')
+    expect(formEl).not.toBeNull()
+    expect(formEl?.querySelector('.ui-dialog__actions')).not.toBeNull()
+    const buttonsForm = formEl!.querySelectorAll('button')
+    expect(buttonsForm).toHaveLength(2)
+    expect(buttonsForm[0].getAttribute('type')).toBe('button')
+    expect(buttonsForm[1].getAttribute('type')).toBe('submit')
+
+    // Clicking submit button fires onconfirm exactly once.
+    buttonsForm[1].click()
+    expect(onconfirm).toHaveBeenCalledTimes(1)
+
+    // Clicking cancel button fires oncancel and not onconfirm.
+    buttonsForm[0].click()
+    expect(oncancel).toHaveBeenCalledTimes(1)
+    expect(onconfirm).toHaveBeenCalledTimes(1)
+
+    // Form submit event calls preventDefault and onconfirm.
+    const submitEv = new MiniDomEvent('submit', { bubbles: true, cancelable: true })
+    formEl!.dispatchEvent(submitEv)
+    expect(submitEv.defaultPrevented).toBe(true)
+    expect(onconfirm).toHaveBeenCalledTimes(2)
+
+    // While busy, form submit does nothing and buttons are disabled.
+    state.busy = true
+    flushSync()
+    expect(buttonsForm[0].disabled).toBe(true)
+    expect(buttonsForm[1].disabled).toBe(true)
+    const busySubmit = new MiniDomEvent('submit', { bubbles: true, cancelable: true })
+    formEl!.dispatchEvent(busySubmit)
+    expect(busySubmit.defaultPrevented).toBe(true)
+    expect(onconfirm).toHaveBeenCalledTimes(2)
+
+    await unmount(instance)
+  })
+
+  it('SectionDialogs validates on form submit, guards busy, and has no Enter keydown handler', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const oncreate = vi.fn()
+    const onrename = vi.fn()
+    const ondelete = vi.fn()
+    const onmove = vi.fn()
+    const onclose = vi.fn()
+    const state = $state<{ mode: SectionDialogMode; busy: boolean }>({
+      mode: { kind: 'create' },
+      busy: false,
+    })
+
+    const instance = mount(SectionDialogs, {
+      target: host as unknown as Element,
+      props: {
+        get mode() { return state.mode },
+        get busy() { return state.busy },
+        oncreate,
+        onrename,
+        ondelete,
+        onmove,
+        onclose,
+      },
+    })
+    flushSync()
+
+    const formEl = host.querySelector('form.ui-dialog__form')
+    expect(formEl).not.toBeNull()
+    const input = formEl!.querySelector('input[name="section_name"]')!
+    expect(input).not.toBeNull()
+    const submitBtn = formEl!.querySelector('button[type="submit"]')!
+    expect(submitBtn).not.toBeNull()
+    expect(submitBtn.textContent).toContain('作成する')
+
+    // Invalid empty name shows validateSectionName error and does not call oncreate.
+    formEl!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    flushSync()
+    expect(oncreate).not.toHaveBeenCalled()
+    expect(formEl!.querySelector('[role="alert"]')?.textContent).toContain('セクション名を入力してください。')
+
+    // Valid name submits via form and calls oncreate once.
+    input.value = '開発'
+    input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    expect(formEl!.querySelector('[role="alert"]')).toBeNull()
+
+    // IME composition Enter does not submit.
+    const composingEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    composingEnter.key = 'Enter'
+    composingEnter.isComposing = true
+    input.dispatchEvent(composingEnter)
+    expect(oncreate).not.toHaveBeenCalled()
+
+    const keyCode229Enter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    keyCode229Enter.key = 'Enter'
+    keyCode229Enter.keyCode = 229
+    input.dispatchEvent(keyCode229Enter)
+    expect(oncreate).not.toHaveBeenCalled()
+
+    // Plain Enter confirms via native implicit form submit (no JS keydown preventDefault).
+    const enterKey = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    enterKey.key = 'Enter'
+    input.dispatchEvent(enterKey)
+    flushSync()
+    expect(enterKey.defaultPrevented).toBe(false)
+    expect(oncreate).toHaveBeenCalledTimes(1)
+    expect(oncreate).toHaveBeenCalledWith('開発')
+
+    // While busy, Enter and form submit do nothing.
+    state.busy = true
+    flushSync()
+    expect(input.disabled).toBe(true)
+    expect(submitBtn.disabled).toBe(true)
+    input.dispatchEvent(Object.assign(new MiniDomEvent('keydown', { bubbles: true, cancelable: true }), { key: 'Enter' }))
+    formEl!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    flushSync()
+    expect(oncreate).toHaveBeenCalledTimes(1)
+
+    // Rename mode submits via form and calls onrename.
+    state.busy = false
+    state.mode = { kind: 'rename', sectionId: 'sec-1', currentName: '旧名' }
+    flushSync()
+    const renameInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    renameInput.value = '新名'
+    renameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    host.querySelector('form.ui-dialog__form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    flushSync()
+    expect(onrename).toHaveBeenCalledTimes(1)
+    expect(onrename).toHaveBeenCalledWith('sec-1', '新名')
+
+    await unmount(instance)
+  })
+
+  it('Enter on a move-destination radio does not move and move/delete do not wrap in <form>', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const oncreate = vi.fn()
+    const onrename = vi.fn()
+    const ondelete = vi.fn()
+    const onmove = vi.fn()
+    const onclose = vi.fn()
+    const state = $state<{ mode: SectionDialogMode; busy: boolean }>({
+      mode: { kind: 'move', channelId: 'ch-1', channelName: '一般', currentSectionId: null },
+      busy: false,
+    })
+
+    const instance = mount(SectionDialogs, {
+      target: host as unknown as Element,
+      props: {
+        get mode() { return state.mode },
+        get busy() { return state.busy },
+        customSections: [{ id: 'sec-1', name: '開発' }],
+        oncreate,
+        onrename,
+        ondelete,
+        onmove,
+        onclose,
+      },
+    })
+    flushSync()
+
+    expect(host.querySelector('form')).toBeNull()
+    const moveBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === '移動する')!
+    expect(moveBtn.getAttribute('type')).toBe('button')
+
+    const radios = host.querySelectorAll('input[type="radio"]')
+    expect(radios.length).toBeGreaterThanOrEqual(2)
+    radios[0].checked = true
+    radios[0].dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    flushSync()
+
+    const enterOnRadio = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' })
+    radios[0].dispatchEvent(enterOnRadio)
+    flushSync()
+    expect(onmove).not.toHaveBeenCalled()
+
+    // Explicit click on confirm button still moves.
+    moveBtn.click()
+    flushSync()
+    expect(onmove).toHaveBeenCalledTimes(1)
+    expect(onmove).toHaveBeenCalledWith('ch-1', 'sec-1')
+
+    // Delete mode also does not wrap in <form>.
+    state.mode = { kind: 'delete', sectionId: 'sec-1', sectionName: '開発' }
+    flushSync()
+    expect(host.querySelector('form')).toBeNull()
+    const deleteBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === '削除する')!
+    expect(deleteBtn.getAttribute('type')).toBe('button')
+
+    await unmount(instance)
+  })
+
+  it('Shift/Alt/Ctrl/Meta+Enter in the name field does not create or rename; mini-DOM models click-then-submit and Shift+Enter', async () => {
+    // 1. Verify mini-DOM implicit submission dispatches a cancellable click on the default submit button
+    //    and does not suppress Shift+Enter (so the component guard is what prevents submission).
+    const rawForm = dom.doc.createElement('form')
+    const rawInput = dom.doc.createElement('input')
+    const rawSubmit = dom.doc.createElement('button')
+    rawSubmit.setAttribute('type', 'submit')
+    rawForm.appendChild(rawInput)
+    rawForm.appendChild(rawSubmit)
+    dom.doc.body.appendChild(rawForm)
+
+    let clickCount = 0
+    let submitCount = 0
+    let cancelClick = false
+    rawSubmit.addEventListener('click', (ev) => {
+      clickCount++
+      if (cancelClick) ev.preventDefault()
+    })
+    rawForm.addEventListener('submit', (ev) => {
+      ev.preventDefault()
+      submitCount++
+    })
+
+    rawInput.dispatchEvent(new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true }))
+    expect(clickCount).toBe(1)
+    expect(submitCount).toBe(1)
+
+    cancelClick = true
+    rawInput.dispatchEvent(new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }))
+    expect(clickCount).toBe(2)
+    expect(submitCount).toBe(1)
+
+    // 2. Verify SectionDialogs (via Dialog's form keydown guard) suppresses modified Enter in create and rename modes.
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const oncreate = vi.fn()
+    const onrename = vi.fn()
+    const ondelete = vi.fn()
+    const onmove = vi.fn()
+    const onclose = vi.fn()
+    const state = $state<{ mode: SectionDialogMode; busy: boolean }>({
+      mode: { kind: 'create' },
+      busy: false,
+    })
+
+    const instance = mount(SectionDialogs, {
+      target: host as unknown as Element,
+      props: {
+        get mode() { return state.mode },
+        get busy() { return state.busy },
+        oncreate,
+        onrename,
+        ondelete,
+        onmove,
+        onclose,
+      },
+    })
+    flushSync()
+
+    const createInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    createInput.value = '開発'
+    createInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    for (const mods of [
+      { shiftKey: true },
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+    ]) {
+      const ev = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', ...mods })
+      createInput.dispatchEvent(ev)
+      flushSync()
+      expect(ev.defaultPrevented).toBe(true)
+    }
+    expect(oncreate).not.toHaveBeenCalled()
+
+    const plainCreate = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' })
+    createInput.dispatchEvent(plainCreate)
+    flushSync()
+    expect(plainCreate.defaultPrevented).toBe(false)
+    expect(oncreate).toHaveBeenCalledTimes(1)
+    expect(oncreate).toHaveBeenCalledWith('開発')
+
+    // Rename mode: modified Enter does not rename; plain Enter does.
+    state.mode = { kind: 'rename', sectionId: 'sec-1', currentName: '旧名' }
+    flushSync()
+    const renameInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    renameInput.value = '新名'
+    renameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    for (const mods of [
+      { shiftKey: true },
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+    ]) {
+      const ev = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', ...mods })
+      renameInput.dispatchEvent(ev)
+      flushSync()
+      expect(ev.defaultPrevented).toBe(true)
+    }
+    expect(onrename).not.toHaveBeenCalled()
+
+    const plainRename = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' })
+    renameInput.dispatchEvent(plainRename)
+    flushSync()
+    expect(plainRename.defaultPrevented).toBe(false)
+    expect(onrename).toHaveBeenCalledTimes(1)
+    expect(onrename).toHaveBeenCalledWith('sec-1', '新名')
+
+    await unmount(instance)
+  })
+
+  it('Shift+Enter on a focused Cancel button cancels while Shift+Enter in the name field does not submit', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const oncreate = vi.fn()
+    const onrename = vi.fn()
+    const ondelete = vi.fn()
+    const onmove = vi.fn()
+    const onclose = vi.fn()
+    const state = $state<{ mode: SectionDialogMode; busy: boolean }>({
+      mode: { kind: 'create' },
+      busy: false,
+    })
+
+    const instance = mount(SectionDialogs, {
+      target: host as unknown as Element,
+      props: {
+        get mode() { return state.mode },
+        get busy() { return state.busy },
+        oncreate,
+        onrename,
+        ondelete,
+        onmove,
+        onclose,
+      },
+    })
+    flushSync()
+
+    // Create dialog: Shift+Enter in name field is prevented and does not submit.
+    const createInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    createInput.value = '開発'
+    createInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    const inputShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    createInput.dispatchEvent(inputShiftEnter)
+    flushSync()
+    expect(inputShiftEnter.defaultPrevented).toBe(true)
+    expect(oncreate).not.toHaveBeenCalled()
+    expect(onclose).not.toHaveBeenCalled()
+
+    // Shift+Enter on focused Cancel button keeps native button activation and cancels.
+    const cancelBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === 'キャンセル')!
+    cancelBtn.focus()
+    const cancelShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    cancelBtn.dispatchEvent(cancelShiftEnter)
+    flushSync()
+    expect(cancelShiftEnter.defaultPrevented).toBe(false)
+    expect(onclose).toHaveBeenCalledTimes(1)
+    expect(oncreate).not.toHaveBeenCalled()
+
+    // Rename dialog: Shift+Enter in name field does not submit; Shift+Enter on Cancel button cancels.
+    state.mode = { kind: 'rename', sectionId: 'sec-1', currentName: '旧名' }
+    flushSync()
+    const renameInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    renameInput.value = '新名'
+    renameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    const renameInputShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    renameInput.dispatchEvent(renameInputShiftEnter)
+    flushSync()
+    expect(renameInputShiftEnter.defaultPrevented).toBe(true)
+    expect(onrename).not.toHaveBeenCalled()
+    expect(onclose).toHaveBeenCalledTimes(1)
+
+    const renameCancelBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === 'キャンセル')!
+    renameCancelBtn.focus()
+    const renameCancelShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    renameCancelBtn.dispatchEvent(renameCancelShiftEnter)
+    flushSync()
+    expect(renameCancelShiftEnter.defaultPrevented).toBe(false)
+    expect(onclose).toHaveBeenCalledTimes(2)
+    expect(onrename).not.toHaveBeenCalled()
+
+    await unmount(instance)
+  })
+})
+
+describe('Dialog native <dialog> + showModal() (#843)', () => {
+  it('opens with showModal(), matches dialog:modal, closes cleanly, and blocks Esc during IME composition and while busy', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const opener = dom.doc.createElement('button')
+    opener.textContent = '開く'
+    host.appendChild(opener)
+    opener.focus()
+
+    const onconfirm = vi.fn()
+    const oncancel = vi.fn()
+    const state = $state({ open: false, busy: false })
+
+    const instance = mount(Dialog, {
+      target: host as unknown as Element,
+      props: {
+        get open() { return state.open },
+        get busy() { return state.busy },
+        title: '確認ダイアログ',
+        confirmLabel: '確定',
+        onconfirm,
+        oncancel,
+      },
+    })
+    flushSync()
+    expect(dom.doc.querySelector('dialog:modal')).toBeNull()
+
+    state.open = true
+    flushSync()
+    const dialog = dom.doc.querySelector('dialog:modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog?.tagName).toBe('DIALOG')
+    expect(dialog?.open).toBe(true)
+    expect(dialog?.getAttribute('aria-modal')).toBe('true')
+
+    // Esc during IME composition (isComposing: true) does not close or call oncancel.
+    const imeEsc = dialog!.keydown('Escape', { isComposing: true })
+    expect(imeEsc.defaultPrevented).toBe(false)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Esc during IME composition (keyCode: 229) does not close or call oncancel.
+    const ime229Esc = dialog!.keydown('Escape', { keyCode: 229 })
+    expect(ime229Esc.defaultPrevented).toBe(false)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Native cancel event is prevented so the browser cannot close <dialog> behind Svelte state.
+    const nativeCancel = new MiniDomEvent('cancel', { cancelable: true })
+    dialog!.dispatchEvent(nativeCancel)
+    expect(nativeCancel.defaultPrevented).toBe(true)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Esc while busy calls preventDefault, stops propagation, and does not close or call oncancel.
+    state.busy = true
+    flushSync()
+    const busyEsc = dialog!.keydown('Escape')
+    expect(busyEsc.defaultPrevented).toBe(true)
+    expect(busyEsc.cancelBubble).toBe(true)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Esc when not busy and not composing calls preventDefault, stops propagation, and invokes oncancel.
+    state.busy = false
+    flushSync()
+    const normalEsc = dialog!.keydown('Escape')
+    expect(normalEsc.defaultPrevented).toBe(true)
+    expect(normalEsc.cancelBubble).toBe(true)
+    expect(oncancel).toHaveBeenCalledTimes(1)
+
+    // Closing via open=false calls close() and removes dialog:modal.
+    const closeSpy = vi.fn()
+    dialog!.addEventListener('close', closeSpy)
+    state.open = false
+    flushSync()
+    expect(closeSpy).toHaveBeenCalledTimes(1)
+    expect(dialog!.open).toBe(false)
+    expect(dom.doc.querySelector('dialog:modal')).toBeNull()
+
+    await unmount(instance)
+  })
+
+  it('omits disallowed tabindex on <dialog> and falls back to focusing <dialog> when it has no focusable controls', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const opener = dom.doc.createElement('button')
+    opener.textContent = '開く'
+    host.appendChild(opener)
+    opener.focus()
+
+    const state = $state({ open: true })
+    const instance = mount(Dialog, {
+      target: host as unknown as Element,
+      props: {
+        get open() { return state.open },
+        title: '操作なしダイアログ',
+        description: 'ボタンがありません。',
+      },
+    })
+    flushSync()
+    await tick()
+
+    const dialog = dom.doc.querySelector('dialog:modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.getAttribute('tabindex')).toBeNull()
+    expect(dom.doc.activeElement).toBe(dialog)
+
+    // Tab with no focusable controls keeps focus on <dialog> itself.
+    const tab = dialog!.keydown('Tab')
+    expect(tab.defaultPrevented).toBe(true)
+    expect(dom.doc.activeElement).toBe(dialog)
+
+    state.open = false
+    flushSync()
+    await tick()
+    await unmount(instance)
   })
 })

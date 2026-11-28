@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import type { Identity, Role } from './api'
   import { canDeactivateMember, roles, roleNames } from './members'
   import type { membersAdapter } from './members.svelte'
@@ -115,7 +116,7 @@
 <Dialog open={deactivating !== undefined} title="メンバーを無効化しますか？"
   description={`${deactivating?.name ?? ''}はこの組織を利用できなくなります。過去のメッセージは残ります。`}
   confirmLabel="無効化する" returnFocusFallback={summary} oncancel={() => deactivatingId = null}
-  onconfirm={() => { const target = deactivating; deactivatingId = null; if (target) void model.deactivate(target.id).then(ok => { if (ok) { onchanged(target.id); summary?.focus() } }) }} />
+  onconfirm={() => { const target = deactivating; deactivatingId = null; if (target) void model.deactivate(target.id).then(async ok => { if (ok) { onchanged(target.id); await tick(); summary?.focus() } }) }} />
 
 <style>
   .member-list {

@@ -1,4 +1,6 @@
 use super::*;
+use crate::channels::access::AccessStatus::{Active, ChannelLost, RecheckFailed};
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 pub(super) async fn mutation(
     app: &Router,
@@ -121,7 +123,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
 ) {
     let pools = crate::test_support::TestPools::new(pool).await;
     let pool = pools.admin;
-    crate::database::tests::context::context_policies(&pool).await;
+    crate::database::test_support::context_policies(&pool).await;
     let app = router(&pools.app).await;
     let org = organization(&pool).await;
     let foreign = organization(&pool).await;
@@ -646,14 +648,13 @@ async fn mutation_locks_channel_before_actor_member(pool: PgPool) {
             let token = token.clone();
             tokio::spawn(async move { mutation(&app, &token, c, owner, add).await })
         };
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT COALESCE(visibility=%FOR NO KEY UPDATE')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting { break; }
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::LockQuery("SELECT COALESCE(visibility=%FOR NO KEY UPDATE"),
+            Count::AtLeast(1),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
         // A #231 transaction holding Channel before Member must be able to
         // finish: the waiting mutation must not already hold its actor Member.
         let mut member_lock = pool.begin().await.unwrap();
@@ -775,7 +776,7 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .unwrap();
     assert_eq!(
         watches.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![1, 1, 0, 0]
+        vec![ChannelLost, ChannelLost, Active, Active]
     );
     access
         .check(&pool, SubscriptionScope::Member(org, owner))
@@ -783,7 +784,7 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .unwrap();
     assert_eq!(
         watches.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![1, 1, 1, 0]
+        vec![ChannelLost, ChannelLost, ChannelLost, Active]
     );
     pool.close().await;
     state
@@ -792,7 +793,7 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .await;
     assert_eq!(
         failures.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![2, 0, 2, 0]
+        vec![RecheckFailed, Active, RecheckFailed, Active]
     );
     state
         .session_changes
@@ -800,6 +801,6 @@ async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
         .await;
     assert_eq!(
         failures.iter().map(|w| w.status()).collect::<Vec<_>>(),
-        vec![2, 2, 2, 0]
+        vec![RecheckFailed, RecheckFailed, RecheckFailed, Active]
     );
 }

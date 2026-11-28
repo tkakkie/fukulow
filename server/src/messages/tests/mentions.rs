@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 
 mod counts;
 mod denials;
@@ -93,13 +94,21 @@ async fn mention_migration_has_no_backfill_and_enforces_scoped_keys_and_cascade(
         e.as_database_error().unwrap().code().as_deref(),
         Some("23505")
     );
-    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND id=$2")
+    sqlx::query("UPDATE messages SET deleted=true, body='' WHERE organization_id=$1 AND id=$2")
         .bind(org)
         .bind(id)
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(mention_rows(&pool, org).await, 0);
+    let counted: bool = sqlx::query_scalar(
+        "SELECT counted FROM message_mentions WHERE organization_id=$1 AND message_id=$2",
+    )
+    .bind(org)
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!counted);
 }
 
 fn token(id: Uuid) -> String {
@@ -388,14 +397,17 @@ async fn mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic(po
             send(&app2, &author, other, input(key, &text))
         )
     });
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND classid=152 AND objid=391 AND NOT granted")
-                .fetch_one(&pool).await.unwrap();
-            if waiting == 2 { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Advisory(Advisory::Key {
+            class_id: Some(152),
+            object_id: 391,
+            current_database: true,
+        }),
+        Count::Exactly(2),
+        std::time::Duration::from_secs(3),
+    )
+    .await;
     sqlx::query("SELECT pg_advisory_unlock(152,391)")
         .execute(&mut *gate)
         .await

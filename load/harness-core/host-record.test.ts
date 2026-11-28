@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { allowedCpus, parseCpuList, parseCpuSets, pinned } from './cpusets.ts';
-import { groupBy, linuxViolations, parseMeminfo, parseSnapHold, sleepUnits, timerServices, updateUnits, type HostRecord } from './host-record.ts';
+import { groupBy, hwmon, linuxViolations, requirementViolations, parseMeminfo, parseSnapHold, sleepUnits, timerServices, updateUnits, type HostRecord } from './host-record.ts';
 
 const off = (unit: string) => ({ unit, enabled: 'disabled', active: 'inactive' });
 const masked = (unit: string) => ({ unit, enabled: 'masked', active: 'inactive' });
@@ -9,7 +12,7 @@ const ready: HostRecord = {
   at: '2026-11-24T00:00:00Z', platform: 'linux', kernel: '7.0.0', cpuModel: 'test', logicalCpus: 4,
   governors: { performance: [0, 1, 2, 3] }, energyPreference: null, maxFrequencyKHz: null, boost: '1', policyBoost: null, powerProfile: 'performance',
   memoryBytes: 1, meminfoKiB: null, swappiness: '60', loadAverage: [0, 0, 0], ac: [{ supply: 'ACAD', online: true }],
-  temperaturesC: null, disk: null, docker: null, updateUnits: [...updateUnits, ...timerServices].map(off), sleepUnits: sleepUnits.map(masked), snapHold: 'forever',
+  temperaturesC: null, fanControl: null, fansRpm: null, platformProfile: null, disk: null, docker: null, updateUnits: [...updateUnits, ...timerServices].map(off), sleepUnits: sleepUnits.map(masked), snapHold: 'forever',
 };
 
 test('a host that meets every Linux condition has no violations', () => {
@@ -72,7 +75,15 @@ test('host readings are parsed from their sources', () => {
 test('CPU sets are parsed, disjoint and on the host', () => {
   assert.deepEqual(parseCpuList('0,2,4-6'), [0, 2, 4, 5, 6]);
   assert.deepEqual(parseCpuSets('server=0,2;client=1,3', 4), { server: [0, 2], client: [1, 3] });
+  assert.deepEqual(parseCpuSets('housekeeping=0,7-8,15;client=1,3,5,9,11,13;server=2,4,6,10,12,14', 16),
+    { server: [2, 4, 6, 10, 12, 14], client: [1, 3, 5, 9, 11, 13], housekeeping: [0, 7, 8, 15] });
   assert.throws(() => parseCpuSets('server=0,1;client=1,3', 4), /overlap on 1/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=0,2', 4), /overlap on 0/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=1,2', 4), /overlap on 1/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=4', 4), /CPU 4 does not exist/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=', 4), /invalid.*field/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=2;housekeeping=3', 4), /repeated/);
+  assert.throws(() => parseCpuSets('server=0;client=1=2', 4), /invalid.*field/);
   assert.throws(() => parseCpuSets('server=0;client=4', 4), /CPU 4 does not exist/);
   assert.throws(() => parseCpuSets('server=0', 4), /exactly server/);
   assert.throws(() => parseCpuList('0,x'), /invalid CPU list/);
@@ -85,4 +96,28 @@ test('pinning wraps a command with taskset only when a set is given', () => {
   assert.deepEqual(pinned(undefined, ['pgbench', '-n']), ['pgbench', '-n']);
   assert.deepEqual(allowedCpus('Name:\tcat\nCpus_allowed_list:\t1,3,5-7\n'), [1, 3, 5, 6, 7]);
   assert.throws(() => allowedCpus('Name:\tcat\n'), /not found/);
+});
+
+test('hwmon readings are named monitor/label and skip unreadable values', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hwmon-'));
+  const mon = (h: string, name: string, files: Record<string, string>) => {
+    mkdirSync(join(dir, h));
+    writeFileSync(join(dir, h, 'name'), name + '\n');
+    for (const [f, v] of Object.entries(files)) writeFileSync(join(dir, h, f), v + '\n');
+  };
+  mon('hwmon0', 'k10temp', { temp1_input: '89125', temp1_label: 'Tctl' });
+  mon('hwmon1', 'acpitz', { temp1_input: '61000', temp2_input: '' });
+  mon('hwmon2', 'hp', { pwm1_enable: '2' });
+  mon('hwmon3', 'acpi_fan', { fan1_input: '4100' });
+  assert.deepEqual(hwmon(/^temp\d+_input$/, 1000, dir), { 'k10temp/Tctl': 89.125, 'acpitz/temp1': 61 });
+  assert.deepEqual(hwmon(/^pwm\d+_enable$/, 1, dir), { 'hp/pwm1_enable': 2 });
+  assert.deepEqual(hwmon(/^fan\d+_input$/, 1, dir), { 'acpi_fan/fan1': 4100 });
+  assert.equal(hwmon(/x/, 1, join(dir, 'missing')), null);
+});
+
+test('required host settings: none required is no violation; unreadable is one', () => {
+  assert.deepEqual(requirementViolations(ready, undefined), []);
+  assert.deepEqual(requirementViolations({ ...ready, boost: '0', policyBoost: { 0: [0, 1, 2, 3] } }, { boost: '0', policyBoost: '0' }), []);
+  assert.match(requirementViolations(ready, { policyBoost: '0' })[0], /unreadable/);
+  assert.match(requirementViolations(ready, { platformProfile: 'performance' })[0], /platform profile is unreadable/);
 });

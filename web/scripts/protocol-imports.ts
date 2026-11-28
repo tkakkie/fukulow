@@ -49,7 +49,7 @@ export function checkRustCore(root: string): string[] {
   scan(join(root, 'src'))
   return errors
 }
-if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
+if (import.meta.main) {
   const errors = checkRustCore(resolve(import.meta.dirname, '../../client-core'))
   if (errors.length) { errors.forEach(e => console.error(e)); process.exit(1) }
   console.log('Rust core source/dependency purity guard OK (not a transitive proof)')

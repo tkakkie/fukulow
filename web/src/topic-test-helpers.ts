@@ -4,7 +4,7 @@ import type { ChannelEventPage, Message, ReplyChainPage, Result, SendMessageRequ
 import type { RealtimeHandlers } from './realtime'
 import { createTopicSync } from './topic-sync'
 import { record } from './protocol-test-helpers'
-import { flush } from './sync-test-helpers'
+import { flush, standaloneAccess } from './sync-test-helpers'
 
 // These fixtures supply only the Messages represented in the mock page.
 export const replyPage = (page: Omit<ReplyChainPage, 'chain_version'>): ReplyChainPage => ({
@@ -44,6 +44,7 @@ export function topicClient(activity?: Activity, requestTimeoutMs?: number) {
   })
   const onSessionEnded = vi.fn()
   const client = createTopicSync({ selfId: 'me', activity, requestTimeoutMs, api: { listMessages, sendMessage, listChannelEvents }, topicsApi, onSessionEnded,
+    ...standaloneAccess(onSessionEnded),
     connect(h) { handlers.push(h); return { send: m => { controls.push(m) }, close: vi.fn() } },
   })
   return { ...client, topicsApi, listMessages, listChannelEvents, sendMessage, handlers, controls, onSessionEnded,

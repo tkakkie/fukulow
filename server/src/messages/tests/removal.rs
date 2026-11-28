@@ -1,22 +1,10 @@
 use super::*;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-    time::Duration,
-};
-use tokio::sync::Semaphore;
-struct Gate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-static GATES: LazyLock<Mutex<HashMap<Uuid, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+use crate::test_support::Gates;
+use crate::test_support::{Blocked, Count, wait_blocked};
+use std::time::Duration;
+static GATES: Gates<Uuid> = Gates::new();
 pub(crate) async fn pause(key: Uuid) {
-    let gate = GATES.lock().unwrap().remove(&key);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    GATES.pause(key).await;
 }
 
 #[fukulow_test::test]
@@ -53,11 +41,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
         let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state.clone());
         let key = Uuid::new_v4();
-        let gate = Arc::new(Gate {
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
-        GATES.lock().unwrap().insert(key, gate.clone());
+        let gate = GATES.register(key);
         let send = {
             let app = app.clone();
             let token = token.clone();
@@ -72,7 +56,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
                 .await
             })
         };
-        gate.entered.acquire().await.unwrap().forget();
+        gate.entered().await;
         let revoke = {
             let pool = pool.clone();
             let app = app.clone();
@@ -103,12 +87,21 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
         };
         // #311 excludes new Member SHARE locks before touching grants. Removal
         // may now wait on its target Member before it reaches the DELETE.
-        tokio::time::timeout(Duration::from_secs(2),async {loop {
-            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'DELETE FROM channel_members%' OR query LIKE 'UPDATE users SET role=%' OR query LIKE 'SELECT name,role,membership_revision%FOR NO KEY UPDATE' OR query LIKE 'SELECT visibility=%' OR query LIKE 'SELECT COALESCE(visibility=%'))").fetch_one(&pool).await.unwrap();
-            if blocked {break;} tokio::task::yield_now().await;
-        }}).await.unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::LockQueries(&[
+                "DELETE FROM channel_members%",
+                "UPDATE users SET role=%",
+                "SELECT name,role,membership_revision%FOR NO KEY UPDATE",
+                "SELECT visibility=%",
+                "SELECT COALESCE(visibility=%",
+            ]),
+            Count::AtLeast(1),
+            Duration::from_secs(2),
+        )
+        .await;
         assert!(!revoke.is_finished());
-        gate.release.add_permits(1);
+        gate.release();
         assert_eq!(send.await.unwrap().status(), StatusCode::CREATED);
         revoke.await.unwrap();
         let r = request(
@@ -203,11 +196,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
         assert_eq!(tr.status(), StatusCode::CREATED);
         let tr = body(tr).await;
         let topic_id = tr["topic_id"].as_str().unwrap();
-        let gate = Arc::new(Gate {
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
-        GATES.lock().unwrap().insert(sender, gate.clone());
+        let gate = GATES.register(sender);
         let mark = {
             let app = app.clone();
             let token = token.clone();
@@ -222,15 +211,21 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
                 .await
             })
         };
-        gate.entered.acquire().await.unwrap().forget();
+        gate.entered().await;
         let remove = {
             let pool = pool.clone();
             tokio::spawn(async move {
                 sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
             })
         };
-        tokio::time::timeout(Duration::from_secs(2),async {loop {let wait:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM channel_members%')").fetch_one(&pool).await.unwrap();if wait {break;}tokio::task::yield_now().await;}}).await.unwrap();
-        gate.release.add_permits(1);
+        wait_blocked(
+            &pool,
+            Blocked::LockQuery("DELETE FROM channel_members%"),
+            Count::AtLeast(1),
+            Duration::from_secs(2),
+        )
+        .await;
+        gate.release();
         assert_eq!(mark.await.unwrap().status(), StatusCode::OK);
         remove.await.unwrap();
         for suffix in ["read".into(), format!("topics/{topic_id}/read")] {
@@ -278,11 +273,7 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
         .await
         .unwrap();
     let key = Uuid::new_v4();
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    GATES.lock().unwrap().insert(key, gate.clone());
+    let gate = GATES.register(key);
     let sending = {
         let app = app.clone();
         let token = token.clone();
@@ -296,11 +287,7 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
             .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let deactivating = {
         let app = app.clone();
         let ot = ot.clone();
@@ -315,13 +302,15 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
             .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(5),async {loop {
-        let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT name,role,membership_revision%FOR NO KEY UPDATE')")
-            .fetch_one(&pool).await.unwrap();
-        if waiting {break;} tokio::task::yield_now().await;
-    }}).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::LockQuery("SELECT name,role,membership_revision%FOR NO KEY UPDATE"),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
     assert!(!deactivating.is_finished());
-    gate.release.add_permits(1);
+    gate.release();
     let sent = sending.await.unwrap();
     assert_eq!(sent.status(), StatusCode::CREATED);
     let canonical = body(sent).await;
@@ -376,25 +365,13 @@ async fn send_waiting_on_member_lock_is_rejected_after_deactivation(pool: PgPool
         send(&app, &token, channel, input(Uuid::new_v4(), "Blocked send")).await
     });
     // The send reaches this lock only after authenticating and checking Channel access.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT FROM pg_stat_activity
-                 WHERE datname=current_database() AND wait_event_type='Lock'
-                 AND $1 = ANY(pg_blocking_pids(pid)))",
-            )
-            .bind(blocker)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            if waiting {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("send did not wait for the Member lock");
+    wait_blocked(
+        &pool,
+        Blocked::LockBehind(blocker),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
 
     deactivation.commit().await.unwrap();
 

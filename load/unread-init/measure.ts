@@ -1,5 +1,5 @@
 import { Database, Session } from './database.ts';
-import { begin,barrier,sender,stats,mutation,revoke,org,member,channel,baselineRows,postGrant,sparse,readSetup,argsQuery,readArgs,countSql,projectionSql } from './sql.ts';
+import { begin,barrier,sender,stats,mutation,revoke,org,member,channel,baselineRows,postGrant,sparse,readSetup,argsQuery,readArgs,readQueries } from './sql.ts';
 import type { Point,Sample,ReadSample } from './model.ts';
 export function documents(text:string):unknown[] {
   const result:unknown[]=[];let start=-1,depth=0,string=false,escape=false;
@@ -16,7 +16,21 @@ const buffers=(p:Plan)=>(p.Plan['Shared Hit Blocks']??0)+(p.Plan['Shared Read Bl
 const clockStart=`SELECT clock_timestamp() AS started \\gset`;
 const clockEnd=`SELECT json_build_object('latency_ms',extract(epoch FROM clock_timestamp()-:'started'::timestamptz)*1000);`;
 type Stats=Record<string,Record<string,number>>;
+export const senderBaselineMethod = 'In a disposable clone, one untimed sender transaction commits in the same session before the timed uncontended sender commit.';
 export async function measure(db:Database,name:string,p:Point,variant:string,repeat:number) {
+  // Preserve an actual COMMIT baseline without deleting a retained creation or rewinding its counter.
+  const baselineName = name + '_baseline';
+  db.clone(baselineName, name);
+  const baseline = new Session(db.name, baselineName);
+  let senderBaselineMs: number;
+  try {
+    await baseline.query(`${begin}${sender.replaceAll('sender-probe','warmup-probe')} COMMIT;`);
+    const output = documents(await baseline.query(`${clockStart}\n${begin}${sender} COMMIT;\n${clockEnd}`));
+    senderBaselineMs = (output.at(-1) as { latency_ms: number }).latency_ms;
+  } finally {
+    await baseline.close();
+    db.drop(baselineName);
+  }
   const writer=new Session(db.name,name),send=new Session(db.name,name),observer=new Session(db.name,name,'postgres');
   const reads:ReadSample[]=[]; const readPlans:unknown[]=[];
   try {
@@ -25,13 +39,6 @@ export async function measure(db:Database,name:string,p:Point,variant:string,rep
     if(role.user!=='fukulow_app'||role.bypass||role.super||Number(role.owns)!==0)throw new Error('app role is privileged');
     // Fail-closed RLS control before any context is supplied.
     if(await writer.query('SELECT count(*) FROM channels;')!=='0')throw new Error('RLS missing-context failure');
-    const baselineOut=documents(await send.query(`${clockStart}\n${begin}${sender.replaceAll('sender-probe','baseline-probe')} COMMIT;\n${clockEnd}`));
-    const senderBaselineMs=(baselineOut.at(-1) as {latency_ms:number}).latency_ms;
-    // Compare against an uncontended COMMIT, then restore fixture state outside
-    // the metric window. Sending itself never advances any read position.
-    await send.query(`${begin} DELETE FROM messages WHERE organization_id=${org} AND id=md5('baseline-probe')::uuid;
-      UPDATE channel_message_sequences SET seq=seq-1 WHERE organization_id=${org} AND channel_id=${channel};
-      COMMIT; SELECT pg_stat_force_next_flush();`);
     const before=JSON.parse(await observer.query(stats)) as Stats;
     const bufferBefore=JSON.parse(await observer.query(`SELECT json_build_object('hit',blks_hit,'read',blks_read) FROM pg_stat_database WHERE datname=current_database();`)) as {hit:number;read:number};
     const lsn=await observer.query('SELECT pg_current_wal_lsn();');
@@ -80,7 +87,8 @@ export async function measure(db:Database,name:string,p:Point,variant:string,rep
     const expectedWrites=p.operation==='regrant'?(variant==='eager'?2*(p.topics+1):p.topics+2):affected*(variant==='eager'?p.topics+1:1);
     if(rows!==expectedWrites)throw new Error(`position statistics not flushed or unexpected writes: ${rows} != ${expectedWrites}`);
     await writer.query(`${begin}${postGrant(p.topics,initial)} COMMIT;`);
-    await writer.query(readSetup());
+    const queries = readQueries(variant === 'lazy');
+    await writer.query(readSetup(queries));
     const values=JSON.parse(await writer.query(`${begin}${argsQuery} COMMIT;`)) as Record<string,string|number>;
     const args=readArgs(values);
     const oracle:Record<string,unknown>={baselines};
@@ -88,7 +96,7 @@ export async function measure(db:Database,name:string,p:Point,variant:string,rep
       if(stage==='sparse')await writer.query(`${begin}${sparse} COMMIT; ANALYZE;`);
       const literal=[`'${values.org}'::uuid`,`'${values.member}'::uuid`,String(values.revision),`'${values.channel}'::uuid`,String(values.w),'NULL::bigint','2147483647','true','NULL::uuid'];
       for(const query of ['counts','projection'] as const) {
-        const bound=(query==='counts'?countSql():projectionSql()).replace(/\$(\d+)/g,(_,n:string)=>query==='counts'&&n==='4'?`'${values.channels}'::uuid[]`:literal[Number(n)-1]);
+        const bound=queries[query].replace(/\$(\d+)/g,(_,n:string)=>query==='counts'&&n==='4'?`'${values.channels}'::uuid[]`:literal[Number(n)-1]);
         oracle[`${stage}/${query}`]=JSON.parse(await writer.query(`${begin} SELECT coalesce(jsonb_agg(to_jsonb(q) ORDER BY to_jsonb(q)::text),'[]') FROM (${bound})q; COMMIT;`));
         for(const mode of ['custom','generic']) {
           // Discard one warm-up, retain a second plan in each forced mode.

@@ -11,7 +11,7 @@ const LICENSE_FILE = /^(licen[cs]e|copying|notice)([.-].*)?$/i
 const NOTICE_FILE = /^notice([.-].*)?$/i
 
 // A LICENSE or COPYING file with content; NOTICE files are kept in the notice as supplements but never count as the license.
-export function isLicenseText(text: { file: string, text: string }): boolean {
+function isLicenseText(text: { file: string, text: string }): boolean {
   return !NOTICE_FILE.test(text.file) && text.text.trim() !== ''
 }
 
@@ -60,7 +60,7 @@ export function licenseAllowed(expression: string, allow: readonly string[]): bo
 }
 
 // Package directory for a module id, or undefined for first-party web and contract files.
-export function packageDirOf(id: string, webRoot: string, resolvePackage: (name: string) => string): string | undefined {
+function packageDirOf(id: string, webRoot: string, resolvePackage: (name: string) => string): string | undefined {
   for (const [prefix, name] of VIRTUAL_PACKAGES) if (id.startsWith(prefix)) return resolvePackage(name)
   if (id.startsWith('\0')) throw new Error(`bundle module ${JSON.stringify(id)} is virtual with no known package`)
   const filename = id.split('?')[0].replaceAll('\\', '/')
@@ -81,7 +81,7 @@ export function packageDirOf(id: string, webRoot: string, resolvePackage: (name:
   return undefined
 }
 
-export function readBundlePackage(dir: string): BundlePackage {
+function readBundlePackage(dir: string): BundlePackage {
   const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string, version?: string, license?: unknown }
   const at = `npm package in ${dir.split(sep).join('/').split('/node_modules/').at(-1)}`
   if (!manifest.name || !manifest.version) throw new Error(`${at}: package.json lacks name or version`)

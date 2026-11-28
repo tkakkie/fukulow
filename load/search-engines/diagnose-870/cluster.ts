@@ -2,52 +2,15 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { allowedCpus, cpuList, pinned, type CpuSets } from '../../harness-core/cpusets.ts';
 import { appSessionArguments, docker, percentile } from '../bench.ts';
 import { timeouts } from '../runtime.ts';
-import { snapshotLaunch } from '../d3r/snapshot.ts';
-
-// The #870 container and client helpers. The frozen d3r files (hashed into manifest-v17) are only
-// imported, never changed, so the parts that need a CPU pin are written here.
-
-// The #689 snapshot this diagnosis restores (receipt in the #689 backfill directory).
-export const expectedSnapshotSha256 = '087a24f896f7f2e05a9e67b820edd47205c1ca63cad6a741f01a746700edbdac';
-// The #796 CPU sets fixed before qualification (2026-11-24): PostgreSQL on the Zen 5 CPUs, the clients on
-// the Zen 5c CPUs. A Linux run uses exactly these, so a swapped or other split is refused.
-export const qualifiedCpuSets = 'server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15';
-
-// Diagnostic logging only; every frozen setting stays as it is and is checked after start.
-export const diagnosticSettings = ['-c', 'log_autovacuum_min_duration=0', '-c', 'log_checkpoints=on'];
-
-// The snapshot launch, with taskset in front of its shell when the server has a CPU set, so the
-// postmaster and every backend inherit the set (as in the #519 probe).
-export function launchArgs(snapshotDirectory: string, server: number[] | undefined) {
-  const launch = snapshotLaunch(snapshotDirectory);
-  if (launch.options.length !== 4 || launch.options[2] !== '--entrypoint' || launch.options[3] !== 'sh') {
-    throw new Error('unexpected snapshot launch options');
-  }
-  const mount = launch.options.slice(0, 2);
-  return server
-    ? {options: [...mount, '--entrypoint', 'taskset'], args: ['-c', cpuList(server), 'sh', ...launch.args]}
-    : {options: launch.options, args: launch.args};
-}
-
-export function checkPins(container: string, sets: CpuSets) {
-  const postmaster = allowedCpus(docker('exec', container, 'cat', '/proc/1/status'));
-  const client = allowedCpus(docker('exec', container, ...pinned(sets.client, ['cat', '/proc/self/status'])));
-  if (cpuList(postmaster) !== cpuList(sets.server) || cpuList(client) !== cpuList(sets.client)) {
-    throw new Error(`CPU sets did not take effect: postmaster ${cpuList(postmaster)}, client ${cpuList(client)}`);
-  }
-  return {postmaster, client};
-}
 
 // The Docker commands the benchmark runs; the worker passes its gated set (io.ts), so after a signal no
 // further docker cp, exec or pgbench starts inside a benchmark either (review round 8).
 export type DockerLayer = {docker: (...args: string[]) => string; spawn: (command: string, args: string[]) => ChildProcessWithoutNullStreams};
 
-// bench.ts `benchmark`, with pgbench pinned to the client CPU set when one is given. Same guard, script,
-// sampling and checks.
-export function pinnedBenchmark(client: number[] | undefined, layer: DockerLayer = {docker, spawn}) {
+// The client runs the same guard, script, sampling and checks as bench.ts.
+export function clientBenchmark(layer: DockerLayer = {docker, spawn}) {
   const {docker: run} = layer;
   return async (container: string, db: string, script: string, dest: string, transactions: number, clients = 5, role = 'fukulow_app') => {
     const guarded = `SELECT 1 / (current_setting('statement_timeout')::interval = interval '10 seconds')::int;\n${script}`;
@@ -58,7 +21,7 @@ export function pinnedBenchmark(client: number[] | undefined, layer: DockerLayer
     const prefix = `/tmp/${name}/log`;
     const pgbench = ['pgbench', '-n', '-U', role, '-d', db, '-c', String(clients), '-j', String(clients), '-t', String(transactions),
       '-M', 'prepared', '-l', '--log-prefix', prefix, '-f', '/tmp/bench.sql'];
-    const args = ['exec', ...appSessionArguments, container, ...(client ? pinned(client, pgbench) : pgbench)];
+    const args = ['exec', ...appSessionArguments, container, ...pgbench];
     const start = performance.now();
     const output = await new Promise<string>((resolve, reject) => {
       const child = layer.spawn('docker', args); let result = '';
@@ -99,12 +62,11 @@ export function planShape(explain: [{Plan: Node}]) {
     sharedHit: root['Shared Hit Blocks'] ?? 0, sharedRead: root['Shared Read Blocks'] ?? 0};
 }
 
-// d3r/session.ts `withSession` (frozen), with psql pinned to the client CPU set when one is given, so the
-// warm-up, EXPLAIN and the scan run on the client CPUs as pgbench does.
-export async function pinnedSession<T>(container: string, db: string, app: boolean, client: number[] | undefined,
+// Warm-up, EXPLAIN and the scan share a psql session in the client container.
+export async function clientSession<T>(container: string, db: string, app: boolean,
   work: (sql: (text: string) => Promise<string>) => Promise<T>) {
   const psql = ['psql', '-XqAt', '-v', 'ON_ERROR_STOP=1', '-U', app ? 'fukulow_app' : 'fukulow', '-d', db];
-  const child = spawn('docker', ['exec', '-i', ...(app ? appSessionArguments : []), container, ...(client ? pinned(client, psql) : psql)]);
+  const child = spawn('docker', ['exec', '-i', ...(app ? appSessionArguments : []), container, ...psql]);
   const lines = createInterface({input: child.stdout})[Symbol.asyncIterator]();
   child.stderr.resume();
   child.stdin.on('error', () => child.kill());

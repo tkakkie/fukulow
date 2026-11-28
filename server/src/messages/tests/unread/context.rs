@@ -1,5 +1,6 @@
 use super::*;
-use crate::database::tests::context::clean;
+use crate::database::test_support::clean;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
 
@@ -136,14 +137,13 @@ async fn unread_cancelled_counts_discard_context_and_recover_in_each_plan_mode(p
         });
         // Observe the real count statement blocked inside PostgreSQL, after
         // authentication, local context setup and the visible-list read.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock' AND query LIKE '%WITH unread_topics%')")
-                    .bind(pid).fetch_one(&pool).await.unwrap();
-                if waiting { break; }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await.expect("count statement reached the lock wait");
+        wait_blocked(
+            &pool,
+            Blocked::PidLockQuery(pid, "%WITH unread_topics%"),
+            Count::AtLeast(1),
+            Duration::from_secs(5),
+        )
+        .await;
         pending.abort();
         assert!(pending.await.unwrap_err().is_cancelled());
         blocker.rollback().await.unwrap();

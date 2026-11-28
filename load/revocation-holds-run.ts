@@ -2,21 +2,30 @@
 // Timeline (path A), aligned to the expected fallback pass P as the #592 runner does:
 // stall at P - 4 s, Role change to Guest at P - 3 s, gate on at P - 0.3 s, resume at P + 0.1 s,
 // Hfence restore at P + 2 s, gate off at P + 3.5 s or P + 15 s. Controls skip only the gate.
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { encloseClockBrackets, intersectClockBrackets, runUncertaintyMs, THRESHOLDS, type ClockSample, type Probe } from './revocation-burst-judgment.ts';
 import { installGate, removeDatabase, seedMembers, Session, startDatabase, waitReady, type Database } from './revocation-burst-db.ts';
 import { Relay } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
 import { emptyLog, readLogLine } from './revocation-holds-log.ts';
-import { BYSTANDERS, CELLS, DURATIONS, restoreAccount, runId, socketAccount, stallBody, targetSockets, TIMELINE, type PlannedRun, type Stall } from './revocation-holds-plan.ts';
-import { StallProxy } from './revocation-holds-stall.ts';
-import type { AccountMutations, HoldsRun, Notice, TargetSocket } from './revocation-holds-judgment.ts';
-import type { Channel, ChangeRoleRequest, ClientMessage, CreateChannelRequest, NativeSessionResponse, SendMessageRequest, ServerEvent, SetupRequest } from '../web/src/api-schema.d.ts';
+import { BYSTANDERS, CELLS, DURATIONS, restoreAccount, runId, stallBody, targetSockets, TIMELINE, type PlannedRun, type Stall } from './revocation-holds-plan.ts';
+import { NativeStall } from './revocation-holds-native-stall.ts';
+import { requirePreflight, requireReadbacks, requireSendBuffers, startStall, targetSendBuffers, type Setup } from './revocation-holds-setup.ts';
+import { reconcileStall, type StallSend, type StallSnapshot } from './revocation-holds-e6.ts';
+import { snapshotStallRows } from './revocation-holds-stall-rows.ts';
+import { openSockets } from './revocation-holds-sockets.ts';
+import { postgresContainer, postgresPid, recordPlacement, serverPrefix } from './revocation-holds-placement.ts';
+import { messagesForSender } from './revocation-holds-preflight.ts';
+import { readTrace, watchTrace } from './revocation-holds-trace.ts';
+import { spawnMeasuredServer, stopMeasuredServer } from './revocation-measured-server.ts';
+import type { AccountMutations, HoldsRun } from './revocation-holds-judgment.ts';
+import type { Channel, ChangeRoleRequest, CreateChannelRequest, ErrorBody, Message, NativeSessionResponse, SendMessageRequest, SetupRequest } from '../web/src/api-schema.d.ts';
 
 const exec = promisify(execFile);
 const FALLBACK_INTERVAL_MS = 30_000; // RECHECK_INTERVAL in server/src/auth/session.rs
@@ -26,18 +35,35 @@ const now = () => performance.now();
 const sleep = (ms: number) => new Promise(r => setTimeout(r, Math.max(0, ms)));
 const at = async <T>(time: number, work: () => Promise<T> | T) => { await sleep(time - now()); return work(); };
 
-export type Active = { server?: ChildProcess; relay?: Relay; db?: Database; sessions?: Session[]; sockets?: WebSocket[]; proxies?: StallProxy[]; stopProbes?: () => void; stopSampling?: () => void };
-export async function cleanup(active: Active) {
+export type Active = { server?: ChildProcess; relay?: Relay; db?: Database; sessions?: Session[]; sockets?: WebSocket[]; helper?: NativeStall; stopProbes?: () => void; stopSampling?: () => void; stopWatchingTrace?: () => void; beforeRemoveDatabase?: (db: Database) => void; interruptExtension?: () => void };
+const cleanups = new WeakMap<Active, Promise<boolean>>();
+export function cleanup(active: Active): Promise<boolean> {
+  const running = cleanups.get(active);
+  if (running) return running;
+  const done = stopRun(active).finally(() => cleanups.delete(active));
+  cleanups.set(active, done);
+  return done;
+}
+
+async function stopRun(active: Active) {
   active.stopSampling?.();
   active.sockets?.forEach(s => { try { s.close(); } catch { /* closing */ } });
   active.stopProbes?.();
   active.sessions?.forEach(s => s.close());
-  await Promise.all(active.proxies?.map(p => p.close()) ?? []);
-  const server = active.server;
-  if (server && server.exitCode === null) { server.kill('SIGINT'); await new Promise(r => { const t = setTimeout(r, 15_000); server.once('exit', () => { clearTimeout(t); r(undefined); }); }); server.kill('SIGKILL'); }
+  await active.helper?.close();
+  const graceful = active.server ? await stopMeasuredServer(active.server) : false;
+  active.stopWatchingTrace?.();
   await active.relay?.close();
-  if (active.db) removeDatabase(active.db.name);
+  if (active.db) {
+    try {
+      const server = active.server;
+      if (server && (server.exitCode !== null || server.signalCode !== null)) active.beforeRemoveDatabase?.(active.db);
+    } finally {
+      removeDatabase(active.db.name);
+    }
+  }
   for (const key of Object.keys(active) as (keyof Active)[]) delete active[key];
+  return graceful;
 }
 
 async function pool<T>(items: T[], limit: number, work: (item: T) => Promise<void>) {
@@ -63,32 +89,45 @@ async function calibrateClock(base: string, samples: number[], walls: (number | 
   return { server: intersectClockBrackets(brackets), wall: intersectClockBrackets(wallBrackets) };
 }
 
-type Context = { binary: string; output: string; stall: Stall; active: Active; interrupted: () => boolean };
+type Context = {
+  binary: string; helperBinary: string; output: string; stall: Stall; active: Active; interrupted: () => boolean;
+  setup: Setup; linuxPlacement: boolean; overhead?: 'on' | 'off'; preflightVolume?: number; e6ObserveMs?: number;
+};
 
-async function startServer(ctx: Context, dir: string) {
-  const db = startDatabase(`fk592-h668-${randomUUID().slice(0, 8)}`); ctx.active.db = db;
+type CheckPlacement = ReturnType<typeof recordPlacement>;
+
+async function startServer(ctx: Context, dir: string, check: CheckPlacement, sendBuffer: number | undefined) {
+  const db = startDatabase(`fk592-h668-${randomUUID().slice(0, 8)}`, ctx.linuxPlacement ? postgresContainer() : undefined); ctx.active.db = db;
   await waitReady(db);
+  check('postgres', () => postgresPid(db.name));
   const url = (user: string, password: string, port: number) => `postgres://${user}:${password}@127.0.0.1:${port}/fukulow?sslmode=disable`;
-  await exec(ctx.binary, ['migrate'], { env: { PATH: process.env.PATH, DATABASE_URL: url('fukulow', db.ownerPassword, db.port), POSTGRES_APP_PASSWORD: db.appPassword } })
+  const prefix = ctx.linuxPlacement ? serverPrefix() : [];
+  const [migrate, ...migrateArgs] = [...prefix, ctx.binary, 'migrate'];
+  await exec(migrate, migrateArgs, { env: { PATH: process.env.PATH, DATABASE_URL: url('fukulow', db.ownerPassword, db.port), POSTGRES_APP_PASSWORD: db.appPassword } })
     .catch(() => { throw new Error('migrate failed (diagnostics suppressed)'); });
   installGate(db);
   const relay = new Relay({ host: '127.0.0.1', port: db.port }); ctx.active.relay = relay;
   const relayPort = await relay.listen();
   const appPort = 20000 + Math.floor(Math.random() * 20000);
   const setupToken = randomBytes(16).toString('hex');
-  const server = spawn(ctx.binary, [], { env: { PATH: process.env.PATH, FUKULOW_ADDR: `127.0.0.1:${appPort}`, FUKULOW_COOKIE_SECURE: 'false', FUKULOW_SETUP_TOKEN: setupToken,
-    FUKULOW_REVOCATION_MEASUREMENT: '1', DATABASE_URL: url('fukulow_app', db.appPassword, relayPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const server = spawnMeasuredServer(ctx.binary, dir, appPort, setupToken, url('fukulow_app', db.appPassword, relayPort), ctx.overhead !== 'off', prefix, sendBuffer);
   ctx.active.server = server;
+  const watcher = ctx.overhead && watchTrace(server.tracePath);
+  if (watcher) ctx.active.stopWatchingTrace = watcher.stop;
+  let spawnError: Error | undefined;
+  server.once('error', error => { spawnError = error; });
   const file = createWriteStream(resolve(dir, 'server.log'));
   const logsClosed = new Promise<void>(done => server.once('close', () => file.end(done)));
   const log = emptyLog();
   for (const stream of [server.stdout!, server.stderr!]) createInterface({ input: stream }).on('line', line => { file.write(line + '\n'); readLogLine(log, line, now()); });
-  const rss: { at: number; kb: number }[] = [];
-  const sampler = startRssSampler(server, async signal => Number((await exec('ps', ['-o', 'rss=', '-p', String(server.pid)], { signal })).stdout.trim()), rss);
-  ctx.active.stopSampling = sampler.stop;
   const base = `http://127.0.0.1:${appPort}`;
-  for (let i = 0; ; i++) { try { if ((await fetch(`${base}/api/v1/setup`)).status === 200) break; } catch { /* starting */ } if (i > 100) throw new Error('server did not start'); await sleep(200); }
-  return { db, relay, appPort, setupToken, log, rss, sampler, logsClosed, base };
+  for (let i = 0; ; i++) {
+    if (spawnError || server.exitCode !== null || server.signalCode !== null || i > 100) throw new Error('server did not start');
+    try { if ((await fetch(`${base}/api/v1/setup`)).status === 200) break; } catch { /* starting */ }
+    await sleep(200);
+  }
+  check('server', () => server.pid);
+  return { db, relay, appPort, setupToken, log, logsClosed, base, server, arrivals: watcher ? watcher.arrivals : undefined };
 }
 
 type Request = (method: string, path: string, token: string, body?: unknown) => Promise<{ status: number; json: () => unknown }>;
@@ -129,39 +168,6 @@ async function seedFixture(db: Database, base: string, setupToken: string, run: 
 }
 
 type Fixture = Awaited<ReturnType<typeof seedFixture>>;
-async function openSockets(ctx: Context, fixture: Fixture, run: PlannedRun, appPort: number, proxies: StallProxy[], proxyPorts: number[]) {
-  const targets: TargetSocket[] = [], notices: Notice[] = [], sockets: WebSocket[] = [];
-  const state = { bystandersReady: 0, bystanderNotices: 0, bystanderCloses: 0, stopping: false };
-  const open = async (port: number, token: string, onMessage: (socket: WebSocket, message: ServerEvent) => void, onClose: (code: number) => void) => {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v1/orgs/${fixture.org}/ws`, { headers: { Authorization: `Bearer ${token}` } } as unknown as string[]);
-    socket.onmessage = event => onMessage(socket, JSON.parse(String(event.data)) as ServerEvent);
-    socket.onclose = event => { if (!state.stopping) onClose(event.code); };
-    sockets.push(socket);
-    if (sockets.length % 100 === 0) await sleep(100); // pace the upgrades as the #592 runner does
-  };
-  ctx.active.sockets = sockets;
-  for (let i = 0; i < targetSockets(run.cell); i++) {
-    const target: TargetSocket = { account: socketAccount(i), ready: false, subscribed: false, stall: proxies[i].record, stallMessagesAt: [] };
-    targets.push(target);
-    await open(proxyPorts[i], fixture.targets[target.account].token, (socket, message) => {
-      if (message.type === 'activity_ready' && !target.ready) {
-        target.ready = true;
-        const subscribe: ClientMessage = { type: 'subscribe', channel_id: fixture.stallChannel, after_seq: 0 };
-        socket.send(JSON.stringify(subscribe));
-      } else if (message.type === 'subscribed' && message.channel_id === fixture.stallChannel) target.subscribed = true;
-      // Only K is subscribed, so every Message event is a stall Message.
-      else if (message.type === 'message') target.stallMessagesAt.push(now());
-      else if (message.type === 'channel_access_revoked') notices.push({ socket: i, channelId: message.channel_id ?? null, at: now() });
-    }, code => { target.close = { at: now(), code }; });
-  }
-  for (const member of fixture.bystanders) {
-    await open(appPort, member.token, (_, message) => {
-      if (message.type === 'activity_ready') state.bystandersReady++;
-      else if (message.type === 'channel_access_revoked') state.bystanderNotices++;
-    }, () => { state.bystanderCloses++; });
-  }
-  return { targets, notices, state };
-}
 
 function startProbes(db: Database, request: Request, org: string, token: string) {
   const session = new Session(db);
@@ -180,13 +186,32 @@ async function changeRole(fixture: Fixture, member: { id: string }, role: Change
   return { startedAt, status: r.status, doneAt: r.status === 200 ? now() : undefined };
 }
 
-async function postStall(fixture: Fixture, stall: Stall) {
+async function postStall(fixture: Fixture, stall: Stall, sends: StallSend[], volume = stall.senders * stall.messages) {
   const body = stallBody(stall.chars);
   let failures = 0;
-  await Promise.all(fixture.senders.flatMap(sender => Array.from({ length: stall.messages }, async () => {
+  await Promise.all(fixture.senders.flatMap((sender, index) => Array.from({ length: messagesForSender(volume, stall.senders, index) }, async () => {
     const message: SendMessageRequest = { body, client_message_id: randomUUID() };
-    const r = await fixture.request('POST', `/api/v1/orgs/${fixture.org}/channels/${fixture.stallChannel}/messages`, sender.token, message).catch(() => ({ status: 0 }));
-    if (r.status !== 201) failures++;
+    const startedAt = now();
+    const identity = { clientMessageId: message.client_message_id, sender: sender.id, startedAt };
+    try {
+      const response = await fixture.request('POST', `/api/v1/orgs/${fixture.org}/channels/${fixture.stallChannel}/messages`, sender.token, message);
+      const record: StallSend = { ...identity, endedAt: now(), status: response.status };
+      if (response.status !== 201) failures++;
+      try {
+        if (response.status === 201) {
+          const id = (response.json() as Message)?.id;
+          if (typeof id === 'string') record.messageId = id;
+        } else {
+          const error = (response.json() as ErrorBody)?.error;
+          if (typeof error === 'string') record.error = error;
+        }
+      } catch { /* Preserve the response status when its body cannot be decoded. */ }
+      sends.push(record);
+    } catch (error) {
+      failures++;
+      const name = (error as Error)?.name;
+      sends.push({ ...identity, endedAt: now(), status: 0, error: name === 'TimeoutError' ? 'timeout' : 'network' });
+    }
   })));
   return failures;
 }
@@ -205,33 +230,68 @@ async function findPass(relay: Relay) {
   return pass;
 }
 
-export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> {
-  const dir = resolve(ctx.output, runId(run)); mkdirSync(dir);
-  const started = await startServer(ctx, dir);
+async function prepare(ctx: Context, run: PlannedRun, dir: string, expected: ReturnType<typeof requirePreflight>, check: CheckPlacement) {
+  const sendBuffer = ctx.setup.kind === 'measured' ? ctx.setup.identity.sendBuffer : ctx.setup.sendBuffer;
+  const started = await startServer(ctx, dir, check, sendBuffer);
   const { db, relay, log, base } = started;
   const fixture = await seedFixture(db, base, started.setupToken, run, ctx.stall);
-  const proxies = Array.from({ length: targetSockets(run.cell) }, () => new StallProxy({ host: '127.0.0.1', port: started.appPort }));
-  ctx.active.proxies = proxies;
-  const proxyPorts = await Promise.all(proxies.map(p => p.listen()));
-  const sockets = await openSockets(ctx, fixture, run, started.appPort, proxies, proxyPorts);
-  for (let i = 0; !(sockets.targets.every(t => t.subscribed) && sockets.state.bystandersReady >= BYSTANDERS); i++) {
-    if (i > 1200 || ctx.interrupted()) break; // floor 1 reports sockets that never became ready
+  const count = targetSockets(run.cell);
+  const helper = new NativeStall(ctx.helperBinary, started.appPort, count);
+  ctx.active.helper = helper;
+  const proxyPorts = await startStall(() => helper.listening());
+  check('helper', () => helper.pid);
+  const sockets = await openSockets(ctx.active, fixture, run, started.appPort, proxyPorts, subscriptions => {
+    const diagnostics = subscriptions.map(row => ({ ...row, upstreamPort: helper.upstreamPort(row.socket) }));
+    writeFileSync(resolve(dir, 'target-subscriptions.json'), JSON.stringify(diagnostics));
+  });
+  const stallReadbacks = await requireReadbacks(() => helper.readbacks(), count, expected?.receiveBuffer);
+  writeFileSync(resolve(dir, 'stall-readbacks.json'), JSON.stringify(stallReadbacks));
+  for (let i = 0; sockets.state.bystandersReady < BYSTANDERS; i++) {
+    if (i > 1200 || ctx.interrupted()) break; // floor 1 reports bystanders that never became ready
     await sleep(100);
   }
+  const sendBuffers = targetSendBuffers(stallReadbacks, log.sendBuffers);
+  writeFileSync(resolve(dir, 'send-buffer-readbacks.json'), JSON.stringify({ requested: sendBuffer ?? null, targets: sendBuffers }));
+  const effectiveSendBuffer = sendBuffer === undefined ? undefined : requireSendBuffers(sendBuffers, expected?.sendBuffer);
   const calibrationErrors: string[] = [];
   const calibrate = () => calibrateClock(base, log.clock, log.clockWall).catch(error => { calibrationErrors.push((error as Error).message); return undefined; });
   const clockStart = await calibrate();
+  const helperStart = await startStall(() => helper.calibrate());
+  sockets.requireTargetsOpen();
+  const rss: { at: number; kb: number }[] = [];
+  const sampler = startRssSampler(started.server, async signal => Number((await exec('ps', ['-o', 'rss=', '-p', String(started.server.pid)], { signal })).stdout.trim()), rss);
+  ctx.active.stopSampling = sampler.stop;
   const probes = startProbes(db, fixture.request, fixture.org, fixture.owner.token);
   const control = new Session(db);
   ctx.active.sessions = [probes.session, control];
   ctx.active.stopProbes = () => { void probes.stop(); };
   const pass = await findPass(relay);
+  sockets.endSetup();
+  return { started, fixture, helper, helperStart, stallReadbacks, effectiveSendBuffer, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass, rss, sampler };
+}
+
+export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(run)): Promise<HoldsRun> {
+  const dir = resolve(ctx.output, attemptId); mkdirSync(dir);
+  const expected = requirePreflight(ctx.setup);
+  const check = recordPlacement(dir, ctx.linuxPlacement);
+  check('client', () => process.pid);
+  const prepared = await prepare(ctx, run, dir, expected, check);
+  const { started, fixture, helper, helperStart, stallReadbacks, effectiveSendBuffer, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass, rss, sampler } = prepared;
+  const { relay, log } = started;
   const restoreIndex = restoreAccount(run.cell);
-  const accounts: AccountMutations[] = fixture.targets.map(() => ({}));
+  const accounts: AccountMutations[] = fixture.targets.map(({ id }) => ({ memberId: id }));
+  const gateErrors: string[] = [];
+  const stallErrors: string[] = [];
+  const stallSends: StallSend[] = [];
+  const observeMs = ctx.e6ObserveMs ?? 0;
+  const stallStep = <T>(step: string, work: Promise<T>) => work.catch(error => {
+    stallErrors.push(`${step}: ${(error as Error).message}`);
+    return undefined;
+  });
   // [statement sent, ack]; a control has no gate, so both bounds are the nominal time.
   const gate = async (failing: boolean): Promise<[number, number]> => {
     const before = now();
-    if (run.kind === 'fault' && !await control.run(`UPDATE public.fk592_control SET failing = ${failing};`)) throw new Error(`gate did not ${failing ? 'engage' : 'release'}`);
+    if (run.kind === 'fault' && !await control.run(`UPDATE public.fk592_control SET failing = ${failing};`)) gateErrors.push(`gate did not ${failing ? 'engage' : 'release'}`);
     return [before, run.kind === 'fault' ? now() : before];
   };
   const recoveryAt = pass + (run.kind === 'fault' ? DURATIONS[run.duration] : DURATIONS.long);
@@ -239,14 +299,15 @@ export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> 
     at(pass + TIMELINE.stall, async () => {
       const time = now();
       const targetsReady = sockets.targets.filter(t => t.subscribed).length, bystandersReady = sockets.state.bystandersReady;
-      proxies.forEach(p => p.pause());
-      return { time, targetsReady, bystandersReady, failures: await postStall(fixture, ctx.stall) };
+      const pause = await stallStep('pause', helper.command('pause'));
+      const failures = pause ? await postStall(fixture, ctx.stall, stallSends, ctx.preflightVolume) : 0;
+      return { time, pause, targetsReady, bystandersReady, failures };
     }),
     at(pass + TIMELINE.revoke, async () => { const time = now(); await pool([...fixture.targets.keys()], MUTATION_CONCURRENCY, async a => {
       const r = await changeRole(fixture, fixture.targets[a], 'guest'); Object.assign(accounts[a], { revokeStartedAt: r.startedAt, revokeStatus: r.status, revokedAt: r.doneAt });
     }); return time; }),
     (async () => { const gateOn = await at(pass + TIMELINE.fault, () => gate(true)); const gateOff = await at(recoveryAt, () => gate(false)); return { gateOn, gateOff }; })(),
-    at(pass + TIMELINE.resume, () => { const time = now(); proxies.forEach(p => p.resume()); return time; }),
+    at(pass + TIMELINE.resume, () => stallStep('resume', helper.command('resume'))),
     restoreIndex === undefined ? undefined : at(pass + TIMELINE.restore, async () => {
       const r = await changeRole(fixture, fixture.targets[restoreIndex], 'member'); Object.assign(accounts[restoreIndex], { restoreStartedAt: r.startedAt, restoreStatus: r.status, restoredAt: r.doneAt }); return r.startedAt;
     }),
@@ -258,25 +319,69 @@ export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> 
   await sleep(1_500);
   const end = now();
   await probes.stop();
-  sockets.state.stopping = true;
-  started.sampler.stop(); await started.sampler.done;
+  sockets.endScoredCloses(observeMs);
+  const extension = observeMs > 0 ? new AbortController() : undefined;
+  if (extension) ctx.active.interruptExtension = () => extension.abort();
+  sampler.stop(); await sampler.done;
   const clockEnd = await calibrate();
-  await cleanup(ctx.active);
-  await started.logsClosed;
+  const helperEnd = await stallStep('end clock calibration', helper.calibrate());
+  const scoredStreams = (freeze: boolean) => {
+    const values = <T>(rows: T[]) => freeze ? rows.slice() : rows;
+    return {
+      closes: values(log.closes), sends: values(log.sends), holds: values(log.holds), permits: values(log.permits),
+      statements: values(relay.statements), refused: values(relay.refused), dbProbe: values(probes.dbProbe),
+      httpProbe: values(probes.httpProbe), pool: values(log.pool), rss: values(rss),
+      metrics: log.metrics.find(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)?.fields,
+    };
+  };
+  let snapshot: StallSnapshot = { error: 'server did not stop before the persistence snapshot' };
+  ctx.active.beforeRemoveDatabase = db => { snapshot = snapshotStallRows(db, fixture.org, fixture.stallChannel); };
+  const scoredCutoffAt = now();
+  sockets.freezeScoredReceipts();
+  const frozen = observeMs > 0 ? scoredStreams(true) : undefined;
+  let completed = false;
+  if (extension && !ctx.interrupted()) {
+    try {
+      const maxTimerMs = 2_147_483_647;
+      for (let remaining = observeMs; remaining > 0; remaining -= maxTimerMs) {
+        await delay(Math.min(remaining, maxTimerMs), undefined, { signal: extension.signal });
+      }
+      completed = !ctx.interrupted();
+    } catch (error) {
+      if (!extension.signal.aborted) throw error;
+    }
+  }
+  sockets.stop();
+  const graceful = await cleanup(ctx.active);
+  const stall = helper.evidence(stalled.pause, resume, helperStart, helperEnd);
+  sockets.targets.forEach((target, i) => { target.stall = stall.records[i]; });
+  writeFileSync(resolve(dir, 'stall-clock.json'), JSON.stringify(stall.helperClock));
+  if (started.server.exitCode !== null || started.server.signalCode !== null) await started.logsClosed;
+  const streams = frozen ?? scoredStreams(false);
+  writeFileSync(resolve(dir, 'stall-rows.json'), JSON.stringify(snapshot));
+  const e6Observation = { requestedMs: observeMs, scoredCutoffAt, completed };
+  const e6PerId = reconcileStall({
+    stall: ctx.stall, preflightVolume: ctx.preflightVolume, cell: run.cell, sends: stallSends,
+    snapshot, targets: sockets.targets, observation: e6Observation,
+  });
   const offsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart.server, clockEnd.server) : undefined;
   const wallOffsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart.wall, clockEnd.wall) : undefined;
   const nominalRecovery = run.kind === 'fault' ? { [run.duration]: gateOff[1] } : { short: pass + DURATIONS.short, long: gateOff[1] };
   const result: HoldsRun = {
     kind: run.kind, cell: run.cell, duration: run.kind === 'fault' ? run.duration : undefined, repeat: run.repeat,
-    times: { pass, stall: stalled.time, revoke: revokeTime, gateOn, gateOff, resume, restore, end, nominalRecovery },
-    setup: { bystanders: BYSTANDERS, bystandersReadyAtStall: stalled.bystandersReady, targetsReadyAtStall: stalled.targetsReady, calibrationErrors, stallPostFailures: stalled.failures },
-    serverCloses: log.closes, wallOffsetBoundsMs,
-    revokedChannels: fixture.revoked, accounts, targets: sockets.targets, notices: sockets.notices,
+    times: { pass, stall: stalled.time, revoke: revokeTime, gateOn, gateOff, resume: stall.resumeBounds?.[0] ?? pass + TIMELINE.resume,
+      resumeBoundsMs: stall.resumeBounds, resumeUnobserved: !resume, restore, end, nominalRecovery },
+    setup: { bystanders: BYSTANDERS, bystandersReadyAtStall: stalled.bystandersReady, targetsReadyAtStall: stalled.targetsReady,
+      calibrationErrors, stallPostFailures: stalled.failures, gateErrors, stallErrors },
+    serverCloses: streams.closes, wallOffsetBoundsMs,
+    revokedChannels: fixture.revoked, accounts, targets: sockets.targets, stallReadbacks, effectiveSendBuffer, notices: sockets.notices,
     bystanderNotices: sockets.state.bystanderNotices, bystanderCloses: sockets.state.bystanderCloses,
-    sendTiming: offsetBoundsMs && { offsetBoundsMs, uncertaintyMs: runUncertaintyMs(offsetBoundsMs, log.sends), records: log.sends },
-    samples: log.holds, statements: relay.statements, refused: relay.refused,
-    dbProbe: probes.dbProbe, httpProbe: probes.httpProbe, pool: log.pool, rss: started.rss,
-    metrics: log.metrics.find(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)?.fields,
+    sendTiming: offsetBoundsMs && { offsetBoundsMs, uncertaintyMs: runUncertaintyMs(offsetBoundsMs, streams.sends), records: streams.sends },
+    samples: streams.holds, statements: streams.statements, refused: streams.refused,
+    dbProbe: streams.dbProbe, httpProbe: streams.httpProbe, pool: streams.pool, rss: streams.rss,
+    metrics: streams.metrics, permits: streams.permits, stallSends, e6Observation, e6PerId,
+    ...(observeMs > 0 ? { lateBystanderCloses: sockets.state.lateBystanderCloses } : {}),
+    trace: readTrace(started.server.tracePath, graceful, started.arrivals),
   };
   writeFileSync(resolve(dir, 'run.json'), JSON.stringify(result));
   return result;

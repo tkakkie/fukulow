@@ -7,9 +7,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-#[cfg(test)]
-use serde::Serialize;
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 use tracing::Instrument;
 #[cfg(test)]
 use uuid::Uuid;
@@ -17,9 +15,10 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::{Auth, ErrorBody},
-    messages::LIVE_QUEUE_CAPACITY,
+    channels::activity::Registration,
 };
 
+mod activity;
 mod connection;
 mod limits;
 mod origin;
@@ -99,12 +98,18 @@ pub async fn upgrade(
             .into_response();
     };
     let socket_work = state.shutdown.sockets.enter();
+    // A Channel-list read issued after the 101 must start after activity registration.
+    let activity = state
+        .message_delivery
+        .channel_access
+        .activity
+        .register(&auth);
     let span = tracing::Span::current();
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
         .read_buffer_size(state.socket_gate.limits().read_buffer)
         .on_upgrade(move |socket| {
-            connected(socket, state, auth, permit, socket_work).instrument(span)
+            connected(socket, state, auth, permit, activity, socket_work).instrument(span)
         })
 }
 
@@ -113,10 +118,11 @@ async fn connected(
     state: AppState,
     auth: Auth,
     permit: limits::Permit,
+    activity: Registration,
     work: crate::shutdown::Guard,
 ) {
     let lifecycle = connection::Lifecycle::default();
-    connected_with_lifecycle(socket, state, auth, permit, lifecycle, work).await;
+    connected_with_lifecycle(socket, state, auth, permit, activity, lifecycle, work).await;
 }
 
 async fn connected_with_lifecycle(
@@ -124,6 +130,7 @@ async fn connected_with_lifecycle(
     state: AppState,
     auth: Auth,
     permit: limits::Permit,
+    activity: Registration,
     lifecycle: connection::Lifecycle,
     _work: crate::shutdown::Guard,
 ) {
@@ -147,21 +154,13 @@ async fn connected_with_lifecycle(
     };
     // Session admission checks worker health after SQL as well as at registration.
     // A stopped fallback worker must never admit an unmonitored subscription.
-    let queue = state.message_delivery.queue(
-        auth.identity.organization.organization_id,
-        (auth.identity.member.id, auth.membership_revision),
-        LIVE_QUEUE_CAPACITY,
-    );
-    let mut overflow = queue.overflow.clone();
-    // Frame/live/heartbeat wakes must only poll a oneshot, not every epoch wait.
-    let mut notification_failed = queue.notification_failed.clone().spawn();
-    let mut connection = connection::Connection {
-        state: &state,
-        auth: &auth,
-        queue,
-        cursors: HashMap::new(),
-        access: HashMap::new(),
-        permit,
+    // Declare the watchers first so the connection drops before them.
+    let (mut overflow, mut notification_failed, mut connection) = {
+        let connection = connection::Connection::new(&state, &auth, permit);
+        let overflow = connection.queue.overflow.clone();
+        // Frame/live/heartbeat wakes must only poll a oneshot, not every epoch wait.
+        let notification_failed = connection.queue.notification_failed.clone().spawn();
+        (overflow, notification_failed, connection)
     };
     let code = tokio::select! {
         biased;
@@ -169,7 +168,7 @@ async fn connected_with_lifecycle(
         result = session.ended() => Some(result.unwrap_or(1011)),
         _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
         _ = notification_failed.failed() => Some(1011),
-        result = connection.run(&mut socket, lifecycle) => result.err(),
+        result = connection.run(&mut socket, activity, lifecycle) => result.err(),
     };
     if let Some(code) = code {
         close(&mut socket, code).await;
@@ -192,38 +191,3 @@ async fn close(socket: &mut WebSocket, code: u16) {
 
 #[cfg(test)]
 mod tests;
-
-impl From<crate::channels::activity::Notice> for ServerEvent {
-    fn from(notice: crate::channels::activity::Notice) -> Self {
-        use crate::channels::activity::Notice;
-        match notice {
-            Notice::ActivityReady => Self::ActivityReady,
-            Notice::ActivityReset => Self::ActivityReset,
-            Notice::ChannelActivity { channel_id, seq } => {
-                Self::ChannelActivity { channel_id, seq }
-            }
-            Notice::ReadPositionChanged {
-                channel_id,
-                topic_id,
-                read_seq,
-            } => Self::ReadPositionChanged {
-                channel_id,
-                topic_id,
-                read_seq,
-            },
-            Notice::ChannelAccessGained { channel_id } => Self::ChannelAccessGained { channel_id },
-            Notice::ChannelAccessRevoked { channel_id } => {
-                Self::ChannelAccessRevoked { channel_id }
-            }
-            Notice::ChannelListChanged => Self::ChannelListChanged,
-            Notice::DmListChanged => Self::DmListChanged,
-            Notice::SectionsChanged { generation } => Self::SectionsChanged {
-                generation: generation.to_string(),
-            },
-            Notice::ChannelMembersChanged { channel_id } => {
-                Self::ChannelMembersChanged { channel_id }
-            }
-            Notice::MembersChanged => Self::MembersChanged,
-        }
-    }
-}

@@ -7,12 +7,12 @@ use axum::{
     routing::post,
 };
 use serde_json::Value;
-use std::{
-    io::{self, Write},
-    sync::{Arc, Mutex},
-};
+use std::io;
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
+
+mod capture;
+pub(crate) use capture::Capture;
 
 #[test]
 fn revocation_hold_metrics_report_every_outcome() {
@@ -44,41 +44,6 @@ fn revocation_hold_metrics_report_every_outcome() {
             assert_eq!(fields[*field], index + 1, "{field}");
         }
     });
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
-impl Write for Capture {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = Self;
-    fn make_writer(&'a self) -> Self {
-        self.clone()
-    }
-}
-impl Capture {
-    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        subscriber(self.clone(), false)
-    }
-    pub(crate) fn measurement_subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        subscriber(self.clone(), true)
-    }
-    pub(crate) fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-    pub(crate) fn events(&self) -> Vec<Value> {
-        self.text()
-            .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
-            .collect()
-    }
 }
 
 #[test]
@@ -236,9 +201,14 @@ fn revocation_hold_samples_require_opt_in() {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(events.len(), 2, "{stderr}");
+        assert_eq!(events.len(), 4, "{stderr}");
+        for pair in events.as_chunks::<2>().0 {
+            assert_eq!(pair[0]["fields"]["event"], "revocation_holds_sample");
+            assert_eq!(pair[1]["fields"]["event"], "notice_permit_sample");
+            assert_eq!(pair[1]["target"], REVOCATION_MEASUREMENT_TARGET);
+        }
         let mut previous_ms = 0.0;
-        for event in events {
+        for event in events.into_iter().step_by(2) {
             assert_eq!(event["target"], REVOCATION_MEASUREMENT_TARGET);
             let fields = event["fields"].as_object().unwrap();
             assert_eq!(fields.len(), 5);
@@ -251,6 +221,75 @@ fn revocation_hold_samples_require_opt_in() {
             previous_ms = server_ms;
         }
     }
+}
+
+#[test]
+fn notice_permit_sample_event_fields() {
+    use notice_permits::{NoticeCaller::Retry, WaitGuard};
+
+    let output = Capture::default();
+    let gauges = notice_permits::NoticePermitGauges::default();
+    tracing::subscriber::with_default(output.subscriber(), || gauges.emit());
+    assert!(output.events().is_empty());
+
+    tracing::subscriber::with_default(output.measurement_subscriber(), || gauges.emit());
+    let events = output.events();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event["target"], REVOCATION_MEASUREMENT_TARGET);
+    let fields = event["fields"].as_object().unwrap();
+    assert_eq!(fields["event"], "notice_permit_sample");
+    assert!(fields["server_ms"].as_f64().unwrap().is_finite());
+    let mut expected = vec!["event".to_owned(), "server_ms".to_owned()];
+    for field in [
+        "permits_total",
+        "all_pass_in_flight",
+        "all_pass_statements",
+        "all_pass_us_total",
+    ] {
+        expected.push(field.to_owned());
+    }
+    for caller in ["retry", "handoff", "publish", "revoked", "scoped"] {
+        for field in [
+            "waiting",
+            "holding",
+            "holding_checked_out",
+            "granted",
+            "wait_abandoned",
+            "wait_count",
+            "wait_granted_us_total",
+            "wait_abandoned_us_total",
+            "hold_us_total",
+            "pool_wait_us_total",
+            "statement_us_total",
+        ] {
+            expected.push(format!("{caller}.{field}"));
+        }
+        for ms in [1, 5, 10, 50, 100, 250, 500, 1000, 2500, 5000] {
+            expected.push(format!("{caller}.wait_le_{ms}_ms"));
+        }
+    }
+    for caller in ["retry", "handoff"] {
+        for outcome in ["before", "after"] {
+            expected.push(format!("{caller}.deadline_exits_{outcome}_attempt"));
+        }
+    }
+    expected.sort();
+    assert_eq!(fields.keys().cloned().collect::<Vec<_>>(), expected);
+    for name in &expected {
+        if name != "event" && name != "server_ms" {
+            assert_eq!(fields[name], 0, "{name}");
+        }
+    }
+
+    WaitGuard::new(&gauges, Retry).grant().finish();
+    drop(WaitGuard::new(&gauges, Retry));
+    tracing::subscriber::with_default(output.measurement_subscriber(), || gauges.emit());
+    let events = output.events();
+    let fields = &events[1]["fields"];
+    assert_eq!(fields["retry.granted"], 1);
+    assert_eq!(fields["retry.wait_abandoned"], 1);
+    assert_eq!(fields["retry.wait_count"], 2);
 }
 
 #[tokio::test]

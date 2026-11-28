@@ -2,6 +2,7 @@ use super::session::{
     account_id, add_organization_membership, another_session, connect_organization, fallback_close,
 };
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use axum::extract::ConnectInfo;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -94,9 +95,9 @@ async fn account_sockets(pool: PgPool, operation: usize, cancel: bool) {
     for socket in [&mut current_foreign, &mut foreign_socket] {
         assert_eq!(event(socket).await["message"], foreign_message);
     }
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     let mut blocker = pool.begin().await.unwrap();
     crate::auth::security::test_support::lock_account(&mut blocker, account).await;
     let pending = {
@@ -104,10 +105,13 @@ async fn account_sockets(pool: PgPool, operation: usize, cancel: bool) {
         let token = f.token.clone();
         tokio::spawn(async move { security_request(&app, operation, &token, true).await })
     };
-    tokio::time::timeout(Duration::from_secs(10),async {loop {
-        let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT password_hash FROM accounts%FOR UPDATE')").fetch_one(&pool).await.unwrap();
-        if waiting {break;} tokio::task::yield_now().await;
-    }}).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::LockQuery("SELECT password_hash FROM accounts%FOR UPDATE"),
+        Count::AtLeast(1),
+        Duration::from_secs(10),
+    )
+    .await;
     if cancel {
         pending.abort();
     }

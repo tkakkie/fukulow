@@ -1,24 +1,52 @@
 import { createInvites } from './invites'
-import { sessionEndedMessage } from './auth'
-import { createActivityTarget } from './activity'
-import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
+import { memberError } from './member-errors'
+import { createActivityTarget, type Invalidation } from './activity'
+import { listMembers, changeRole, deactivateMember, createInvite, isOrganizationUnavailable, isSessionEnded, type Identity, type Member, type Role, type Result } from './api'
 
 import { createAuthors } from './authors'
 import type { lookupAuthors } from './api'
 import type { createChannels } from './channels'
 import type { createSync } from './sync'
 
+type WatchMemberAccessOptions = {
+  skipConnectRefresh?: boolean
+  memberListAccess?: () => MemberListAccess
+  onDirectoryLoad?: (listener: () => void) => () => void
+}
+
 /** Follow access changes for this Organization selection; panel opens call load directly. */
 export function watchMemberAccess(
   channels: Pick<ReturnType<typeof createChannels>, 'get' | 'subscribe'>,
   sync: Pick<ReturnType<typeof createSync>, 'get' | 'subscribe'>,
   refresh: (reason: 'access' | 'refresh') => void,
+  options?: WatchMemberAccessOptions,
 ) {
+  let listReady = channels.get().status === 'ready'
   let channelIds = new Set(channels.get().channels.map(c => c.id))
+  let loadedChannelIds: Set<string> | null = null
+  const stopDirectoryLoad = options?.onDirectoryLoad?.(() => {
+    loadedChannelIds = new Set(channels.get().channels.map(c => c.id))
+  })
   let connection = sync.get().connected ? sync.get().connection : null
   let lost = new Set<string>()
   const stopChannels = channels.subscribe(() => {
-    const ids = new Set(channels.get().channels.map(c => c.id))
+    const state = channels.get()
+    const ids = new Set(state.channels.map(c => c.id))
+    if (!listReady) {
+      if (state.status !== 'ready') return
+      listReady = true
+      const added = [...ids].some(id => !channelIds.has(id))
+      channelIds = ids
+      if (!options?.onDirectoryLoad) {
+        if (added) refresh('refresh')
+        return
+      }
+      // Only a Guest's directory is scoped by Channel grants; non-Guests already list all active Members.
+      if ((options.memberListAccess?.() ?? 'guest') === 'guest' && loadedChannelIds !== null && [...ids].some(id => !loadedChannelIds!.has(id))) {
+        refresh('refresh')
+      }
+      return
+    }
     const removed = [...channelIds].some(id => !ids.has(id))
     const added = [...ids].some(id => !channelIds.has(id))
     channelIds = ids
@@ -34,9 +62,9 @@ export function watchMemberAccess(
     const reconnected = state.connected && state.connection !== connection
     if (state.connected) connection = state.connection
     if (accessLost) refresh('access')
-    else if (reconnected) refresh('refresh')
+    else if (reconnected && !options?.skipConnectRefresh) refresh('refresh')
   })
-  return () => { stopChannels(); stopSync() }
+  return () => { stopChannels(); stopSync(); stopDirectoryLoad?.() }
 }
 
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
@@ -48,22 +76,7 @@ export function canDeactivateMember(identity: Identity, target: Member): boolean
     (identity.member.role === 'owner' || target.role !== 'owner')
 }
 
-export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
-  if (r.kind === 'network') return 'サーバーに接続できません。もう一度お試しください。'
-  if (r.error === 'last_owner') return '最後のオーナーのロールは変更できません。'
-  if (r.error === 'last_channel_manager') return 'チャンネルの管理者がいなくなるため、ロールを変更できません。先に別のオーナーまたは管理者を追加してください。'
-  if (r.error === 'invite_sign_in_required') return 'このアドレスのアカウントでログインしてから招待を受けてください。'
-  if (r.error === 'invite_account_mismatch') return '招待先のアカウントでログインしてください。'
-  if (r.error === 'invite_issuer_unauthorized') return '招待したメンバーの権限が変更されています。組織の管理者に新しい招待を依頼してください。'
-  if (r.error === 'member_already_active') return 'すでにこの組織のメンバーです。'
-  if (r.error === 'invite_unavailable') return 'この招待は利用できません。招待先アドレスと有効期限を確認してください。'
-  if (r.error === 'invite_limit_reached') return '有効な招待が上限に達しています。不要な招待を取り消してから、もう一度お試しください。'
-  if (r.status === 401) return sessionEndedMessage
-  if (r.status === 403) return 'この操作の権限がありません。'
-  return '入力内容と権限を確認してください。'
-}
-
-type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; lookupAuthors?: typeof lookupAuthors; baseUrl(): string }
+type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; lookupAuthors?: typeof lookupAuthors; firstDisplayTimeoutMs?: number; baseUrl(): string }
 const defaults: MembersDeps = { listMembers, changeRole, deactivateMember, createInvite, baseUrl: () => `${location.origin}${location.pathname}` }
 // Only a previously verified non-Guest can retain rows during revalidation.
 export type MemberListAccess = Role | 'revalidating' | null
@@ -76,13 +89,22 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   let loadSequence = 0
   // Standalone loads keep sequence fencing; held UI loads share the reconciliation queue.
   let activityManaged = false
+  // Defer directory reads until first use or the first-display milestone (#954 R1).
+  let activated = false
+  let hasLoaded = false
+  let activateTimer: ReturnType<typeof setTimeout> | undefined
   const listeners = new Set<() => void>()
+  const loadListeners = new Set<() => void>()
+  const notifyLoad = () => { hasLoaded = true; loadListeners.forEach(l => l()) }
   const invites = createInvites(organizationId, onEnded, membershipLost)
-  const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors)
+  const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors, deps.firstDisplayTimeoutMs)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
+  function clearActivateTimer() {
+    if (activateTimer !== undefined) { clearTimeout(activateTimer); activateTimer = undefined }
+  }
   function unavailable() {
     if (closed) return
-    closed = true; loadSequence++; activityTarget.close(); invites.close(); authors.unavailable()
+    closed = true; loadSequence++; clearActivateTimer(); activityTarget.close(); invites.close(); authors.unavailable(); loadListeners.clear()
     state = { ...state, members: [], loading: false, error: '', retryable: false }
     listeners.forEach(l => l())
   }
@@ -92,7 +114,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     onUnavailable()
   }
   function failed(r: Exclude<Result<unknown>, { ok: true }>) {
-    if (r.kind === 'http' && r.status === 401) onEnded()
+    if (isSessionEnded(r)) onEnded()
     else if (isOrganizationUnavailable(r)) membershipLost()
     set({ error: memberError(r), retryable: false })
   }
@@ -100,12 +122,13 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     set({ members: [], loading: false, error: memberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
   }
   const activityTarget = createActivityTarget({
-    canLoad: () => canLoadMemberList(memberListAccess()),
+    canLoad: () => activated && canLoadMemberList(memberListAccess()),
     async load(signal) {
       const sequence = ++loadSequence
+      notifyLoad()
       const r = await deps.listMembers(organizationId, undefined, signal)
       // Account rejection and current-selection Membership loss outlive freshness fences.
-      if (!r.ok && (r.kind === 'http' && r.status === 401 || !closed && isOrganizationUnavailable(r))) failed(r)
+      if (!r.ok && (isSessionEnded(r) || !closed && isOrganizationUnavailable(r))) failed(r)
       return r.ok ? { ok: true as const, data: { members: r.data.members, sequence } } : r
     },
     accept: data => {
@@ -119,15 +142,18 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       if (access === null || access === 'guest') set({ members: [], loading: true })
     },
     error: listFailed,
-    terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r)),
+    terminal: r => !r.ok && r.kind === 'http' && (isSessionEnded(r) || isOrganizationUnavailable(r)),
   })
   async function load() {
     if (closed) return
+    clearActivateTimer()
+    activated = true
     if (activityManaged) { await activityTarget.refresh(); return }
     if (!canLoadMemberList(memberListAccess())) return
     const sequence = ++loadSequence
+    notifyLoad()
     const r = await deps.listMembers(organizationId)
-    if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
+    if (!r.ok && isSessionEnded(r)) { failed(r); return }
     if (closed) return
     // Freshness changes cannot invalidate Membership loss within this selection.
     if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
@@ -139,15 +165,66 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       set({ members: r.data.members, loading: false, error: '', retryable: false })
     }
   }
+  function activate() {
+    if (closed || activated) return
+    clearActivateTimer()
+    void load()
+  }
+  function scheduleActivate() {
+    if (closed || activated || activateTimer !== undefined) return
+    activateTimer = setTimeout(() => {
+      activateTimer = undefined
+      activate()
+    }, 0)
+  }
+  function refreshIfActive() {
+    if (closed || !activated) return
+    if (activityManaged) { activityTarget.invalidate('notice'); return }
+    return load()
+  }
+  const managedActivityTarget = {
+    ...activityTarget,
+    held() { activityManaged = true },
+    invalidate(reason?: Invalidation, delay?: number) {
+      if (!activated || closed) return
+      activityTarget.invalidate(reason, delay)
+    },
+    refresh() {
+      if (closed) return
+      clearActivateTimer()
+      activated = true
+      return activityTarget.refresh()
+    },
+    retryNow() {
+      if (closed) return
+      clearActivateTimer()
+      activated = true
+      return activityTarget.retryNow()
+    },
+  }
   return {
-    activityTarget: { ...activityTarget, held() { activityManaged = true } },
+    activityTarget: managedActivityTarget,
     authors, invites,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
+    onLoad(l: () => void) {
+      if (closed) return () => {}
+      loadListeners.add(l)
+      if (hasLoaded) l()
+      return () => loadListeners.delete(l)
+    },
     unavailable,
-    close() { invites.close(); closed = true; activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
+    close() { invites.close(); closed = true; clearActivateTimer(); activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear(); loadListeners.clear() },
     load,
-    async retry() { if (!closed) await (activityManaged ? activityTarget.retryNow() : load()) },
+    activate,
+    scheduleActivate,
+    refreshIfActive,
+    async retry() {
+      if (closed) return
+      clearActivateTimer()
+      activated = true
+      await (activityManaged ? activityTarget.retryNow() : load())
+    },
     async invite(email: string, role: Role) {
       if (closed || state.busy) return
       set({ busy: true, error: '', inviteLink: '' })
@@ -195,58 +272,3 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     },
   }
 }
-
-/** The token travels only in a fragment and POST body, and is removed from browser history immediately. */
-export function takeInvite(url = new URL(location.href), replace: (path: string) => void = path => history.replaceState(null, '', path)) {
-  if (!url.hash.startsWith('#invite=')) return null
-  const value = url.hash.slice('#invite='.length).split(':')
-  replace(`${url.pathname}${url.search}`)
-  if (value.length !== 2) return null
-  try {
-    const organizationId = decodeURIComponent(value[0]), token = decodeURIComponent(value[1])
-    if (!/^[0-9a-f-]{36}$/i.test(organizationId) || !/^[0-9a-f]{64}$/.test(token)) return null
-    return { organizationId, token }
-  } catch { return null }
-}
-export function createInviteAcceptance(invite: ReturnType<typeof takeInvite>, api = acceptInvite) {
-  let state = { available: invite !== null, busy: false, error: '', accepted: false, sessionRejected: false }
-  const listeners = new Set<() => void>()
-  const set = (patch: Partial<typeof state>) => { state = { ...state, ...patch }; listeners.forEach(l => l()) }
-  async function signOutAndContinue(signOut: () => Promise<boolean>, isCurrent: () => boolean = () => true) {
-    if (!invite || !state.sessionRejected || state.busy) return false
-    set({ busy: true })
-    try {
-      const ok = await signOut().catch(() => false)
-      if (!isCurrent()) return false
-      set(ok
-        ? { sessionRejected: false, error: '' }
-        : { error: 'ログアウトできませんでした。通信状況を確認して、もう一度お試しください。' })
-      return ok
-    } finally { set({ busy: false }) }
-  }
-  return {
-    get: () => state,
-    subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
-    signOutAndContinue,
-    async accept(input: Omit<AcceptInviteRequest, 'token'>, onEnded: () => void = () => {}, isCurrent: () => boolean = () => true): Promise<Identity | null> {
-      if (!invite || state.busy) return null
-      set({ busy: true, error: '', sessionRejected: false })
-      try {
-        const r = await api(invite.organizationId, { ...input, token: invite.token })
-          .catch((): Result<Identity> => ({ ok: false, kind: 'network' }))
-        if (!isCurrent()) return null
-        if (!r.ok) {
-          const sessionRejected = r.kind === 'http' && r.status === 401
-          if (sessionRejected) onEnded()
-          set({ error: memberError(r), sessionRejected })
-          return null
-        }
-        invite = null
-        set({ accepted: true, available: false })
-        return r.data
-      } finally { set({ busy: false }) }
-    },
-  }
-}
-
-export const inviteFromLocation = () => createInviteAcceptance(takeInvite())

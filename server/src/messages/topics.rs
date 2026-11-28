@@ -1,3 +1,4 @@
+use super::page::DirectionalPage;
 use super::*;
 
 pub(crate) mod projection;
@@ -33,8 +34,9 @@ pub enum TimelineItem {
 pub struct TimelinePage {
     pub history_generation: Uuid,
     pub as_of_seq: i64,
-    /// Ascending W-relative positions, newest last. Continue older with the first position.
+    /// Ascending W-relative positions. Continue older from the first or newer from the last.
     pub items: Vec<TimelineItem>,
+    /// More items exist at W in the requested direction (older for the initial page).
     pub has_more: bool,
 }
 
@@ -42,7 +44,9 @@ pub struct TimelinePage {
 pub struct TopicPage {
     pub history_generation: Uuid,
     pub as_of_seq: i64,
+    /// Ascending W-relative positions. Continue older from the first or newer from the last.
     pub topics: Vec<TopicSummary>,
+    /// More Topics exist at W in the requested direction (older for the initial page).
     pub has_more: bool,
 }
 
@@ -62,10 +66,16 @@ pub struct ListProjectionQuery {
     #[param(minimum = 0)]
     #[schema(minimum = 0)]
     pub as_of_seq: Option<i64>,
-    /// Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.
+    /// Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+    /// Use the position returned at W; never use a live-moved position.
     #[param(minimum = 1)]
     #[schema(minimum = 1)]
     pub before_position: Option<i64>,
+    /// Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+    /// Use the position returned at W; never use a live-moved position.
+    #[param(minimum = 0)]
+    #[schema(minimum = 0)]
+    pub after_position: Option<i64>,
     #[param(minimum = 1, maximum = 200, default = 50)]
     #[schema(minimum = 1, maximum = 200)]
     pub limit: Option<u16>,
@@ -74,10 +84,12 @@ pub struct ListProjectionQuery {
 impl ListProjectionQuery {
     fn validate(&self) -> Result<u16, MessageError> {
         let limit = self.limit.unwrap_or(50);
-        if !(1..=200).contains(&limit)
+        if !valid_page_limit(limit)
             || self.as_of_seq.is_some_and(|w| w < 0)
             || self.before_position.is_some_and(|p| p < 1)
-            || (self.before_position.is_some() && self.as_of_seq.is_none())
+            || self.after_position.is_some_and(|p| p < 0)
+            || (self.before_position.is_some() && self.after_position.is_some())
+            || (self.before_position.or(self.after_position).is_some() && self.as_of_seq.is_none())
         {
             return Err(MessageError::InvalidInput);
         }
@@ -197,84 +209,46 @@ pub async fn topic_history(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization = auth.identity.organization.organization_id;
-    require_visible_scoped(
-        &state.pool,
-        organization,
-        (auth.identity.member.id, auth.membership_revision),
+    let snapshot = history::prepare_snapshot(
+        &state,
+        &auth,
         channel,
+        query.history_generation,
+        query.as_of_seq,
+        async |tx| reject_dm_topics(tx, organization, channel).await,
+        async |tx: &mut sqlx::PgConnection, history_generation, w| {
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
+                .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
+            if !exists {
+                return Err(MessageError::TopicNotFound);
+            }
+            let page = DirectionalPage::new(&query, limit);
+            let (comparison, order) = if page.ascending {
+                (">", "ASC")
+            } else {
+                ("<=", "DESC")
+            };
+            let sql = format!(
+                "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+                FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
+                ORDER BY seq {order} LIMIT $5"
+            );
+            let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
+            let messages = sqlx::query(&sql)
+                .bind(organization)
+                .bind(channel)
+                .bind(topic)
+                .bind(page.cursor)
+                .bind(page.fetch_limit())
+                .bind(w)
+                .try_map(|row| message_from_row(&row))
+                .fetch_all(&mut *tx)
+                .await?;
+            let (messages, has_more) = page.finish(messages);
+            Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
+        },
     )
     .await?;
-    watermark(&state, organization, channel).await?;
-    crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
-        require_visible(
-            &mut *tx,
-            organization,
-            (auth.identity.member.id, auth.membership_revision),
-            channel,
-        )
-        .await?;
-        reject_dm_topics(tx,organization,channel).await?;
-        let (history_generation, w) = history::page(tx, organization, channel, query.history_generation, query.as_of_seq).await?;
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
-            .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
-        if !exists {
-            return Err(MessageError::TopicNotFound);
-        }
-        let ascending = query.after_seq.is_some();
-        let (comparison, order, cursor) = if ascending {
-            (">", "ASC", query.after_seq.unwrap_or(0))
-        } else {
-            (
-                "<=",
-                "DESC",
-                query.before_seq.map(|s| s - 1).unwrap_or(i64::MAX),
-            )
-        };
-        let sql = format!(
-            "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-            FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
-            ORDER BY seq {order} LIMIT $5"
-        );
-        let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
-        let mut messages = sqlx::query(&sql)
-            .bind(organization)
-            .bind(channel)
-            .bind(topic)
-            .bind(cursor)
-            .bind(i64::from(limit) + 1)
-            .bind(w)
-            .try_map(|row| message_from_row(&row))
-            .fetch_all(&mut *tx)
-            .await?;
-        let has_more = messages.len() > usize::from(limit);
-        messages.truncate(usize::from(limit));
-        if !ascending {
-            messages.reverse()
-        }
-        Ok((
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),
-        )
-            .into_response())
-    })
-    .await
-}
-
-// Keep HTTP admission rejection distinct from database/barrier work timeouts.
-pub(super) async fn watermark(
-    state: &AppState,
-    organization: Uuid,
-    channel: Uuid,
-) -> Result<i64, MessageError> {
-    let w = state.message_delivery.latest_seq(&state.pool, organization, channel).await.map_err(|error| {
-        if matches!(&error, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock) {
-            MessageError::ProjectionAdmissionRejected
-        } else {
-            MessageError::Database(error)
-        }
-    })?;
-    #[cfg(test)]
-    tests::history::pause(channel, "barrier").await;
-    Ok(w)
+    snapshot.await
 }

@@ -659,8 +659,9 @@ it('a successful held active-Topic summary evicted by newer main history cannot 
     expect(getSummary).toHaveBeenCalledTimes(2)
     expect(c.topics.get('A').topic('T').summaryError).toBeNull()
     for (let seq = 1001; seq <= 1500; seq++) c.event(msg(seq))
+    getSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1500, topic: summary('T', 1, 1) }))
     const refreshed = await c.topics.activitySummary('A', 'T')
-    expect(refreshed.ok && refreshed.data.as_of_seq).toBe(1000)
+    expect(refreshed.ok && refreshed.data.as_of_seq).toBe(1500)
     expect(c.topics.get('A').lines.some(l => l.kind === 'topic')).toBe(false)
   } finally { activity.close(); await c.close() }
 })
@@ -684,4 +685,920 @@ it('DM and ordinary Channel notices route independently while unknown kinds inva
   expect(dms.invalidate).toHaveBeenCalledTimes(4); expect(channels.invalidate).toHaveBeenCalledTimes(3)
   expect(members.invalidate).toHaveBeenCalledOnce()
   activity.close()
+})
+
+it('only access changes and unknown kinds mark a DM list notice as possible discovery (#956)', () => {
+  const dms = { invalidate: vi.fn(), close() {} }
+  const activity = createActivity({ watched: () => false, covered: () => false, random: () => 0,
+    kind: id => id === 'D' ? 'dm' : undefined })
+  activity.hold('dms', dms)
+  activity.notice({ type: 'activity_ready' })
+  expect(dms.invalidate.mock.calls.some(call => call[2] === true)).toBe(false)
+  dms.invalidate.mockClear()
+  activity.notice({ type: 'channel_activity', channel_id: 'D', seq: 1 })
+  activity.notice({ type: 'read_position_changed', channel_id: 'D', topic_id: null, read_seq: 1 })
+  activity.notice({ type: 'channel_activity', channel_id: 'unknown', seq: 1 })
+  activity.notice({ type: 'read_position_changed', channel_id: 'unknown', topic_id: null, read_seq: 1 })
+  activity.notice({ type: 'channel_access_gained', channel_id: 'D' })
+  activity.notice({ type: 'dm_list_changed' })
+  expect(dms.invalidate.mock.calls).toEqual([
+    ['notice', 200, false], ['notice', 200, false], ['notice', 200, true], ['notice', 200, true],
+    ['access', 200, true], ['access', 200, true],
+  ])
+  activity.close()
+})
+
+it('consecutive below-floor rejections switch to A10 backoff after 3 rejections without accepting or showing an error', async () => {
+  const load = vi.fn(async (): Promise<Result<number>> => ok(1))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: value => value >= 2, random: () => 0 })
+  target.invalidate()
+  // First 2 rejections use the normal 200 ms follow-up; the 3rd enters A10 backoff.
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(2)
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(3)
+  // Pending A10 backoff absorbs invalidations without bypassing backoff.
+  target.invalidate('notice'); target.invalidate('access'); target.invalidate('reconcile')
+  await vi.advanceTimersByTimeAsync(499); expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(1); expect(load).toHaveBeenCalledTimes(4)
+  let expected = 4
+  for (const delay of [1000, 2000, 4000, 8000, 15_000]) {
+    await vi.advanceTimersByTimeAsync(delay - 1); expect(load).toHaveBeenCalledTimes(expected)
+    await vi.advanceTimersByTimeAsync(1); expect(load).toHaveBeenCalledTimes(++expected)
+  }
+  const saturated = load.mock.calls.length
+  await vi.advanceTimersByTimeAsync(60_000)
+  // Capped at 30 s (15 s minimum jitter): at most 4 reads per minute.
+  expect(load).toHaveBeenCalledTimes(saturated + 4)
+  expect(accept).not.toHaveBeenCalled()
+  expect(error).not.toHaveBeenCalled()
+  expect(target.failure()).toBeUndefined()
+  target.close()
+})
+
+it('one below-floor rejection followed by a covering response converges at 200 ms and resets the consecutive count', async () => {
+  let floor = 2, value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= floor, random: () => 0 })
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(1); expect(accept).not.toHaveBeenCalled()
+  expect(error).not.toHaveBeenCalled(); expect(target.failure()).toBeUndefined()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(2); expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled(); expect(target.failure()).toBeUndefined()
+  // Count reset on acceptance: 2 more rejections still use the 200 ms follow-up.
+  floor = 4; value = 3
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(4)
+  value = 4
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5); expect(accept).toHaveBeenLastCalledWith(4)
+  expect(error).not.toHaveBeenCalled()
+  target.close()
+})
+
+it.each(['notice', 'access', 'activity_ready', 'activity_reset', 'periodic'] as const)('below-floor backoff re-evaluates and converges on %s without bypassing A10 backoff', async trigger => {
+  let value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  const activity = createActivity({ watched: () => false, random: () => 0.5, periodMs: 30_000 })
+  activity.hold('sections', target)
+  if (trigger === 'periodic') {
+    const invalidateSpy = vi.spyOn(target, 'invalidate')
+    activity.notice({ type: 'activity_ready' })
+    // First O5 periodic run is at 15_000 ms (random = 0.5). Advance to t = 8_100 where next backoff is due at 16_100 ms.
+    await vi.advanceTimersByTimeAsync(600 + 500 + 1000 + 2000 + 4000)
+    expect(load).toHaveBeenCalledTimes(7)
+    value = 2
+    // At t = 15_000, O5 fires invalidate('periodic', 200) while backoff is still pending until 16_100 ms.
+    await vi.advanceTimersByTimeAsync(6900)
+    expect(invalidateSpy).toHaveBeenCalledWith('periodic', 200)
+    expect(load).toHaveBeenCalledTimes(7)
+    await vi.advanceTimersByTimeAsync(1099)
+    expect(load).toHaveBeenCalledTimes(7)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(load).toHaveBeenCalledTimes(8)
+    expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+    expect(error).not.toHaveBeenCalled()
+    activity.close()
+    return
+  }
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  value = 2
+  if (trigger === 'notice' || trigger === 'access') target.invalidate(trigger)
+  else activity.notice({ type: trigger })
+  await vi.advanceTimersByTimeAsync(499)
+  expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled()
+  activity.close()
+})
+
+it('reconnect resets the consecutive below-floor count, clears backoff and converges at 200 ms', async () => {
+  let floor = 5, value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= floor, random: () => 0 })
+  const activity = createActivity({ watched: () => false, random: () => 0.5 })
+  activity.hold('sections', target)
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  // Reconnect: suspend target, reset floor on fresh socket, then activity_ready.
+  activity.disconnected(); target.suspend()
+  floor = 2
+  activity.notice({ type: 'activity_ready' })
+  // Check the fresh streak BEFORE any covering response is accepted: 1st rejection stays at 200 ms.
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled()
+  activity.close()
+})
+
+it('below-floor rejections preserve A10 Retry-After on subsequent 429 responses', async () => {
+  const load = vi.fn<() => Promise<Result<number>>>()
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 429, retryAfterMs: 5000 })
+    .mockResolvedValue(ok(2))
+  const accept = vi.fn()
+  const target = createActivityTarget({ load, accept, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  target.invalidate('notice'); target.invalidate('reconcile')
+  await vi.advanceTimersByTimeAsync(4999)
+  expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  target.close()
+})
+
+it('non-ok response resets the below-floor streak', async () => {
+  const load = vi.fn<() => Promise<Result<number>>>()
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 500, error: 'boom' })
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValue(ok(2))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  // 2 below-floor rejections at 200 ms, then 500 at 200 ms -> resets belowFloor and schedules 500 ms backoff.
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  expect(error).toHaveBeenCalledOnce()
+  // Backoff fires at 500 ms -> 4th call is below floor, but streak was reset so follow-up is 200 ms.
+  await vi.advanceTimersByTimeAsync(500)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  target.close()
+})
+
+it('retryNow resets the below-floor streak', async () => {
+  let value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  // retryNow clears backoff and resets belowFloor; a below-floor response starts a fresh 200 ms streak.
+  await target.retryNow()
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled()
+  target.close()
+})
+
+it('only reads issued after the current connection started cover activity_ready, and reconnect always refetches', async () => {
+  let epoch: number | null = null
+  const load = vi.fn(async (): Promise<Result<number>> => ok(load.mock.calls.length))
+  const accept = vi.fn(), hide = vi.fn(), onReadyCovered = vi.fn()
+  const activity = createActivity({ watched: () => false, random: () => 0.5 })
+  const target = createActivityTarget({ load, accept, hide, connectionEpoch: () => epoch, onReadyCovered, random: () => 0 })
+  activity.hold('channels', target)
+  try {
+    // Pre-connect read accepted before connection 1 never covers connection 1's activity_ready.
+    await target.refresh()
+    expect(load).toHaveBeenCalledTimes(1)
+    epoch = 1
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(accept).toHaveBeenLastCalledWith(2)
+
+    // An accepted read from connection 1 covers activity_ready on connection 1 without another read.
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(onReadyCovered).toHaveBeenCalledOnce()
+
+    // Reconnect advances to connection 2: connection 1's accepted read never covers connection 2's activity_ready.
+    epoch = null
+    activity.disconnected()
+    epoch = 2
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(3)
+    expect(accept).toHaveBeenLastCalledWith(3)
+
+    // A pre-connect in-flight read is fenced by activity_ready and still followed by a post-connect read.
+    epoch = null
+    activity.disconnected()
+    const stale = held<Result<number>>()
+    load.mockReturnValueOnce(stale.promise)
+    void target.refresh()
+    await flush()
+    expect(load).toHaveBeenCalledTimes(4)
+    epoch = 3
+    activity.notice({ type: 'activity_ready' })
+    stale.resolve(ok(99))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(5)
+    expect(accept).not.toHaveBeenCalledWith(99)
+    expect(accept).toHaveBeenLastCalledWith(5)
+  } finally { activity.close() }
+})
+
+it('a failed or aborted covering read never suppresses activity_ready recovery', async () => {
+  let epoch: number | null = 1
+  const load = vi.fn<(signal: AbortSignal) => Promise<Result<number>>>()
+  const accept = vi.fn()
+  const activity = createActivity({ watched: () => false, random: () => 0.5 })
+  const target = createActivityTarget({ load, accept, connectionEpoch: () => epoch, timeoutMs: 500, random: () => 0 })
+  activity.hold('channels', target)
+  try {
+    // 1. Covering read in flight fails with network error -> retries and converges.
+    const failed = held<Result<number>>()
+    load.mockReturnValueOnce(failed.promise).mockResolvedValueOnce(ok(2))
+    void target.refresh()
+    await flush()
+    activity.notice({ type: 'activity_ready' })
+    failed.resolve({ ok: false, kind: 'network' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+
+    // 2. Covering read in flight times out (aborted) -> retries and converges.
+    epoch = 2
+    const hung = held<Result<number>>()
+    load.mockReturnValueOnce(hung.promise).mockResolvedValueOnce(ok(4))
+    void target.refresh()
+    await flush()
+    const abortedSignal = load.mock.calls[2]![0]
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(abortedSignal.aborted).toBe(true)
+    hung.resolve(ok(99))
+    await vi.advanceTimersByTimeAsync(500)
+    expect(load).toHaveBeenCalledTimes(4)
+    expect(accept).toHaveBeenLastCalledWith(4)
+
+    // 3. Covering read fails with ordinary 400 before activity_ready -> does not count as coverage.
+    epoch = 3
+    load.mockResolvedValueOnce({ ok: false, kind: 'http', status: 400, error: 'bad' }).mockResolvedValueOnce(ok(6))
+    await target.refresh()
+    expect(load).toHaveBeenCalledTimes(5)
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(6)
+    expect(accept).toHaveBeenLastCalledWith(6)
+  } finally { activity.close() }
+})
+
+it('real update notices arriving after a covering read still trigger a follow-up read', async () => {
+  let epoch: number | null = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(load.mock.calls.length))
+  const accept = vi.fn()
+  const activity = createActivity({ watched: () => false, covered: () => false, random: () => 0.5 })
+  const target = createActivityTarget({ load, accept, connectionEpoch: () => epoch, random: () => 0 })
+  activity.hold('channels', target)
+  try {
+    // Covering read in flight: activity_ready is covered, then channel_activity queues a follow-up.
+    const inflight = held<Result<number>>()
+    load.mockReturnValueOnce(inflight.promise)
+    void target.refresh()
+    await flush()
+    activity.notice({ type: 'activity_ready' })
+    activity.notice({ type: 'channel_activity', channel_id: 'c1', seq: 5 })
+    inflight.resolve(ok(1))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(2)
+
+    // After acceptance: channel_activity and channel_list_changed both trigger reads.
+    activity.notice({ type: 'channel_activity', channel_id: 'c1', seq: 6 })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(3)
+
+    activity.notice({ type: 'channel_list_changed' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(4)
+  } finally { activity.close() }
+})
+
+it.each(['U', 'T'] as const)('an awaited Unread summary survives the topic window opening %s (#956)', async opened => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const late = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(late.promise)
+    const pending = c.topics.activitySummary('A', 'U')
+    await flush()
+    const signal = (c.topicsApi.getTopicSummary.mock.calls as unknown[][])[0]![2] as AbortSignal
+    // Opening a Topic prunes the window's activity targets before it registers the opened Topic.
+    void c.topics.loadTopic('A', opened)
+    await flush()
+    expect(signal.aborted).toBe(false)
+    late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: summary('U', 12, 4) }))
+    const result = await pending
+    expect(result.ok && result.data.topic.id).toBe('U')
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('an Unread summary joins a window summary read already in flight instead of failing early (#956)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const late = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(late.promise)
+    const windowRead = c.topics.loadSummary('A', 'U')
+    await flush()
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'U').finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: summary('U', 12, 4) }))
+    const result = await pending
+    await windowRead
+    expect(result.ok && result.data.topic.id).toBe('U')
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('a failed Unread summary releases its demand so the next prune drops the target (#956)', async () => {
+  const { topicClient } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const heldKeys = new Set<string>(), hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((key, target) => {
+    heldKeys.add(key)
+    const release = hold(key, target)
+    return () => { heldKeys.delete(key); release() }
+  })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'network' })
+    const result = await c.topics.activitySummary('A', 'U')
+    expect(result.ok).toBe(false)
+    expect(heldKeys.has('topic:A:U')).toBe(true)
+    void c.topics.loadTopic('A', 'T')
+    await flush()
+    expect(heldKeys.has('topic:A:U')).toBe(false)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('stale cached activitySummary waits for an in-flight load and returns the fresh summary (#988)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T', 2).finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: { ...summary('T', 11, 4), read_seq: 2 } }))
+    const result = await pending
+    await inFlight
+    expect(result.ok && result.data.as_of_seq).toBe(11)
+    expect(result.ok && result.data.topic.read_seq).toBe(2)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('stale cached activitySummary waits through a stale in-flight load for the one queued follow-up (#988)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const second = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T', 2).finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: { ...summary('T', 10, 3), read_seq: 1 } }))
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+    second.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: { ...summary('T', 11, 4), read_seq: 2 } }))
+    const result = await pending
+    await inFlight
+    expect(result.ok && result.data.as_of_seq).toBe(11)
+    expect(result.ok && result.data.topic.read_seq).toBe(2)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it.each([
+  { reason: 'as_of_seq below cursor', asOfSeq: 10, readSeq: 2 },
+  { reason: 'read_seq below minimumPosition', asOfSeq: 11, readSeq: 1 },
+])('stale cached activitySummary returns non-ok when completed loads still fail freshness ($reason) (#988)', async ({ asOfSeq, readSeq }) => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const second = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T', 2).finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: { ...summary('T', 10, 3), read_seq: 1 } }))
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+    second.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: asOfSeq, topic: { ...summary('T', asOfSeq, 4), read_seq: readSeq } }))
+    const result = await pending
+    await inFlight
+    expect(result).toEqual({ ok: false, kind: 'network' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it.each(['network', 'http-404', 'suspend', 'close', 'replaceSession'] as const)('stale cached activitySummary settles promptly with non-ok when in-flight load ends by %s (#988)', async outcome => {
+  const { topicClient } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const targets = new Map<string, import('./activity').ActivityTarget>()
+  const hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((key, target) => {
+    targets.set(key, target)
+    return hold(key, target)
+  })
+  const c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T').finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    if (outcome === 'network') first.resolve({ ok: false, kind: 'network' })
+    else if (outcome === 'http-404') first.resolve({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+    else if (outcome === 'suspend') targets.get('topic:A:T')!.suspend?.()
+    else if (outcome === 'close') c.topics.close()
+    else c.topics.replaceSession()
+    const result = await pending
+    await inFlight
+    expect(result).toEqual(
+      outcome === 'http-404'
+        ? { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
+        : { ok: false, kind: 'network' },
+    )
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('stale cached activitySummary without an in-flight load issues a single fetch and rejects stale results (#988)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  try {
+    await c.boot()
+    c.event(11, 'T')
+    c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: { ...summary('T', 10, 3), read_seq: 0 } }))
+    const result = await c.topics.activitySummary('A', 'T')
+    expect(result).toEqual({ ok: false, kind: 'network' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('evicted Topic Unread resolves under continuous unrelated Channel traffic (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  let seq = 410
+  const getTopicSummary = vi.fn(async () => {
+    const snapshotW = seq
+    const pending = held<Result<import('./api').TopicSummaryResponse>>()
+    queueMicrotask(() => {
+      const next = ++seq
+      socket.onEvent({ type: 'message', kind: 'create', seq: next, message: { ...msg(next, null), sender: 'other' } })
+      pending.resolve(ok({ history_generation: gen, as_of_seq: snapshotW, topic: { ...summary('T', 2, 1, 1), read_seq: 1, unread_count: 1, mention_unread_count: 0 } }))
+    })
+    return pending.promise
+  })
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(2, 'T')], has_more: false }),
+    },
+    sync: {
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+    expect(session.topics.get('A').lines).toHaveLength(400)
+    await session.unread.enter({ channel: 'A', topicId: 'T' })
+    await flush(); await flush()
+    expect(session.topics.get('A').topics.some(t => t.topicId === 'T')).toBe(false)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(1)
+    expect(session.unread.get('A').entry?.boundary).toBe(1)
+    expect(getTopicSummary).toHaveBeenCalledOnce()
+  } finally { session.close(); listChannels.mockRestore() }
+})
+
+it('transient snapshot_expired on Edit does not terminally stop Topic Unread (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 11, unread_count: 2 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+    .mockReturnValueOnce(first.promise)
+    .mockResolvedValue(ok({ history_generation: gen, as_of_seq: 12, topic: { ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 } }))
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 11, unread_count: 2 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 11, has_more: false, items: [{ kind: 'topic', topic: { ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 } }] }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 11, has_more: false, topics: [{ ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 }] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 11, messages: [msg(10, 'T')], has_more: false }),
+    },
+    sync: {
+      random: () => 0,
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 11, messages: [msg(10, 'T')], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 11 }); await flush()
+    const inFlight = session.topics.loadSummary('A', 'T')
+    await flush()
+    // An Edit at seq 12 invalidates the W=11 baseline and causes read() to synthesize 409 snapshot_expired.
+    socket.onEvent({ type: 'message', kind: 'edit', seq: 12, message: { ...msg(10, 'T'), version: 12, body: 'edited' } })
+    await flush()
+    first.resolve(ok({ history_generation: gen, as_of_seq: 11, topic: { ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 } }))
+    await inFlight; await flush()
+    expect(session.unread.get('A').topics.T?.stopped).toBe(false)
+    await vi.advanceTimersByTimeAsync(2_000)
+    await flush()
+    expect(session.unread.get('A').topics.T?.stopped).toBe(false)
+    expect(session.unread.get('A').topics.T?.error).toBe(false)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(2)
+  } finally { session.close(); listChannels.mockRestore() }
+})
+
+it('joined summary read flushes a queued read-position notice and updates evicted Topic Unread count and boundary (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+    .mockReturnValueOnce(first.promise)
+    .mockResolvedValueOnce(ok({ history_generation: gen, as_of_seq: 411, topic: { ...summary('T', 2, 1, 0), read_seq: 2, unread_count: 0, mention_unread_count: 0 } }))
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(2, 'T')], has_more: false }),
+    },
+    sync: {
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    await flush()
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+    expect(session.sync.get().channels.A?.subscription?.confirmed).toBe(true)
+    await session.topics.loadTopic('A', 'T')
+    const initial = session.topics.loadSummary('A', 'T')
+    await flush()
+    await session.unread.enter({ channel: 'A', topicId: 'T' })
+    await flush()
+    expect(getTopicSummary).toHaveBeenCalledOnce()
+    socket.onEvent({ type: 'message', kind: 'create', seq: 411, message: { ...msg(411, null), sender: 'other' } })
+    socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 2 })
+    first.resolve(ok({ history_generation: gen, as_of_seq: 410, topic: { ...summary('T', 2, 1, 1), read_seq: 1, unread_count: 1, mention_unread_count: 0 } }))
+    await initial; await flush()
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(getTopicSummary).toHaveBeenCalledTimes(2)
+    expect(session.topics.get('A').topics.some(t => t.topicId === 'T')).toBe(false)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
+    expect(session.unread.get('A').entry?.boundary).toBe(2)
+  } finally { session.close(); listChannels.mockRestore() }
+})
+
+it('pruning an evicted Topic with no active Topic window does not cancel a pending read-position follow-up (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const second = held<Result<import('./api').TopicSummaryResponse>>()
+  const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+    .mockReturnValueOnce(first.promise)
+    .mockReturnValueOnce(second.promise)
+    .mockResolvedValueOnce(ok({ history_generation: gen, as_of_seq: 412, topic: { ...summary('T', 3, 2, 0), read_seq: 3, unread_count: 0, mention_unread_count: 0 } }))
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(2, 'T'), msg(3, 'T')], has_more: false }),
+    },
+    sync: {
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    await flush()
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+    expect(session.sync.get().channels.A?.subscription?.confirmed).toBe(true)
+    // No active Topic window; hold the first summary read and join via Unread.
+    const initial = session.topics.loadSummary('A', 'T')
+    await flush()
+    await session.unread.enter({ channel: 'A', topicId: 'T' })
+    await flush()
+    socket.onEvent({ type: 'message', kind: 'create', seq: 411, message: { ...msg(411, null), sender: 'other' } })
+    socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 2 })
+    first.resolve(ok({ history_generation: gen, as_of_seq: 410, topic: { ...summary('T', 3, 2, 2), read_seq: 1, unread_count: 2, mention_unread_count: 0 } }))
+    await initial; await flush()
+    // A second read-position notice arrives while the flushed follow-up is in flight.
+    socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 3 })
+    second.resolve(ok({ history_generation: gen, as_of_seq: 411, topic: { ...summary('T', 3, 2, 1), read_seq: 2, unread_count: 1, mention_unread_count: 0 } }))
+    await flush()
+    // Demand is now released and a live Message triggers pruneActivity before the 200ms debounce fires.
+    socket.onEvent({ type: 'message', kind: 'create', seq: 412, message: { ...msg(412, null), sender: 'other' } })
+    await flush()
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(getTopicSummary).toHaveBeenCalledTimes(3)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
+    expect(session.unread.get('A').topics.T?.position).toBe(3)
+    expect(session.unread.get('A').entry?.boundary).toBe(3)
+  } finally { session.close(); listChannels.mockRestore() }
+})
+
+for (const failureKind of ['network', '429'] as const) {
+  it(`second read-position notice during joined follow-up keeps retry protection after ${failureKind} and live-Message prune (#988)`, async () => {
+    const { createSession } = await import('./session')
+    const { row, summary } = await import('./unread-test-helpers')
+    const { msg } = await import('./topic-test-helpers')
+    const api = await import('./api')
+    const gen = '00000000-0000-4000-8000-000000000515'
+    const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+    const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+    let socket!: import('./realtime').RealtimeHandlers
+    const first = held<Result<import('./api').TopicSummaryResponse>>()
+    const second = held<Result<import('./api').TopicSummaryResponse>>()
+    const thirdFailure: Result<import('./api').TopicSummaryResponse> = failureKind === 'network'
+      ? { ok: false, kind: 'network' }
+      : { ok: false, kind: 'http', status: 429, retryAfterMs: 5000 }
+    const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValueOnce(thirdFailure)
+      .mockResolvedValueOnce(ok({ history_generation: gen, as_of_seq: 412, topic: { ...summary('T', 3, 2, 0), read_seq: 3, unread_count: 0, mention_unread_count: 0 } }))
+    const session = createSession({
+      selfId: 'me',
+      onEnded() {},
+      channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+      topicsApi: {
+        getTopicSummary,
+        listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+        listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+        listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(2, 'T'), msg(3, 'T')], has_more: false }),
+      },
+      sync: {
+        random: () => 0.5,
+        connect(h) { socket = h; return { send() {}, close() {} } },
+        api: {
+          listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+          listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+          sendMessage: async () => ({ ok: false, kind: 'network' }),
+        },
+      },
+    })
+    try {
+      await flush()
+      socket.onReady(); await flush()
+      socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+      const initial = session.topics.loadSummary('A', 'T')
+      await flush()
+      await session.unread.enter({ channel: 'A', topicId: 'T' })
+      await flush()
+      socket.onEvent({ type: 'message', kind: 'create', seq: 411, message: { ...msg(411, null), sender: 'other' } })
+      socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 2 })
+      first.resolve(ok({ history_generation: gen, as_of_seq: 410, topic: { ...summary('T', 3, 2, 2), read_seq: 1, unread_count: 2, mention_unread_count: 0 } }))
+      await initial; await flush()
+      // Second notice arrives during the joined follow-up (request #2).
+      socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 3 })
+      second.resolve(ok({ history_generation: gen, as_of_seq: 411, topic: { ...summary('T', 3, 2, 1), read_seq: 2, unread_count: 1, mention_unread_count: 0 } }))
+      await flush()
+      // Unread caller has returned at position 2; 200ms debounce fires request #3 which fails with network/429.
+      await vi.advanceTimersByTimeAsync(200); await flush()
+      expect(getTopicSummary).toHaveBeenCalledTimes(3)
+      // A live Message triggers trimMain -> pruneActivity while request #3's retry is scheduled.
+      socket.onEvent({ type: 'message', kind: 'create', seq: 412, message: { ...msg(412, null), sender: 'other' } })
+      await flush()
+      // Advance past retry backoff / Retry-After; request #4 must run and deliver position 3.
+      await vi.advanceTimersByTimeAsync(failureKind === '429' ? 5_000 : 1_000); await flush()
+      expect(getTopicSummary).toHaveBeenCalledTimes(4)
+      expect(session.unread.get('A').topics.T?.position).toBe(3)
+      expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
+    } finally { session.close(); listChannels.mockRestore() }
+  })
+}
+
+it('pendingNotice clears on terminal 403/404, suspend, and close (#988)', async () => {
+  for (const status of [403, 404] as const) {
+    const load = vi.fn<() => Promise<Result<number>>>()
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status, error: status === 404 ? 'topic_not_found' : undefined })
+    const target = createActivityTarget({
+      load,
+      accept() {},
+      terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
+      random: () => 0,
+    })
+    target.invalidate('notice')
+    expect(target.pendingNotice()).toBe(true)
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(target.pendingNotice()).toBe(false)
+    target.close()
+  }
+  const retrying = createActivityTarget({
+    load: vi.fn<() => Promise<Result<number>>>().mockResolvedValue({ ok: false, kind: 'network' }),
+    accept() {},
+    random: () => 0,
+  })
+  retrying.invalidate('notice')
+  await vi.advanceTimersByTimeAsync(200); await flush()
+  expect(retrying.pendingNotice()).toBe(true)
+  retrying.suspend()
+  expect(retrying.pendingNotice()).toBe(false)
+  retrying.invalidate('notice')
+  expect(retrying.pendingNotice()).toBe(true)
+  retrying.close()
+  expect(retrying.pendingNotice()).toBe(false)
+})
+
+it('delayed background summary below local confirmed read position does not hide a valid Topic Unread count (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+  const markTopicRead = vi.spyOn(api, 'markTopicRead').mockResolvedValue(ok({ history_generation: gen, read_seq: 4 }))
+  let socket!: import('./realtime').RealtimeHandlers
+  const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+    .mockResolvedValueOnce(ok({ history_generation: gen, as_of_seq: 410, topic: { ...summary('T', 4, 3, 1), read_seq: 3, unread_count: 1, mention_unread_count: 0 } }))
+    .mockResolvedValueOnce(ok({ history_generation: gen, as_of_seq: 411, topic: { ...summary('T', 4, 3, 1), read_seq: 3, unread_count: 1, mention_unread_count: 0 } }))
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(3, 'T'), { ...msg(4, 'T'), sender: 'other' }], has_more: false }),
+    },
+    sync: {
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    await flush()
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+    session.unread.visibility(true)
+    await session.topics.loadTopic('A', 'T')
+    const visitId = await session.unread.enter({ channel: 'A', topicId: 'T' })
+    await flush(); await flush()
+    expect(session.unread.get('A').topics.T?.position).toBe(3)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(1)
+    session.unread.presented(visitId!, [4])
+    await flush()
+    expect(markTopicRead).toHaveBeenCalledOnce()
+    expect(session.unread.get('A').topics.T?.position).toBe(4)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
+    // Release the Topic window so the next background summary is delivered via subscribeSummary.
+    session.topics.releaseTopic('A', 'T')
+    await session.topics.loadSummary('A', 'T')
+    await flush()
+    expect(getTopicSummary).toHaveBeenCalledTimes(2)
+    expect(session.unread.get('A').topics.T?.position).toBe(4)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
+    expect(session.unread.get('A').topics.T?.error).toBe(false)
+  } finally { session.close(); listChannels.mockRestore(); markTopicRead.mockRestore() }
 })

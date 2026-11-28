@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { secretSafe } from './helpers.ts'
-import { expect, test, type Page, type WebSocketRoute } from '@playwright/test'
+import { createChannel as createChannelViaApi, secretSafe, signInOwner } from './helpers.ts'
+import { expect, test, type Locator, type Page, type WebSocketRoute } from '@playwright/test'
 import type { ClientMessage, components, ServerEvent } from '../src/api-schema.d.ts'
 
 type AcceptInviteRequest = components['schemas']['AcceptInviteRequest']
@@ -25,6 +25,12 @@ test.afterEach(async ({ page }) => {
 
 let channelSeq = 0
 const nextChannelName = (prefix: string) => `${prefix}-${++channelSeq}-${Date.now()}`
+
+function gate<T = void>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
 
 async function signIn(page: Page): Promise<string> {
   const statusRes = await secretSafe(() => page.request.get('/api/v1/setup'))
@@ -53,12 +59,17 @@ async function signIn(page: Page): Promise<string> {
 }
 
 async function createChannel(page: Page, name: string): Promise<Channel> {
-  const created = page.waitForResponse(
-    res => new URL(res.url()).pathname.endsWith('/channels') && res.request().method() === 'POST',
-  )
-  await page.getByLabel('チャンネル名').fill(name)
-  await page.getByRole('button', { name: 'チャンネルを作成' }).click()
-  const res = await created
+  const input = page.getByLabel('チャンネル名')
+  const button = page.getByRole('button', { name: 'チャンネルを作成' })
+  await input.fill(name)
+  await expect(input).toHaveValue(name)
+  await expect(button).toBeEnabled()
+  const [res] = await Promise.all([
+    page.waitForResponse(
+      res => new URL(res.url()).pathname.endsWith('/channels') && res.request().method() === 'POST',
+    ),
+    button.click(),
+  ])
   expect(res.ok()).toBe(true)
   const channel = (await secretSafe(() => res.json())) as Channel
   await expect(page.getByRole('heading', { name: channel.name })).toBeVisible()
@@ -70,17 +81,23 @@ const errorJson = (error: string): { contentType: string; body: string } => ({
   body: JSON.stringify({ error } satisfies ErrorBody),
 })
 
+async function submitConfirmedMessage(page: Page, channelId: string, sendButton: Locator): Promise<void> {
+  await expect(sendButton).toBeEnabled()
+  const [res] = await Promise.all([
+    page.waitForResponse(
+      res => new URL(res.url()).pathname.endsWith(`/channels/${channelId}/messages`) && res.request().method() === 'POST',
+    ),
+    sendButton.click(),
+  ])
+  expect(res.status()).toBe(201)
+}
+
 async function sendConfirmedMessage(page: Page, channelId: string, body: string): Promise<void> {
   const timeline = page.getByRole('region', { name: 'タイムライン' })
   const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
   const sendButton = timeline.getByRole('button', { name: '送信' })
-  const sent = page.waitForResponse(
-    res => new URL(res.url()).pathname.endsWith(`/channels/${channelId}/messages`) && res.request().method() === 'POST',
-  )
   await composer.fill(body)
-  await sendButton.click()
-  const res = await sent
-  expect(res.status()).toBe(201)
+  await submitConfirmedMessage(page, channelId, sendButton)
   await expect(timeline.getByText('送信中…')).toHaveCount(0)
   await expect(timeline.getByText(body)).toBeVisible()
   await expect(composer).toHaveValue('')
@@ -94,48 +111,182 @@ async function reselectChannel(page: Page, viaName: string, targetName: string):
   await expect(page.getByRole('heading', { name: targetName })).toBeVisible()
 }
 
+test('the first Channel creation press survives initial list loading and activity_ready', async ({ page }) => {
+  const org = await signIn(page)
+  const seed = await secretSafe(() => page.request.post(`/api/v1/orgs/${org}/channels`, {
+    data: { name: nextChannelName('initial-list'), visibility: 'public' } satisfies CreateChannelRequest,
+  }))
+  expect(seed.status()).toBe(201)
+  expect((await secretSafe(() => page.request.delete('/api/v1/session'))).status()).toBe(204)
+  await page.goto('about:blank')
+
+  const list = gate()
+  const sections = gate()
+  const identity = gate()
+  const deliverReady = gate<() => void>()
+  const orgPath = `**/api/v1/orgs/${org}`
+  let meReads = 0
+  let postCount = 0
+  await page.route(orgPath + '/channels', async route => {
+    if (route.request().method() === 'POST') postCount++
+    else await list.promise
+    await route.continue()
+  })
+  await page.route(orgPath + '/me/sections', async route => { await sections.promise; await route.continue() })
+  await page.route(orgPath + '/me', async route => {
+    if (++meReads > 1) await identity.promise
+    await route.continue()
+  })
+  await page.routeWebSocket(orgPath + '/ws', ws => {
+    const server = ws.connectToServer()
+    server.onMessage(raw => {
+      const event = JSON.parse(String(raw)) as ServerEvent
+      if (event.type === 'activity_ready') deliverReady.resolve(() => ws.send(raw))
+      else ws.send(raw)
+    })
+  })
+
+  try {
+    await signIn(page)
+    const name = nextChannelName('first-press')
+    const button = page.getByRole('button', { name: 'チャンネルを作成' })
+    await page.getByLabel('チャンネル名').fill(name)
+    await expect(page.getByLabel('チャンネルを読み込み中')).toBeVisible()
+    await expect(button).toBeEnabled()
+    const before = (await button.boundingBox())!
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
+    await page.mouse.down()
+
+    list.resolve()
+    await expect(page.getByLabel('チャンネルを読み込み中')).toHaveCount(0)
+    await expect(page.getByLabel('セクションを読み込み中')).toBeVisible()
+    sections.resolve()
+    await expect(page.getByLabel('セクションを読み込み中')).toHaveCount(0)
+    expect(await button.boundingBox()).toEqual(before)
+
+    const refreshing = page.waitForRequest(orgPath + '/me')
+    const ready = await deliverReady.promise
+    ready()
+    await refreshing
+    await expect(button).toBeEnabled()
+    await page.mouse.up()
+    await expect(button).toBeDisabled()
+    expect(postCount).toBe(0)
+
+    const created = page.waitForResponse(response => response.url().endsWith('/channels') && response.request().method() === 'POST')
+    identity.resolve()
+    expect((await created).status()).toBe(201)
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+    expect(postCount).toBe(1)
+  } finally {
+    list.resolve()
+    sections.resolve()
+    identity.resolve()
+  }
+})
+
+test('keeps Channel name input focused when the initial Channel route opens', async ({ page }) => {
+  const org = await signInOwner(page.request)
+  await createChannelViaApi(page.request, org, nextChannelName('initial-focus'))
+  const list = gate()
+  await page.route(`**/api/v1/orgs/${org}/channels`, async route => {
+    if (route.request().method() === 'GET') await list.promise
+    await route.continue()
+  })
+
+  try {
+    await page.goto('/')
+    const input = page.getByLabel('チャンネル名')
+    // Allow the initial route to open between the selection and insertion in fill().
+    await input.selectText()
+    await expect(input).toBeFocused()
+    list.resolve()
+    await expect(page).toHaveURL(new RegExp(`/o/${org}/c/`))
+    await expect(input).toBeFocused()
+    const name = nextChannelName('creation-draft')
+    await page.keyboard.insertText(name)
+    await expect(input).toHaveValue(name)
+    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeEnabled()
+  } finally {
+    list.resolve()
+  }
+})
+
 test('capability reconciliation preserves creation focus between selection and text insertion and notice-before-POST discovery keeps one Channel row', async ({ page }) => {
   let socket: WebSocketRoute | undefined
   await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => { ws.connectToServer(); socket = ws })
   const org = await signIn(page)
-  await createChannel(page, nextChannelName('creation-baseline'))
+  const baseline = await createChannel(page, nextChannelName('creation-baseline'))
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
   const name = nextChannelName('creation-reconcile')
   await page.getByRole('radio', { name: '非公開', exact: true }).check()
   const input = page.getByLabel('チャンネル名')
+  const button = page.getByRole('button', { name: 'チャンネルを作成' })
   // fill() focuses/selects first, then inserts text in a separate browser command.
   // Reconcile exactly between those commands, before there is any draft to retain.
   await input.focus()
-  let releaseIdentity!: () => void
-  const identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
-  await page.route(`**/api/v1/orgs/${org}/me`, async route => { await identityGate; await route.continue() })
-  try {
-    const refreshing = page.waitForRequest(`**/api/v1/orgs/${org}/me`)
-    socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
-    await refreshing
-    await expect(input).toBeFocused()
-    await page.keyboard.insertText(name)
-    await expect(input).toHaveValue(name)
-    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeDisabled()
-    await input.press('Enter')
-  } finally { releaseIdentity() }
-  await expect(page.getByLabel('チャンネル名')).toHaveValue(name)
-  await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
 
-  let releaseCreation!: () => void
-  const creationGate = new Promise<void>(resolve => { releaseCreation = resolve })
+  const identityPath = `**/api/v1/orgs/${org}/me`
+  let identityGate = gate()
+  await page.route(identityPath, async route => { await identityGate.promise; await route.continue() })
+  let postCount = 0
+  const creationGate = gate()
   await page.route(`**/api/v1/orgs/${org}/channels`, async route => {
     if (route.request().method() !== 'POST') return route.continue()
+    postCount++
     const response = await route.fetch()
-    await creationGate
+    await creationGate.promise
     await route.fulfill({ response })
   })
-  const row = page.getByRole('navigation', { name: 'チャンネル' }).getByRole('button', { name })
-  await page.getByRole('button', { name: 'チャンネルを作成' }).click()
+  const nav = page.getByRole('navigation', { name: 'チャンネル' })
+  const baselineRow = nav.getByRole('button', { name: baseline.name })
+  await expect(baselineRow).toBeVisible()
+  const before = await baselineRow.boundingBox()
+  expect(before).not.toBeNull()
+  const permissionHint = 'チャンネルを作成する権限を確認できるまで、作成できません。'
+  const hint = nav.getByText(permissionHint, { exact: true })
+  await expect(hint).toBeHidden()
+  const row = nav.getByRole('button', { name })
   try {
+    // Evidence-based invalidation keeps focus, disables submit and blocks Enter.
+    try {
+      const refreshing = page.waitForRequest(identityPath)
+      socket!.send(JSON.stringify({ type: 'members_changed' } satisfies ServerEvent))
+      await refreshing
+      await expect(input).toBeFocused()
+      await page.keyboard.insertText(name)
+      await expect(input).toHaveValue(name)
+      await expect(button).toBeDisabled()
+      await expect(hint).toBeVisible()
+      await expect(button).toHaveAccessibleDescription(permissionHint)
+      expect(await baselineRow.boundingBox()).toEqual(before)
+      await input.press('Enter')
+    } finally { identityGate.resolve() }
+    await expect(input).toHaveValue(name)
+    await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
+    await expect(button).toBeEnabled()
+    await expect(hint).toBeHidden()
+    await expect(button).not.toHaveAttribute('aria-describedby')
+    expect(await baselineRow.boundingBox()).toEqual(before)
+    expect(postCount).toBe(0)
+
+    // Routine revalidation keeps the button enabled and holds the draft until /me confirms.
+    identityGate = gate()
+    try {
+      const refreshing = page.waitForRequest(identityPath)
+      socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
+      await refreshing
+      await expect(button).toBeEnabled()
+      await button.click()
+      await expect(button).toBeDisabled()
+      expect(await baselineRow.boundingBox()).toEqual(before)
+      expect(postCount).toBe(0)
+    } finally { identityGate.resolve() }
+
     // The committed mutation is discovered through its notice while its HTTP acknowledgement is held.
     await expect(row).toHaveCount(1)
-  } finally { releaseCreation() }
+    expect(postCount).toBe(1)
+  } finally { creationGate.resolve() }
   await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
   await expect(row).toHaveCount(1)
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
@@ -331,11 +482,7 @@ test('shows 編集して送り直す on a definite failed send and restores the 
   await expect(editButton).toHaveCount(0)
   await expect(timeline.getByRole('alert')).toHaveCount(0)
 
-  const confirmed = page.waitForResponse(
-    res => new URL(res.url()).pathname.endsWith(`/channels/${target.id}/messages`) && res.request().method() === 'POST',
-  )
-  await sendButton.click()
-  expect((await confirmed).status()).toBe(201)
+  await submitConfirmedMessage(page, target.id, sendButton)
   await expect(timeline.getByText('送信中…')).toHaveCount(0)
   await expect(composer).toHaveValue('')
   await expect(timeline.getByText(body)).toBeVisible()
@@ -719,11 +866,7 @@ test('confirms before replacing a non-empty Composer draft on 編集して送り
   await expect(composer).toBeFocused()
   await expect(editButton).toHaveCount(0)
 
-  const confirmed = page.waitForResponse(
-    res => new URL(res.url()).pathname.endsWith(`/channels/${target.id}/messages`) && res.request().method() === 'POST',
-  )
-  await sendButton.click()
-  expect((await confirmed).status()).toBe(201)
+  await submitConfirmedMessage(page, target.id, sendButton)
   await expect(timeline.getByText(refusedBody)).toBeVisible()
   await expect(composer).toHaveValue('')
 })

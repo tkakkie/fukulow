@@ -7,6 +7,16 @@ use axum::{
 };
 use std::net::SocketAddr;
 
+pub(crate) fn csp_safe_authority(value: &str) -> Option<Authority> {
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+    {
+        return None;
+    }
+    value.parse().ok()
+}
+
 #[derive(Clone, Default)]
 pub struct AllowedHost(Option<Authority>);
 
@@ -14,13 +24,7 @@ impl AllowedHost {
     pub fn configured(value: &str) -> Result<Self, &'static str> {
         const INVALID: &str =
             "FUKULOW_ALLOWED_HOST must be one hostname or IP with an optional port";
-        if !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
-        {
-            return Err(INVALID);
-        }
-        let authority: Authority = value.parse().map_err(|_| INVALID)?;
+        let authority = csp_safe_authority(value).ok_or(INVALID)?;
         let host = authority.host();
         let valid_host = if let Some(ip) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
         {
@@ -103,6 +107,32 @@ mod tests {
     use super::*;
     use axum::{Router, body::Body, middleware};
     use tower::ServiceExt;
+
+    #[test]
+    fn csp_safe_authority_accepts_only_allowed_characters_in_an_authority() {
+        for value in [
+            "Chat-1.example.",
+            "127.0.0.1:8080",
+            "[::1]",
+            "[2001:db8::1]:443",
+        ] {
+            assert_eq!(csp_safe_authority(value).unwrap().as_str(), value);
+        }
+        for value in [
+            "",
+            "[::1",
+            "chat.example'",
+            "chat.example\"",
+            "chat.example;",
+            "chat.example ",
+            "chat.example,other.example",
+            "chat.example/path",
+            "user@chat.example",
+            "café.example",
+        ] {
+            assert!(csp_safe_authority(value).is_none(), "{value:?}");
+        }
+    }
 
     #[tokio::test]
     async fn external_host_gate_rejects_foreign_hosts_and_keeps_readiness_private() {
