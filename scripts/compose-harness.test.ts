@@ -2,8 +2,9 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { test } from 'node:test'
+import { delimiter, dirname, join } from 'node:path'
+import { test, type TestContext } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { poll, pollHealth, psql } from './compose-harness.ts'
 
 const harness = new URL('./compose-harness.ts', import.meta.url)
@@ -74,11 +75,84 @@ test('run hides argument validation errors and partial output from a failed capt
   }
 })
 
-test('psql disables startup files and stops on the first SQL error', () => {
+test('run suppresses timeout diagnostics and forwards partial output only by opt-in', () => {
+  const arg = 'FAKE_DB_PASSWORD=timeout-arg'
+  const input = 'FAKE_DB_PASSWORD=timeout-input'
+  const envValue = 'FAKE_DB_PASSWORD=timeout-env'
+  const child = `
+    const { readFileSync, writeSync } = require('node:fs')
+    writeSync(1, [process.argv[1], readFileSync(0, 'utf8'), process.env.TEST_PASSWORD, ${JSON.stringify(stdoutSecret)}].join('\\n'))
+    writeSync(2, ${JSON.stringify(stderrSecret)})
+    setTimeout(() => {}, 2000)
+  `
+  const parent = `
+    import { writeSync } from 'node:fs'
+    import { inspect } from 'node:util'
+    import { run } from ${JSON.stringify(harness.href)}
+    const [args, options] = JSON.parse(process.argv[1])
+    try {
+      run(process.execPath, args, options)
+    } catch (error) {
+      writeSync(3, inspect(error, { showHidden: true, depth: null }))
+      process.exitCode = 1
+    }
+  `
+  for (const failureOutput of [undefined, 'stderr', 'both']) {
+    const args = ['--eval', child, arg]
+    const options = { timeout: 1000, input, env: { TEST_PASSWORD: envValue }, failureOutput }
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', parent, JSON.stringify([args, options])],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', 'pipe'], timeout: 5000 })
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1)
+    const thrown = result.output[3]
+    assert.ok(thrown !== null)
+    assert.match(thrown, /^Error: Command failed to complete\n/)
+    for (const secret of [arg, input, envValue, stdoutSecret, stderrSecret]) {
+      assert.ok(!thrown.includes(secret), 'the thrown error exposes a secret')
+    }
+    assert.equal(result.stdout, failureOutput === 'both' ? [arg, input, envValue, stdoutSecret].join('\n') : '')
+    assert.equal(result.stderr, failureOutput === undefined ? '' : stderrSecret)
+  }
+})
+
+function fakeDocker(t: TestContext, source: string) {
+  const directory = mkdtempSync(join(tmpdir(), 'fukulow-compose-docker-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  writeFileSync(join(directory, 'docker'), `#!/usr/bin/env node\n${source}`, { mode: 0o700 })
+  return { PATH: [directory, dirname(process.execPath)].join(delimiter) }
+}
+
+test('psql disables startup files and stops on the first SQL error', t => {
   const query = 'SELECT 1;'
-  const invocation = psql(args => args, ['compose', 'exec', '-T', 'db'], ['-U', 'fukulow', '-d', 'fukulow', '-Atc', query])
+  const env = fakeDocker(t, 'process.stdout.write(JSON.stringify(process.argv.slice(2)))')
+  const { stdout } = psql(['compose', 'exec', '-T', 'db'], ['-U', 'fukulow', '-d', 'fukulow', '-Atc', query], { env })
+  const invocation = JSON.parse(stdout)
   assert.deepEqual(invocation, ['compose', 'exec', '-T', 'db', 'psql', '-X', '-v', 'ON_ERROR_STOP=1',
     '-U', 'fukulow', '-d', 'fukulow', '-Atc', query])
+})
+
+test('check-db-roles suppresses failed Docker and psql output', t => {
+  const script = fileURLToPath(new URL('./check-db-roles.ts', import.meta.url))
+  for (const failedCommand of ['compose', 'psql']) {
+    const env = fakeDocker(t, `
+      const args = process.argv.slice(2)
+      if (args[0] === ${JSON.stringify(failedCommand)} || args[2] === ${JSON.stringify(failedCommand)}) {
+        console.log(${JSON.stringify(stdoutSecret)})
+        console.error(${JSON.stringify(stderrSecret)})
+        process.exitCode = 42
+      } else if (args[0] === 'compose' && args.includes('config')) {
+        console.log(JSON.stringify({ services: { db: { image: 'fixture', command: ['postgres'] } } }))
+      } else if (!['network', 'run', 'rm'].includes(args[0]) && args[2] !== 'pg_isready') {
+        process.exitCode = 99
+      }
+    `)
+    const result = spawnSync(process.execPath, [script], { env, encoding: 'utf8', timeout: 5000 })
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /Error: Command exited with status 42/)
+    assert.equal(result.stdout, '')
+    for (const secret of [stdoutSecret, stderrSecret]) assert.ok(!result.stderr.includes(secret))
+  }
 })
 
 test('health polling requires HTTP 200 and an ok body', async () => {

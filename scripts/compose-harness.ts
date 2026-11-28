@@ -25,8 +25,8 @@ export function run(command: string, args: readonly string[], {
   throw new Error(result.error || result.status === null ? 'Command failed to complete' : `Command exited with status ${result.status}`)
 }
 
-export function psql<T>(docker: (args: string[]) => T, execArgs: readonly string[], args: readonly string[]): T {
-  return docker([...execArgs, 'psql', '-X', '-v', 'ON_ERROR_STOP=1', ...args])
+export function psql(execArgs: readonly string[], args: readonly string[], options?: RunOptions): ReturnType<typeof run> {
+  return run('docker', [...execArgs, 'psql', '-X', '-v', 'ON_ERROR_STOP=1', ...args], options)
 }
 
 type HealthResponse = { status: number; body: string }
