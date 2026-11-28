@@ -92,7 +92,7 @@ export function createSync(options: SyncOptions) {
   })
   const core = createCore(options.selfId)
   let state = core.get()
-  let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
+  let socket: { id: number; transport: Connection } | undefined
   const timers = new Map<number, unknown>()
   const requests = createRequestDeadlines()
   const noticeListeners = new Set<(notice: ActivityNotice) => void>()
@@ -121,7 +121,7 @@ export function createSync(options: SyncOptions) {
   }
 
   function dispatch(input: Input): Promise<void> {
-    if (input.type === 'event' && input.event.type === 'message' && 'message' in input.event) rememberIdentityResponse(input.event.message)
+    if ((input.type === 'event' || input.type === 'socket_frame') && input.event.type === 'message' && 'message' in input.event) rememberIdentityResponse(input.event.message)
     else if (input.type === 'ack') rememberIdentityResponse(input.message)
     else if (input.type === 'history_result' || input.type === 'events_result') rememberIdentityResponse(input.page)
     else if (input.type === 'settle_history') rememberIdentityResponse(input.messages)
@@ -139,6 +139,23 @@ export function createSync(options: SyncOptions) {
     const previousRequest = input.type === 'history_failed' ? core.request(input.request) : undefined
     const result = core.step(input)
     state = core.get()
+    if (input.type === 'socket_frame') {
+      const delivery = result.socketDelivery
+      if (delivery?.type === 'activity') {
+        // Rust classified this validated frame. Forward the original payload.
+        const notice = input.event as ActivityNotice
+        noticeListeners.forEach(l => l(notice))
+        return Promise.resolve()
+      }
+      // Input observers still receive the attributed event or abnormal close.
+      if (delivery?.type === 'sync') {
+        input = { ...input, type: 'event', subscription: delivery.subscription }
+      } else {
+        const close = result.effects.find(e => e.type === 'close_connection')
+        if (!close) return Promise.resolve()
+        input = { type: 'socket_closed', connection: close.connection, code: 1006 }
+      }
+    }
     const extraChanged = new Set<string>()
     let notifyChangedComposers: (() => void) | undefined
     if (input.type === 'session_start' || input.type === 'session_replaced' || input.type === 'stop') {
@@ -199,46 +216,9 @@ export function createSync(options: SyncOptions) {
         socket?.transport.close()
         try {
           let opened = false
-          const subscriptions = new Map<string, number[]>()
-          const confirmed = new Map<string, number>()
           const transport = connect({
             onReady: () => { opened = true; void dispatch({ type: 'connection_ready', connection: effect.id }) },
-            onEvent: event => {
-              if (event.type !== 'message' && event.type !== 'subscribed' && event.type !== 'channel_access_lost' && event.type !== 'error') {
-                if (state.connection === effect.id && state.running && state.organization === 'available') noticeListeners.forEach(l => l(event))
-                return
-              }
-              const isReply = event.type === 'subscribed' || event.type === 'channel_access_lost' || (event.type === 'error' &&
-                (event.code === 'channel_not_found' || event.code === 'subscription_limit'))
-              let subscription: number | undefined
-              if (isReply && event.channel_id) {
-                const channel = event.channel_id
-                const pending = subscriptions.get(channel)
-                if (event.type === 'channel_access_lost' || (event.type === 'error' && event.code === 'channel_not_found')) {
-                  // With no pending control this belongs to the confirmed generation, even after unwatch.
-                  // With no prior confirmation, ordered replies pair with queued subscribe generations.
-                  // A prior confirmed subscription plus a pending subscribe is ambiguous: the wire has
-                  // no generation id, so this could be an old async error or the new refusal. Do not
-                  // consume a reply or invalidate either generation; reconnect to establish a wire fence.
-                  // The server serializes controls/live delivery: a new subscribed handoff ends that ambiguity.
-                  // Unwatched Channels consume late replies without reconnecting.
-                  if (state.channels[channel]?.watched && ((confirmed.has(channel) && pending?.length) || (event.type === 'channel_access_lost' && (pending?.length || !confirmed.has(channel) || confirmed.get(channel) !== state.channels[channel]?.subscription?.id) && state.channels[channel]?.state !== 'unavailable'))) {
-                    if (state.connection === effect.id && state.connected) {
-                      const own = socket?.transport
-                      void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
-                      own?.close()
-                    }
-                    return
-                  }
-                  subscription = pending?.shift() ?? confirmed.get(channel) ?? -1
-                  confirmed.delete(channel)
-                } else {
-                  subscription = pending?.shift() ?? -1
-                  if (event.type === 'subscribed' && subscription !== -1) confirmed.set(channel, subscription)
-                }
-              }
-              void dispatch({ type: 'event', connection: effect.id, event, subscription })
-            },
+            onEvent: event => { void dispatch({ type: 'socket_frame', connection: effect.id, event }) },
             onClose: code => {
               if (opened || !options.checkMembership) {
                 if (code === 4003) {
@@ -258,7 +238,7 @@ export function createSync(options: SyncOptions) {
               }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
             },
           })
-          socket = { transport, subscriptions }
+          socket = { id: effect.id, transport }
         } catch { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) }
         break
       }
@@ -266,13 +246,14 @@ export function createSync(options: SyncOptions) {
         socket?.transport.close(); socket = undefined
         requests.cancel()
         break
+      case 'close_connection':
+        if (socket?.id === effect.connection) socket.transport.close()
+        break
       case 'subscribe':
       case 'unsubscribe':
         try {
           if (effect.type === 'subscribe' && socket) {
-            const pending = socket.subscriptions.get(effect.channel) ?? []
-            pending.push(effect.id)
-            socket.subscriptions.set(effect.channel, pending)
+            core.subscribeIssued(socket.id, effect.channel, effect.id)
           }
           socket?.transport.send(effect.type === 'subscribe'
             ? { type: 'subscribe', channel_id: effect.channel, after_seq: effect.after_seq, history_generation: effect.history_generation }

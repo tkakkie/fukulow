@@ -38,6 +38,20 @@ impl WasmCore {
     pub fn has_pending(&self) -> bool {
         self.0.core.has_pending()
     }
+    #[wasm_bindgen(js_name = subscribeIssued)]
+    pub fn subscribe_issued(
+        &mut self,
+        connection: f64,
+        channel: &str,
+        id: f64,
+    ) -> Result<(), JsValue> {
+        self.0.core.subscribe_issued(
+            connection as Token,
+            Uuid::parse_str(channel).map_err(error)?,
+            id as Token,
+        );
+        Ok(())
+    }
     pub fn step(&mut self, input: &str) -> Result<String, JsValue> {
         let input = serde_json::from_str(input).map_err(error)?;
         self.0.step(input).map_err(error)

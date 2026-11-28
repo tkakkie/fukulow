@@ -19,10 +19,7 @@ export const { inputMessages } = inner
 export function createCore(selfId: string): SyncCore {
   const core = inner.createCore(selfId)
   return {
-    get: () => core.get(),
-    request: id => core.request(id),
-    timer: id => core.timer(id),
-    hasPending: () => core.hasPending(),
+    ...core,
     step(input) {
       if (!probe.armed) return core.step(input)
       clock.enter = clock.exit = -1
