@@ -516,6 +516,7 @@ for (const loss of ['deleted', 'unreadable', 'replaced']) {
       assert.deepEqual(r, { outcome: 'stop', reason: `HOST-BUSY missing, unreadable or replaced ${reason}`, jobs: [] });
       assert.equal(launchExitCode(r.outcome), 3);
       assert.deepEqual(w.spawned, gateRan ? [gate] : []);
+      assert.doesNotMatch(chain(w), /a: start \(once, no rerun\)/);
       assert.deepEqual([w.captured.length, w.stoppedLogs, w.samplerStops], gateRan ? [1, 1, 1] : [0, 0, 0]);
       const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
       assert.equal(session.hostBusy, 'lost');
@@ -564,8 +565,40 @@ test('the second job does not spawn when HOST-BUSY is replaced after its idle wa
     jobs: [{ name: 'a', exit: 0 }] });
   assert.equal(launchExitCode(r.outcome), 3);
   assert.deepEqual(w.envs.map(env => env?.FUKULOW_LAUNCH_JOB), ['a']);
+  assert.match(chain(w), /a: start \(once, no rerun\)/);
+  assert.doesNotMatch(chain(w), /b: start \(once, no rerun\)/);
   assert.equal(JSON.parse(w.files.get('/runs/chain/session.json')!).hostBusy, 'lost');
   assert.equal(w.files.get(q.hostBusy), replacement);
+});
+
+test('a lost claim before the job spawn preserves the marker and reports a lingering gate workload', async () => {
+  const w = world();
+  const d = deps(w);
+  const gate = ['node', 'gate.ts'];
+  const q = queue([job('a', { gate })]);
+  const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+  const spawn = d.spawn;
+  d.spawn = (argv, opts) => {
+    const child = spawn(argv, opts);
+    return { ...child, done: child.done.then(code => {
+      w.files.set(q.hostBusy, replacement);
+      w.psAll = ['c1 running\n'];
+      return code;
+    }) };
+  };
+
+  const r = await launch(q, d);
+  const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+  const problem = /containers not live at the claim were live after the job: c1 running/;
+  assert.deepEqual(w.spawned, [gate]);
+  assert.equal(w.files.get(q.hostBusy), replacement);
+  assert.equal(session.hostBusy, 'lost');
+  assert.match(session.workloadProblems.join(), problem);
+  assert.equal(r.outcome, 'stop');
+  assert.equal(session.reason, r.reason);
+  assert.match(session.reason, /HOST-BUSY lost.*workload not confirmed stopped/);
+  assert.match(session.reason, problem);
+  assert.match(chain(w), /HOST-BUSY lost.*workload not confirmed stopped.*c1 running/);
 });
 
 test('the cool-down waits until Tctl is at most the limit, then starts the job, and keeps every reading', async () => {

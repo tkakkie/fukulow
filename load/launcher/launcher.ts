@@ -346,14 +346,15 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     else if (last.length > 0) problems.push(`containers created since the claim still present: ${last.join(', ')}`);
     return problems;
   };
+  const lostClaim = 'HOST-BUSY lost before release';
   const release = async (): Promise<{ hostBusy: Session['hostBusy']; problems: string[] }> => {
     endLogs();
     if (claimText === null) return { hostBusy: 'never claimed', problems: [] };
     let problems: string[];
     try { problems = await stopWorkload(); } catch (e) { problems = [`workload check failed: ${String(e)}`]; }
     // A failed ownership check at spawn stays lost even if the marker can be read again.
-    if (claimLostBeforeSpawn || (problems.length === 0 && !ownsClaim())) {
-      note('HOST-BUSY lost before release');
+    if (claimLostBeforeSpawn || !ownsClaim()) {
+      note(problems.length === 0 ? lostClaim : `${lostClaim}; workload not confirmed stopped: ${problems.join('; ')}`);
       return { hostBusy: 'lost', problems };
     }
     if (problems.length === 0) {
@@ -534,11 +535,11 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       const sampling = job.thermalSampleSeconds === undefined ? null : sampleThermal(job, job.thermalSampleSeconds);
       if (typeof sampling === 'string') return stop(`${job.name} first thermal sample: ${sampling}; job not started`);
       if (aborted) { sampling?.(); return stop(`${aborted}; ${job.name} not started`); }
-      log(`${job.name}: start (once, no rerun)`);
       let exit: number | null;
       try {
         const command = d.platform.inhibit(job.command);
         if (!ownsClaim()) return stopForLostClaim(`before ${job.name}; job not started`);
+        log(`${job.name}: start (once, no rerun)`);
         exit = await run(command, `${job.name}.log`, job, late.policy);
       } finally { sampling?.(); }
       endLogs();
@@ -565,12 +566,20 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   let failure: { error: unknown } | null = null;
   try { result = await body(); } catch (error) { failure = { error }; }
   const released = await release();
-  if (result && released.hostBusy === 'kept') result = { outcome: 'stop', reason: `workload not confirmed stopped, HOST-BUSY kept: ${released.problems.join('; ')}`, jobs };
-  if (result?.outcome === 'done' && released.hostBusy === 'lost') result = { outcome: 'stop', reason: 'HOST-BUSY lost before release', jobs };
+  const problems = released.problems.join('; ');
+  const releaseProblem = released.problems.length === 0 ? undefined : released.hostBusy === 'lost'
+    ? `${lostClaim}; workload not confirmed stopped: ${problems}`
+    : `workload not confirmed stopped, HOST-BUSY kept: ${problems}`;
+  if (result && releaseProblem) {
+    const reason = released.hostBusy === 'lost' && result.reason ? `${result.reason}; ${releaseProblem}` : releaseProblem;
+    result = { outcome: 'stop', reason, jobs };
+  }
+  if (result?.outcome === 'done' && released.hostBusy === 'lost') result = { outcome: 'stop', reason: lostClaim, jobs };
   // The record a judge binds to: the session id in every artefact, which jobs ran (with their
   // outputs, workload labels, exits and confirmations), and the release.
   const session: Session = {
-    id: launchSession, queue: q.name, outcome: result?.outcome ?? 'error', reason: result?.reason ?? (failure ? String(failure.error) : undefined),
+    id: launchSession, queue: q.name, outcome: result?.outcome ?? 'error',
+    reason: result?.reason ?? (failure ? [String(failure.error), releaseProblem].filter(Boolean).join('; ') : undefined),
     jobs: jobs.map(j => { const x = q.jobs.find(y => y.name === j.name); return { ...j, out: x?.out, workloadLabel: x?.workloadLabel, thermalSampleSeconds: periods[j.name], confirmations: x?.confirmations, frequencyGo: x?.issue === 796 ? x.go : undefined, idle: idleEvidence.get(j.name) }; }),
     hostBusy: released.hostBusy, workloadProblems: released.problems, finished: d.now().toISOString(),
   };
