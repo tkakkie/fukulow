@@ -7,6 +7,7 @@ pub mod reply_counts;
 mod responses;
 mod retention;
 mod sends;
+mod socket_replies;
 mod sync_delay;
 #[cfg(test)]
 mod test_support;
@@ -28,6 +29,7 @@ pub struct Core {
     pub(crate) channel_order: Vec<Uuid>,
     pub(crate) requests: BTreeMap<Token, Request>,
     pub(crate) timers: BTreeMap<Token, Timer>,
+    socket_replies: socket_replies::SocketReplies,
 }
 impl Core {
     pub fn new(self_id: Uuid) -> Self {
@@ -50,6 +52,7 @@ impl Core {
             channel_order: Vec::new(),
             requests: BTreeMap::new(),
             timers: BTreeMap::new(),
+            socket_replies: socket_replies::SocketReplies::default(),
         }
     }
     pub fn session(&self) -> &SessionView {

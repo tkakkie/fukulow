@@ -51,7 +51,7 @@ const sameMessage = (a: Message, b: Message) => a.history_generation === b.histo
   (a.mentions ?? []).length === (b.mentions ?? []).length && (a.mentions ?? []).every((m, i) => m.member_id === b.mentions![i].member_id && m.name === b.mentions![i].name)
 
 export function inputMessages(input: Input): Message[] {
-  return input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
+  return (input.type === 'event' || input.type === 'socket_frame') && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
     : input.type === 'ack' ? [input.message]
     : input.type === 'history_result' ? input.page.messages
     : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : [])
@@ -68,6 +68,7 @@ export function createCore(selfId: string): SyncCore {
     request: id => read<ReturnType<SyncCore['request']>>(core.request(id)) ?? undefined,
     timer: id => read<ReturnType<SyncCore['timer']>>(core.timer(id)) ?? undefined,
     hasPending: () => core.hasPending(),
+    subscribeIssued: (connection, channel, id) => core.subscribeIssued(connection, coreId(channel), id),
     step(input: Input): CoreResult {
       const out = read<Delta>(core.step(JSON.stringify(coreInput(input))))
       const { bodies } = out
@@ -130,7 +131,8 @@ export function createCore(selfId: string): SyncCore {
       }
       const effects = out.effects.map(e => e.type === 'send' ? expandBody<Send>(e, bodies) : e)
       return { effects, changedChannels: new Set(out.changedChannels), records,
-        ...(out.moves ? { moves: out.moves } : {}), stateChanged: out.stateChanged }
+        ...(out.moves ? { moves: out.moves } : {}),
+        ...(out.socketDelivery ? { socketDelivery: out.socketDelivery } : {}), stateChanged: out.stateChanged }
     },
   }
 }

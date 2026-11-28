@@ -1,4 +1,4 @@
-use crate::{engine::Step, merge::Source, *};
+use crate::{engine::Step, merge::Source, socket_replies::Route, *};
 use fukulow_api::ServerEvent;
 use std::rc::Rc;
 
@@ -94,30 +94,7 @@ impl Step<'_> {
                     self.subscribe(id);
                 }
             }
-            Input::SocketClosed { connection, code } => {
-                if self.core.session.connection != Some(connection) {
-                    return;
-                }
-                self.core.session.connection = None;
-                self.core.session.connected = false;
-                for id in self.ids() {
-                    if self
-                        .core
-                        .channel(id)
-                        .is_some_and(|c| c.subscription.is_some())
-                    {
-                        self.channel(id).subscription = None;
-                    }
-                }
-                if code == 4001 {
-                    self.stop(true);
-                    return;
-                }
-                let attempt = self.core.session.reconnect_attempt;
-                self.core.session.reconnect_attempt += 1;
-                let n = self.wait(Purpose::ReconnectBackoff, None, attempt);
-                self.core.session.reconnect_wait = Some(n);
-            }
+            Input::SocketClosed { connection, code } => self.socket_closed(connection, code),
             Input::Watch { channel: id } => {
                 let c = self.channel(id);
                 if c.watched && c.state != Availability::Unavailable {
@@ -196,6 +173,7 @@ impl Step<'_> {
                 event,
                 subscription,
             } => self.event(connection, event, subscription),
+            Input::SocketFrame { connection, event } => self.socket_frame(connection, event),
             Input::HistoryResult { request, page } => {
                 self.history_response(request, Ok(crate::responses::HistoryPage::Messages(page)))
             }
@@ -240,6 +218,56 @@ impl Step<'_> {
             _ => {}
         }
     }
+    fn socket_closed(&mut self, connection: Token, code: u16) {
+        if self.core.session.connection != Some(connection) {
+            return;
+        }
+        self.core.session.connection = None;
+        self.core.session.connected = false;
+        self.core.socket_replies.clear();
+        for id in self.ids() {
+            if self
+                .core
+                .channel(id)
+                .is_some_and(|c| c.subscription.is_some())
+            {
+                self.channel(id).subscription = None;
+            }
+        }
+        if code == 4001 {
+            self.stop(true);
+            return;
+        }
+        let attempt = self.core.session.reconnect_attempt;
+        self.core.session.reconnect_attempt += 1;
+        let n = self.wait(Purpose::ReconnectBackoff, None, attempt);
+        self.core.session.reconnect_wait = Some(n);
+    }
+
+    fn socket_frame(&mut self, connection: Token, event: ServerEvent) {
+        if self.core.session.connection != Some(connection) {
+            self.direct = true;
+            return;
+        }
+        match self.core.socket_replies.route(&event, &self.core.channels) {
+            Route::Sync(subscription) => {
+                self.event(connection, event, subscription);
+                self.out.socket_delivery = Some(SocketDelivery::Sync { subscription });
+            }
+            Route::Activity => {
+                self.direct = true;
+                self.out.socket_delivery = Some(SocketDelivery::Activity);
+            }
+            Route::Reconnect if self.core.session.connected => {
+                self.socket_closed(connection, 1006);
+                self.out
+                    .effects
+                    .push(Effect::CloseConnection { connection });
+            }
+            _ => self.direct = true,
+        }
+    }
+
     fn event(&mut self, connection: Token, event: ServerEvent, subscription: Option<Token>) {
         if self.core.session.connection != Some(connection) || !self.core.session.connected {
             return;

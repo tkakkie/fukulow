@@ -285,6 +285,10 @@ pub enum Input {
         event: ServerEvent,
         subscription: Option<Token>,
     },
+    SocketFrame {
+        connection: Token,
+        event: ServerEvent,
+    },
     Watch {
         channel: Uuid,
     },
@@ -367,6 +371,9 @@ pub enum Effect {
         id: Token,
     },
     Close,
+    CloseConnection {
+        connection: Token,
+    },
     Subscribe {
         #[serde(skip_serializing_if = "Option::is_none")]
         history_generation: Option<Uuid>,
@@ -415,6 +422,15 @@ pub enum Effect {
     },
     SignIn,
 }
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SocketDelivery {
+    Sync {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subscription: Option<Token>,
+    },
+    Activity,
+}
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepResult {
@@ -424,6 +440,8 @@ pub struct StepResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub moves: Vec<MoveVersion>,
     pub state_changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_delivery: Option<SocketDelivery>,
 }
 #[derive(Debug, Serialize)]
 pub struct MoveVersion {

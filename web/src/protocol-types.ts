@@ -68,6 +68,7 @@ export type State = {
 export type Effect =
   | { type: 'connect'; id: number }
   | { type: 'close' }
+  | { type: 'close_connection'; connection: number }
   | { type: 'subscribe'; history_generation?: string; id: number; channel: string; after_seq: number }
   | { type: 'unsubscribe'; channel: string }
   | { type: 'fetch_history'; history_generation?: string; as_of_seq?: number; id: number; channel: string; page: 'latest' | 'after' | 'before'; seq?: number }
@@ -83,6 +84,7 @@ export type Input = (
   | { type: 'connection_ready'; connection: number }
   | { type: 'socket_closed'; connection: number; code: number }
   | { type: 'event'; connection: number; event: ServerEvent; subscription?: number }
+  | { type: 'socket_frame'; connection: number; event: ServerEvent }
   | { type: 'watch' | 'unwatch' | 'channel_unavailable' | 'refresh' | 'load_older'; channel: string }
   | (SendTarget & { replyRootId?: string; type: 'user_send'; channel: string; clientMessageId: string; body: string })
   | { type: 'user_retry' | 'user_discard'; channel: string; clientMessageId: string }
@@ -98,14 +100,16 @@ export type Input = (
 
 export type SyncView = Omit<State, "requests" | "timers">
 export type MoveVersion = Pick<Extract<ServerEvent, { kind: 'move' }>, 'channel_id' | 'root_id' | 'version' | 'destination_topic_id'>
+type SocketDelivery = { type: 'sync'; subscription?: number } | { type: 'activity' }
 export type CoreResult = {
   effects: Effect[]; changedChannels: ReadonlySet<string>; records: ReadonlyMap<string, Message[]>
-  moves?: readonly MoveVersion[]; stateChanged: boolean
+  moves?: readonly MoveVersion[]; stateChanged: boolean; socketDelivery?: SocketDelivery
 }
 export interface SyncCore {
   get(): SyncView
   request(id: number): Request | undefined
   timer(id: number): Timer | undefined
   hasPending(): boolean
+  subscribeIssued(connection: number, channel: string, id: number): void
   step(input: Input): CoreResult
 }
