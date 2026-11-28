@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { outcomes } from './metrics.ts';
-import { moveInterval, plan, steps, type Plan, type Step } from './plan.ts';
+import { moveInterval, plan, rehearsalPlan, steps, type Plan, type Step } from './plan.ts';
 import { workloadOptions } from './workload-options.ts';
 
 // Frozen copy of the k6 options construction at d655a3ad (before #758), the formal Part D load.
@@ -80,5 +80,24 @@ test('channels and topics attribution runs remove exactly the other Part D read 
     const formal = steps(p).find(s => s.part === 'B')!;
     for (const readLanes of ['channels', 'topics'])
       assert.equal(JSON.stringify(workloadOptions(p, formal, readLanes).options), JSON.stringify(frozen(p, formal)));
+  }
+});
+
+test('D0 full-rate rehearsal keeps the exact arrival schedules in both arms', () => {
+  const p = rehearsalPlan();
+  for (const [size, moveTimeUnit] of [[100, '1s'], [1000, '5s']] as const) {
+    for (const arm of ['baseline', 'move'] as const) {
+      const step: Step = { part: 'D', size, round: 1, arm };
+      const scenarios = workloadOptions(p, step, 'channels').options.scenarios!;
+      const expected = { reader: [2, '1s', '31s'], send: [250, '1s', '20s'], channels: [500, '1s', '20s'],
+        ...(arm === 'move' && { move: [1, moveTimeUnit, '20s'] }) };
+      assert.deepEqual(Object.keys(scenarios).sort(), Object.keys(expected).sort());
+      for (const [name, values] of Object.entries(expected)) {
+        const scenario = scenarios[name];
+        assert.equal(scenario.executor, 'constant-arrival-rate');
+        assert.equal(scenario.gracefulStop, '11s');
+        assert.deepEqual([scenario.rate, scenario.timeUnit, scenario.duration], values);
+      }
+    }
   }
 });

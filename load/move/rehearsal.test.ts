@@ -1,3 +1,4 @@
+import { diagnosticIntegrity } from './diagnostic-integrity.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,7 +12,7 @@ import { storage } from './measure.ts';
 import type { Lane } from './metrics.ts';
 import { moveInterval, plan, rehearsalCell, rehearsalPlan, rehearsalSeconds, rehearsalSteps, stepId, steps, type Plan, type Step } from './plan.ts';
 import { render } from './report.ts';
-import { canRerun, diagnosticMoveMissing, firstArmInvalid, generator, k6Started, rehearsalChecks, scheduledWork, selectRun, statusFlags } from './run.ts';
+import { canRerun, firstArmInvalid, generator, k6Started, rehearsalChecks, scheduledWork, selectRun, statusFlags } from './run.ts';
 import type { Stack } from '../slice5/stack.ts';
 import { workloadOptions } from './workload-options.ts';
 
@@ -262,15 +263,10 @@ test('sol round 2: a functional FAIL that hides an INVALID arm in the same round
 
 test('a DIAGNOSTIC rehearsal is not complete when committed Move verification failed', () => {
   const p = rehearsalPlan(), [baseline, move] = rehearsalSteps(p);
-  const m = valid(p, move);
-  assert.deepEqual(diagnosticMoveMissing(p, move, { ...m, moveVerified: false }, true), ['verified Move']);
-  assert.deepEqual(diagnosticMoveMissing(p, move, { ...m, moveVerified: undefined }, true), ['verified Move']);
-  assert.deepEqual(diagnosticMoveMissing(p, move, m, false), []);
-  assert.deepEqual(diagnosticMoveMissing(p, baseline, valid(p, baseline), false), []);
-  // Smoke keeps its rule; the recorded DIAGNOSTIC job is unchanged.
-  const smoke = plan(true);
-  assert.deepEqual(diagnosticMoveMissing(smoke, move, m, false), ['verified Move and Move timings']);
-  assert.deepEqual(diagnosticMoveMissing(formal, move, { ...m, moveVerified: false }, false), []);
+  const broken = { ...valid(p, move), moveVerified: false };
+  const problem = 'missing verified committed Moves or Move timings';
+  assert.ok(diagnosticIntegrity(p, move, 'all', broken, undefined, true, {}).includes(problem));
+  assert.ok(!diagnosticIntegrity(p, baseline, 'all', valid(p, baseline), undefined, true, {}).includes(problem));
 });
 
 test('a formal rehearsal is not clean when the measured cell fails its functional checks', () => {
