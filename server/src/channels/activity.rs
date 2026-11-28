@@ -495,10 +495,10 @@ impl Activity {
                     channel,
                     epoch: Epoch::Notice(*epoch),
                     directory_epoch: (proof.role == Role::Guest)
-                        .then_some(authorization.directory_epoch)
+                        .then_some(authorization.directory_epoch())
                         .flatten(),
                     proof: Some(proof),
-                    valid: authorization.valid.clone(),
+                    valid: authorization.valid().clone(),
                     recovery: None,
                 },
             );

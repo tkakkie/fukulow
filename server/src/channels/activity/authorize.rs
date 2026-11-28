@@ -16,11 +16,17 @@ use uuid::Uuid;
 pub(super) struct Authorization {
     entry: Arc<Entry>,
     epoch: u64,
-    pub(super) directory_epoch: Option<u64>,
+    directory_epoch: Option<u64>,
     id: Uuid,
-    pub(super) valid: Arc<QueryToken>,
+    valid: Arc<QueryToken>,
 }
 impl Authorization {
+    pub(super) fn directory_epoch(&self) -> Option<u64> {
+        self.directory_epoch
+    }
+    pub(super) fn valid(&self) -> &Arc<QueryToken> {
+        &self.valid
+    }
     pub(super) fn new(
         entry: Arc<Entry>,
         epoch: u64,
