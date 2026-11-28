@@ -50,6 +50,8 @@ use response::no_store_json;
 pub(crate) mod replies;
 pub use replies::counts::{ReplyCount, ReplyCountPage, ReplyCountRequest, reply_counts};
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
+mod row;
+use row::message_from_row;
 pub mod search;
 pub(crate) mod send;
 pub use send::send_message;
@@ -75,38 +77,6 @@ pub use unread::{
     ChannelList, MarkReadRequest, ReadPosition, UnreadChannel, list_channels, mark_channel_read,
     mark_topic_read,
 };
-
-fn message_from_row(row: &sqlx::postgres::PgRow) -> Result<Message, sqlx::Error> {
-    use sqlx::Row;
-    let deleted: bool = row.try_get("deleted")?;
-    let (body, mentions) = if deleted {
-        (None, None)
-    } else {
-        let mentions: String = row.try_get("mentions")?;
-        let mentions =
-            serde_json::from_str(&mentions).map_err(|error| sqlx::Error::ColumnDecode {
-                index: "mentions".into(),
-                source: Box::new(error),
-            })?;
-        (Some(row.try_get("body")?), Some(mentions))
-    };
-    Ok(Message {
-        history_generation: row.try_get("history_generation")?,
-        id: row.try_get("id")?,
-        channel_id: row.try_get("channel_id")?,
-        created_seq: row.try_get("seq")?,
-        version: row.try_get("version")?,
-        deleted,
-        client_message_id: row.try_get("client_message_id")?,
-        sender: row.try_get("sender")?,
-        body,
-        created_at: row.try_get("created_at")?,
-        topic_id: row.try_get("topic_id")?,
-        reply_to: row.try_get("reply_to")?,
-        reply_root_id: row.try_get("reply_root_id")?,
-        mentions,
-    })
-}
 
 trait ValidateListMessages {
     fn validate(&self) -> Result<u16, MessageError>;

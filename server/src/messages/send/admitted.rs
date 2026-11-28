@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use uuid::Uuid;
 
 use super::receipt::{committed, receipt};
@@ -6,7 +8,7 @@ use crate::{
     messages::{
         Delivery, Message, MessageError, SendMessageRequest, admission, commit, dm_error,
         guards::check_visibility, history, log, mentions, message_from_row, replies,
-        require_visible, search, topics,
+        require_visible, row::MESSAGE_COLUMNS, search, topics,
     },
 };
 
@@ -16,18 +18,22 @@ pub(in crate::messages) async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     sender: Uuid,
     client_message_id: Uuid,
 ) -> Result<Option<Message>, sqlx::Error> {
-    sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-         FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
-        "p.seq",
-    ))
-    .bind(organization_id)
-    .bind(sender)
-    .bind(client_message_id)
-    .try_map(|row| message_from_row(&row))
-    .fetch_optional(executor)
-    .await
+    static SQL: LazyLock<String> = LazyLock::new(|| {
+        mentions::page_sql(
+            &format!(
+                "SELECT {} FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
+                MESSAGE_COLUMNS.as_str(),
+            ),
+            "p.seq",
+        )
+    });
+    sqlx::query(SQL.as_str())
+        .bind(organization_id)
+        .bind(sender)
+        .bind(client_message_id)
+        .try_map(|row| message_from_row(&row))
+        .fetch_optional(executor)
+        .await
 }
 
 pub(in crate::messages) async fn persist(
@@ -182,15 +188,30 @@ async fn persist_admitted(
         .await?
     };
     let reply_root_id = parent.map(|(_, root)| root);
-    let message = sqlx::query(
-        "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
-         ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
-         RETURNING id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions, $11::uuid AS history_generation",
-    ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
-        .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).bind(history_generation).try_map(|row| message_from_row(&row))
-        .fetch_optional(tx.connection()?).await?;
+    static INSERT_SQL: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
+             RETURNING {}, '[]'::text AS mentions, $11::uuid AS history_generation",
+            MESSAGE_COLUMNS.as_str(),
+        )
+    });
+    let message = sqlx::query(INSERT_SQL.as_str())
+        .bind(organization_id)
+        .bind(Uuid::new_v4())
+        .bind(channel_id)
+        .bind(seq)
+        .bind(sender)
+        .bind(input.client_message_id)
+        .bind(&input.body)
+        .bind(topic_id)
+        .bind(input.reply_to)
+        .bind(reply_root_id)
+        .bind(history_generation)
+        .try_map(|row| message_from_row(&row))
+        .fetch_optional(tx.connection()?)
+        .await?;
     if let Some(mut message) = message {
         search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;

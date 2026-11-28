@@ -79,7 +79,7 @@ async fn measure_reply_chain_pages(pool: PgPool) {
             );
             let plan: Value = sqlx::query_scalar(&format!(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
-                super::super::super::replies::PAGE_SQL
+                super::super::super::replies::PAGE_SQL.as_str()
             ))
             .bind(org)
             .bind(channel)
