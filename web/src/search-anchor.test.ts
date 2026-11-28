@@ -548,6 +548,26 @@ it('fences an in-flight result across navigation and drops confirmed search bodi
   }
 })
 
+it.each([
+  [403, 'forbidden', 'unavailable'],
+  [404, 'channel not found', 'unavailable'],
+  [403, 'topic_not_found', 'ready'],
+  [404, 'topic_not_found', 'ready'],
+  [403, 'reply_chain_not_found', 'ready'],
+  [404, 'reply_chain_not_found', 'ready'],
+] as const)('marks an anchor missing on HTTP %i %s and leaves the Channel %s', async (status, error, channelState) => {
+  const { anchor, session, ready } = client(async () => ({ ok: false, kind: 'http', status, error }))
+  try {
+    await ready()
+    anchor.open({ ...target, topicId: 'T' })
+    await flushSearch()
+    expect(anchor.get()?.status).toBe('missing')
+    expect(session.sync.get().channels.A.state).toBe(channelState)
+  } finally {
+    session.close()
+  }
+})
+
 it('keeps previously displayed search Messages on terminal Organization loss and fences a pending page', async () => {
   const delayed = deferred<Result<MessagePage>>()
   const read = vi.fn(async (query?: ListMessagesQuery) => query?.after_seq === 40 ? delayed.promise

@@ -141,7 +141,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       },
       error(r) {
         if (r.kind !== 'http') return
-        if (isChannelDenial(r, { statuses: [404] }) && !isOrganizationUnavailable(r)) details.unavailable(id)
+        if (!isOrganizationUnavailable(r) && isChannelDenial(r, { statuses: [404] })) details.unavailable(id)
         if (r.status === 400 && r.error === 'dm_topics_not_allowed') {
           selectedKind = 'dm'
           followOpen()

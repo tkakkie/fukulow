@@ -1,4 +1,4 @@
-import { isOrganizationUnavailable, type ListMessagesQuery, type ListTimelineQuery, type Message, type MessagePage, type ReplyChainPage, type ReplyChainQuery, type Result, type TimelinePage } from './api'
+import { isChannelDenial, isOrganizationUnavailable, type ListMessagesQuery, type ListTimelineQuery, type Message, type MessagePage, type ReplyChainPage, type ReplyChainQuery, type Result, type TimelinePage } from './api'
 import { knownMessageState } from './identity-order'
 import type { SearchResultTarget } from './navigation'
 import type { createSync } from './sync'
@@ -77,7 +77,9 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
   function handleFailure(w: View, failure: Exclude<Result<unknown>, { ok: true }>, mode?: PageRead) {
     if (failure.kind === 'http' && (failure.status === 403 || failure.status === 404)) {
       missing(w)
-      if (!isOrganizationUnavailable(failure) && failure.error !== 'topic_not_found' && failure.error !== 'reply_chain_not_found') {
+      if (!isOrganizationUnavailable(failure) &&
+        isChannelDenial(failure, { statuses: [403, 404], localNotFound: 'topic_not_found' }) &&
+        failure.error !== 'reply_chain_not_found') {
         void sync.channelUnavailable(w.target.channelId)
       }
     } else showError(w, mode)
