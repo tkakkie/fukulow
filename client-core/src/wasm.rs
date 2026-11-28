@@ -4,6 +4,7 @@ use serde::{Deserialize, de::value::StrDeserializer};
 use wasm_bindgen::prelude::*;
 
 mod activity_reads;
+mod detached_sends;
 
 #[wasm_bindgen]
 #[derive(Default)]

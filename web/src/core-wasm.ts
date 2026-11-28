@@ -126,6 +126,7 @@ export function createCore(selfId: string): SyncCore {
   return {
     get: () => view,
     request: id => read<ReturnType<SyncCore['request']>>(core.request(id)) ?? undefined,
+    canDetachSend: request => core.canDetachSend(request),
     timer: id => read<ReturnType<SyncCore['timer']>>(core.timer(id)) ?? undefined,
     hasPending: () => core.hasPending(),
     historyIssue: () => core.historyIssue(),

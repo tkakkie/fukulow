@@ -1,4 +1,4 @@
-import type { Result } from './api'
+import { canRestoreDraft, createDetachedSends } from './detached-sends-wasm'
 import type { DraftStore, DraftTarget } from './drafts'
 import { messageBodyError, topicNameError } from './message-rules'
 
@@ -30,8 +30,6 @@ export type ComposerDraftsOptions = {
   drafts?: DraftStore
 }
 
-export const DEFINITE_REFUSAL_STATUSES = [400, 403, 404, 409, 413, 415] as const
-
 const emptyChannelComposer: ChannelComposerState = { draft: '', topicDraft: '', composerError: null }
 const emptyScopedComposer: TopicComposerState = { draft: '', composerError: null }
 
@@ -58,7 +56,7 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
   const states = new Map<string, ChannelComposerState | TopicComposerState>()
   const listeners = new Map<string, Set<() => void>>()
   const revisions = new Map<string, number>()
-  const submitted = new Map<string, { channel: string; detached: boolean; restore: () => void }>()
+  const submitted = createDetachedSends()
   let unsubscribeDrafts: (() => void) | undefined
 
   const draftTargetOf = (target: ComposerTarget): DraftTarget => ({
@@ -167,6 +165,11 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
   }
 
   return {
+    trackSubmitted: submitted.trackSubmitted,
+    dropSubmitted: submitted.dropSubmitted,
+    detachSubmitted: submitted.detachSubmitted,
+    observeSendResult: submitted.observeSendResult,
+
     getChannel: (channelId: string): ChannelComposerState =>
       getRaw({ channelId }) as ChannelComposerState,
 
@@ -224,9 +227,11 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
       const dt = draftTargetOf(target)
       const storeRevision = drafts?.revision(dt)
       const restore = () => {
-        if (revisionOf(key) !== revision || drafts?.revision(dt) !== storeRevision) return
-        const now = getRaw(target)
-        if (now.draft === '' && (!isChannel || (now as ChannelComposerState).topicDraft === '')) {
+        // Read the draft without caching text from a newer Organization controller.
+        const now = states.get(key)
+        const body = now?.draft ?? drafts?.get(dt) ?? ''
+        const topic = isChannel ? (now as ChannelComposerState | undefined)?.topicDraft ?? drafts?.getTopicDraft(dt) ?? '' : ''
+        if (canRestoreDraft(revision, revisionOf(key), storeRevision, drafts?.revision(dt), body === '' && topic === '')) {
           set(target, isChannel ? { draft: text, topicDraft: channelTopicDraft } : { draft: text })
         }
       }
@@ -257,39 +262,6 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
       }
     },
 
-    trackSubmitted(clientMessageId: string, channel: string, restore: () => void): void {
-      submitted.set(clientMessageId, { channel, detached: false, restore })
-    },
-
-    dropSubmitted(clientMessageId: string): void {
-      submitted.delete(clientMessageId)
-    },
-
-    detachSubmitted(shouldDetach: (channel: string, clientMessageId: string) => boolean): void {
-      for (const [id, entry] of submitted) {
-        // A repeated stop sees no pending state; it must not undo an earlier detachment (C10).
-        if (entry.detached) continue
-        entry.detached = shouldDetach(entry.channel, id)
-      }
-    },
-
-    observeSendResult(clientMessageId: string, result: Result<unknown>): void {
-      const entry = submitted.get(clientMessageId)
-      // Network includes admission 503; keep the restore while a same-key retry is possible.
-      if (entry?.detached || result.ok || (result.kind === 'http' && result.status !== 429)) {
-        submitted.delete(clientMessageId)
-      }
-      // A closed Organization has no failed Message UI; retain a definite refusal's unedited text.
-      if (
-        entry?.detached &&
-        !result.ok &&
-        result.kind === 'http' &&
-        (DEFINITE_REFUSAL_STATUSES as readonly number[]).includes(result.status)
-      ) {
-        entry.restore()
-      }
-    },
-
     resetSession(mode: 'start' | 'stop'): () => void {
       const channelKeys: string[] = []
       const topicKeys: string[] = []
@@ -301,9 +273,7 @@ export function createComposerDrafts(options: ComposerDraftsOptions = {}) {
         else replyKeys.push(key)
       }
       states.clear()
-      for (const [id, entry] of submitted) {
-        if (!entry.detached) submitted.delete(id)
-      }
+      submitted.reset()
       if (mode === 'stop') {
         unsubscribeDrafts?.()
         unsubscribeDrafts = undefined

@@ -73,7 +73,11 @@ pub fn access_outcome(
     }
     match (endpoint, status) {
         (History, Some(403 | 404)) => ChannelUnavailable,
-        (Send, Some(400 | 403 | 404 | 409 | 413 | 415)) => LocalRefusal,
+        (Send, Some(status)) if definite_send_refusal(status) => LocalRefusal,
         _ => LocalOutcome,
     }
+}
+
+pub(crate) fn definite_send_refusal(status: u16) -> bool {
+    matches!(status, 400 | 403 | 404 | 409 | 413 | 415)
 }
