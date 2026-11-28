@@ -37,7 +37,7 @@ pub struct ChannelList {
     pub channels: Vec<UnreadChannel>,
 }
 
-pub(super) async fn visible_channels(
+pub(in crate::messages) async fn visible_channels(
     state: &AppState,
     auth: &Auth,
     archived: bool,

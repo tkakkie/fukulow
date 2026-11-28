@@ -154,14 +154,15 @@ struct Projection {
     has_more: bool,
 }
 
-async fn read(
+async fn read<T>(
     state: &AppState,
     auth: &Auth,
     channel: Uuid,
     query: ListProjectionQuery,
     topics_only: bool,
     topic: Option<Uuid>,
-) -> Result<Projection, MessageError> {
+    finish: impl AsyncFnOnce(&mut sqlx::PgConnection, Projection) -> Result<T, MessageError>,
+) -> Result<T, MessageError> {
     let limit = query.validate()?;
     let newer = query.after_position.is_some();
     let organization = auth.identity.organization.organization_id;
@@ -190,59 +191,87 @@ async fn read(
                 .bind(i64::from(limit) + 1)
                 .bind(topics_only)
                 .bind(topic)
-                .fetch_all(tx)
+                .fetch_all(&mut *tx)
                 .await?;
-            Ok((history_generation, rows))
+            let projection = decode_page(history_generation, &rows, limit, newer)?;
+            finish(tx, projection).await
         },
     )
     .await?;
     if topics_only || topic.is_some() {
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
-    admission::within_work_deadline(async {
-        let (history_generation, rows) = snapshot.await?;
-        let first = rows
-            .first()
-            .ok_or(crate::database::InternalError::Invariant)?;
-        check_visibility(first.try_get::<Option<bool>, _>("visible")?)?;
-        let w: i64 = first.try_get("as_of_seq")?;
-        let mut items = Vec::new();
-        for row in &rows {
-            if row.try_get::<Option<Uuid>, _>("id")?.is_none() {
-                continue;
-            }
-            if row.try_get::<bool, _>("count_drift")? {
-                tracing::error!(target: "fukulow", event = "unread_count_drift");
-            }
-            let message = message_from_row(row)?;
-            items.push(match message.topic_id {
-                None => TimelineItem::Message { message },
-                Some(id) => TimelineItem::Topic {
-                    topic: TopicSummary {
-                        id,
-                        name: row.try_get("name")?,
-                        first_seq: row.try_get("first_seq")?,
-                        last_seq: row.try_get("last_seq")?,
-                        message_count: row.try_get("message_count")?,
-                        read_seq: row.try_get("read_seq")?,
-                        unread_count: row.try_get("unread_count")?,
-                        mention_unread_count: row.try_get("mention_unread_count")?,
-                        latest_message: message,
-                    },
+    admission::within_work_deadline(snapshot).await
+}
+
+fn decode_page(
+    history_generation: Uuid,
+    rows: &[sqlx::postgres::PgRow],
+    limit: u16,
+    newer: bool,
+) -> Result<Projection, MessageError> {
+    let first = rows
+        .first()
+        .ok_or(crate::database::InternalError::Invariant)?;
+    check_visibility(first.try_get::<Option<bool>, _>("visible")?)?;
+    let w: i64 = first.try_get("as_of_seq")?;
+    let mut items = Vec::new();
+    for row in rows {
+        if row.try_get::<Option<Uuid>, _>("id")?.is_none() {
+            continue;
+        }
+        if row.try_get::<bool, _>("count_drift")? {
+            tracing::error!(target: "fukulow", event = "unread_count_drift");
+        }
+        let message = message_from_row(row)?;
+        items.push(match message.topic_id {
+            None => TimelineItem::Message { message },
+            Some(id) => TimelineItem::Topic {
+                topic: TopicSummary {
+                    id,
+                    name: row.try_get("name")?,
+                    first_seq: row.try_get("first_seq")?,
+                    last_seq: row.try_get("last_seq")?,
+                    message_count: row.try_get("message_count")?,
+                    read_seq: row.try_get("read_seq")?,
+                    unread_count: row.try_get("unread_count")?,
+                    mention_unread_count: row.try_get("mention_unread_count")?,
+                    latest_message: message,
                 },
-            });
-        }
-        let has_more = items.len() > usize::from(limit);
-        items.truncate(usize::from(limit));
-        if !newer {
-            items.reverse();
-        }
-        Ok(Projection {
-            history_generation,
-            w,
-            items,
-            has_more,
-        })
+            },
+        });
+    }
+    let has_more = items.len() > usize::from(limit);
+    items.truncate(usize::from(limit));
+    if !newer {
+        items.reverse();
+    }
+    Ok(Projection {
+        history_generation,
+        w,
+        items,
+        has_more,
+    })
+}
+
+pub(in crate::messages) async fn read_timeline<T>(
+    state: &AppState,
+    auth: &Auth,
+    channel: Uuid,
+    query: ListProjectionQuery,
+    finish: impl AsyncFnOnce(&mut sqlx::PgConnection, TimelinePage) -> Result<T, MessageError>,
+) -> Result<T, MessageError> {
+    read(state, auth, channel, query, false, None, async |tx, p| {
+        finish(
+            tx,
+            TimelinePage {
+                history_generation: p.history_generation,
+                as_of_seq: p.w,
+                items: p.items,
+                has_more: p.has_more,
+            },
+        )
+        .await
     })
     .await
 }
@@ -267,13 +296,8 @@ pub async fn list_timeline(
 ) -> Result<Response, MessageError> {
     let Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
-    let p = read(&state, &auth, channel, query, false, None).await?;
-    Ok(no_store_json(TimelinePage {
-        history_generation: p.history_generation,
-        as_of_seq: p.w,
-        items: p.items,
-        has_more: p.has_more,
-    }))
+    let page = read_timeline(&state, &auth, channel, query, async |_, page| Ok(page)).await?;
+    Ok(no_store_json(page))
 }
 
 /// Topic summaries as of W, ordered by their W-relative latest activity.
@@ -296,7 +320,10 @@ pub async fn list_topics(
 ) -> Result<Response, MessageError> {
     let Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
-    let p = read(&state, &auth, channel, query, true, None).await?;
+    let p = read(&state, &auth, channel, query, true, None, async |_, p| {
+        Ok(p)
+    })
+    .await?;
     let topics = p
         .items
         .into_iter()
@@ -346,6 +373,7 @@ pub async fn topic_summary(
         },
         true,
         Some(topic),
+        async |_, p| Ok(p),
     )
     .await?;
     let Some(TimelineItem::Topic { topic }) = p.items.into_iter().next() else {
