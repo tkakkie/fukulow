@@ -135,12 +135,11 @@ test('the real load/record.ts provenance list covers everything record.ts reache
   for (const path of reached) assert.deepEqual(missingFromProvenance('load/record.ts', list.filter(p => p !== path), checkout), [path], path);
 });
 
-test('the k6 scripts record.ts runs are covered too, apart from the two gaps pinned here until record.ts next changes', () => {
+test('the k6 scripts record.ts runs are covered too', () => {
   // record.ts runs LOAD_SCRIPT (load/scenario.ts by default, or load/throughput.ts) in k6; they import
-  // load/scheduler.ts and more, which record.ts never imports itself. The pinned gaps are real: add
-  // them to the list when record.ts next changes (#866 adoption rule) and empty this array.
+  // load/scheduler.ts and more, which record.ts never imports itself.
   const entries = ['load/record.ts', 'load/scenario.ts', 'load/throughput.ts'];
-  const gaps = ['load/events.ts', 'web/src/api-schema.d.ts'];
+  const gaps: string[] = [];
   const list = recordList();
   assert.deepEqual(missingFromProvenance(entries, list, checkout), gaps);
   for (const path of ['load/scheduler.ts', 'load/scenario.ts', 'load/seed.ts', 'web/src/reconnect.ts'])
