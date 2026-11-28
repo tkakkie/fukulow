@@ -208,16 +208,17 @@ test('v20 records the database context refactor with v19 conditions', () => {
     ['load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
 });
 
-function pinnedV21(): ReturnType<typeof loadManifest>['frozen'] {
+function pinnedV21(): ReturnType<typeof loadManifest> {
   const text = readFileSync(new URL('./manifest-v21.json', import.meta.url), 'utf8');
   assert.equal(hash(text), 'ae7f8cac55ee3efaa7ce8d8e2819d1056140a30016c5ebae00c4c60232ce42e1');
   const v21 = JSON.parse(text);
+  assert.equal(v21.sha256, 'e48cdeeb9d8da843bb917f184818e6411d4bf8a2bf2cef8de6f34d426f2736e2');
   assert.equal(v21.sha256, hash(JSON.stringify(v21.frozen)));
-  return v21.frozen;
+  return v21;
 }
 
 test('v21 records typed API errors with v20 conditions', () => {
-  const {version, sourceHashes, ...conditions} = pinnedV21();
+  const {version, sourceHashes, ...conditions} = pinnedV21().frozen;
   const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV20().frozen;
   assert.equal(version, previousVersion + 1);
   assert.deepEqual(conditions, previousConditions);
@@ -227,15 +228,55 @@ test('v21 records typed API errors with v20 conditions', () => {
     ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs']);
 });
 
-test('v24 records internal errors with v21 conditions', () => {
-  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
-  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV21();
-  assert.equal(version, previousVersion + 3);
+function pinnedV22(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v22.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), 'a450e3662c7d7019143e87f8cbfe3ed4caab9428af362fed7cd1db7865ae4827');
+  const v22 = JSON.parse(text);
+  assert.equal(v22.sha256, '552de1dfc300dfde84f500d2613ca9b42a40aa0105dbdc1c5b2211ccb22609e6');
+  assert.equal(v22.sha256, hash(JSON.stringify(v22.frozen)));
+  return v22;
+}
+
+test('v22 records the ServeOptions refactor with v21 conditions', () => {
+  const {version, sourceHashes, ...conditions} = pinnedV22().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV21().frozen;
+  assert.equal(version, previousVersion + 1);
   assert.deepEqual(conditions, previousConditions);
   assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
   const before = new Map(previousSources.map(source => [source.path, source.sha256]));
   assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
-    ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs', 'server/src/database/context.rs']);
+    ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs']);
+});
+
+function pinnedV23(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v23.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), 'ffa26c9be8bd9769211b95f424b8f2d5212054ee5d3e4e808d969f13abecc249');
+  const v23 = JSON.parse(text);
+  assert.equal(v23.sha256, '8dbc50d689fd27da0ff33da347137553f49859cd97ff84a8e65fb2352a3dfdef');
+  assert.equal(v23.sha256, hash(JSON.stringify(v23.frozen)));
+  return v23;
+}
+
+test('v23 records the transaction connection guard refactor with v22 conditions', () => {
+  const {version, sourceHashes, ...conditions} = pinnedV23().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV22().frozen;
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
+});
+
+test('v24 records the typed internal failure refactor with v23 conditions', () => {
+  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV23().frozen;
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs']);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {

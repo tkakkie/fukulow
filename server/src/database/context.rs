@@ -21,11 +21,7 @@ pub(crate) async fn organization_statement<T>(
     body: impl AsyncFnOnce(&mut PgConnection, &str) -> Result<T, sqlx::Error>,
 ) -> Result<T, sqlx::Error> {
     let sql = organization_statement_sql(sql);
-    let mut guard = super::TransactionConnection {
-        connection: None,
-        finished: false,
-        discard: super::Discard::Detach,
-    };
+    let mut guard = super::TransactionConnection::new(super::Discard::Detach);
     let connection = guard
         .connection
         .insert(crate::database::acquire(pool).await?);

@@ -184,7 +184,13 @@ async fn signal_child() {
     let deadline = Duration::from_secs(5);
     let mut drain_polls = f.state.message_delivery.work.drain_polls.subscribe();
     let signal = crate::signal().unwrap();
-    let serving = tokio::spawn(crate::serve(listener, f.state.clone(), signal, deadline));
+    let serving = tokio::spawn(crate::serve(
+        listener,
+        f.state.clone(),
+        Default::default(),
+        signal,
+        deadline,
+    ));
     let server = Server {
         address,
         task: tokio::spawn(std::future::pending()),
@@ -214,7 +220,7 @@ async fn signal_child() {
     assert!(!pending.is_finished());
     // Requests on an already built Router are rejected too (keep-alive race).
     let response = request(
-        &crate::app(f.state.clone()),
+        &crate::app(f.state.clone(), Default::default()),
         "GET",
         "/api/v1/health",
         &f.token,
@@ -259,7 +265,7 @@ async fn signal_child() {
             .await
             .unwrap();
         f.state = state(&restarted_pool).await;
-        f.app = crate::app(f.state.clone());
+        f.app = crate::app(f.state.clone(), Default::default());
         let restarted = Server::start(f.app.clone()).await;
         assert_eq!(
             send(&f, &f.token, f.channel, first_key, "shutdown send").await,
@@ -307,6 +313,7 @@ async fn send_load_child(pool: PgPool, sends: usize) {
         let result = crate::serve(
             listener,
             serving_state,
+            Default::default(),
             async move {
                 signal.await;
                 signal_time.send(std::time::Instant::now()).unwrap();
@@ -397,7 +404,7 @@ async fn send_load_child(pool: PgPool, sends: usize) {
         .await
         .unwrap();
     let restarted_state = state(&restarted_pool).await;
-    let restarted = Server::start(crate::app(restarted_state.clone())).await;
+    let restarted = Server::start(crate::app(restarted_state.clone(), Default::default())).await;
     let mut replay = restarted.connect(&f.token).await;
     for channel in channels {
         subscribe(&mut replay, channel, 0).await;

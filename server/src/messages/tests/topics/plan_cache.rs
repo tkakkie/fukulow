@@ -15,7 +15,7 @@ async fn timeline_and_single_topic_never_cache_a_generic_plan(pool: PgPool) {
     // Size watermark admission from the ordinary pool; all reads still use the
     // sole connection, including authorization, watermark and page snapshot.
     state.message_delivery.admission(&restricted);
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&single)
         .await

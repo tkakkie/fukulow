@@ -31,7 +31,7 @@ impl Fixture {
         let at = member(&pools.admin, org, a, "member").await;
         let bt = member(&pools.admin, org, b, role).await;
         let state = AppState::for_test(pools.app.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         Self {
             pools,
             state,
@@ -210,6 +210,54 @@ async fn guests_cannot_open_but_participate_and_every_management_and_topic_route
         let r = f.open(&f.bt, peer, false).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         assert_eq!(body(r).await, json!({"error":"forbidden"}));
+    }
+    assert_eq!(f.snapshot().await, before);
+    f.pools.app.close().await;
+}
+
+#[fukulow_test::test]
+async fn dm_membership_mutations_check_visibility_before_fixed_membership_and_target(pool: PgPool) {
+    let f = Fixture::new(pool, "guest").await;
+    let dm = f.dm().await;
+    let outsider = member(&f.pools.admin, f.org, Uuid::new_v4(), "owner").await;
+    let missing_target = Uuid::new_v4();
+    let missing_channel = Uuid::new_v4();
+    let before = f.snapshot().await;
+
+    for (method, suffix, input) in [
+        (
+            "POST",
+            "members".to_string(),
+            json!({"member_id":missing_target}),
+        ),
+        ("DELETE", format!("members/{missing_target}"), Value::Null),
+        (
+            "PATCH",
+            format!("members/{missing_target}"),
+            json!({"manager":true}),
+        ),
+    ] {
+        for (channel, token, status, error) in [
+            (dm, &f.bt, StatusCode::BAD_REQUEST, "dm_membership_fixed"),
+            (dm, &outsider, StatusCode::NOT_FOUND, "channel not found"),
+            (
+                missing_channel,
+                &outsider,
+                StatusCode::NOT_FOUND,
+                "channel not found",
+            ),
+        ] {
+            let response = request(
+                &f.app,
+                method,
+                &format!("/api/v1/orgs/{}/channels/{channel}/{suffix}", f.org),
+                token,
+                input.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), status, "{method} {channel}");
+            assert_eq!(body(response).await, json!({"error":error}));
+        }
     }
     assert_eq!(f.snapshot().await, before);
     f.pools.app.close().await;

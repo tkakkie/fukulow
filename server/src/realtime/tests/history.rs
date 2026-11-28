@@ -171,10 +171,13 @@ async fn duplicate_subscribe_with_generation_rechecks_access_and_retires_denied_
         Duration::from_secs(5),
     );
     let fallback = changes.pause_fallback();
-    let server = Server::start(crate::app(AppState {
-        session_changes: changes,
-        ..f.state.clone()
-    }))
+    let server = Server::start(crate::app(
+        AppState {
+            session_changes: changes,
+            ..f.state.clone()
+        },
+        Default::default(),
+    ))
     .await;
     let mut socket = server.connect(&f.token).await;
     subscribe(&mut socket, private, 0).await;

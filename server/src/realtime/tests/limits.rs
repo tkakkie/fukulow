@@ -22,7 +22,7 @@ fn limits(per_account: usize, global: usize, connection: u64, account: u64) -> S
 async fn limited(pool: &PgPool, limits: SocketLimits) -> Fixture {
     let mut f = fixture(pool).await;
     f.state.socket_gate = SocketGate::new(limits);
-    f.app = crate::app(f.state.clone());
+    f.app = crate::app(f.state.clone(), Default::default());
     f.server = Server::start(f.app.clone()).await;
     f
 }

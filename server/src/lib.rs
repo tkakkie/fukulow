@@ -132,18 +132,18 @@ pub(crate) async fn test_app_pool(pool: sqlx::PgPool) -> sqlx::PgPool {
     }
 }
 
-pub fn app(state: AppState) -> Router {
-    app_with_search(state, messages::search::SearchEngine::Disabled)
+#[derive(Default)]
+pub struct ServeOptions {
+    pub search_engine: messages::search::SearchEngine,
+    pub allowed_host: AllowedHost,
 }
 
-fn app_with_search(state: AppState, search_engine: messages::search::SearchEngine) -> Router {
-    configured_app(state, search_engine, AllowedHost::default())
-}
-
-fn configured_app(
+pub fn app(
     state: AppState,
-    search_engine: messages::search::SearchEngine,
-    allowed_host: AllowedHost,
+    ServeOptions {
+        search_engine,
+        allowed_host,
+    }: ServeOptions,
 ) -> Router {
     state.session_changes.set_activity(std::sync::Arc::new(
         state.message_delivery.channel_access.activity.clone(),
@@ -336,28 +336,10 @@ pub(crate) async fn reject_new_requests(
 }
 
 /// The caller must terminate the process on expiry, without waiting for pool/runtime teardown.
-pub async fn serve(
-    listener: tokio::net::TcpListener,
-    state: AppState,
-    signal: impl Future<Output = ()>,
-    deadline: Duration,
-) -> std::io::Result<bool> {
-    serve_with_search(
-        listener,
-        state,
-        messages::search::SearchEngine::Disabled,
-        AllowedHost::default(),
-        signal,
-        deadline,
-    )
-    .await
-}
-
-pub async fn serve_with_search<L>(
+pub async fn serve<L>(
     listener: L,
     state: AppState,
-    search_engine: messages::search::SearchEngine,
-    allowed_host: AllowedHost,
+    options: ServeOptions,
     signal: impl Future<Output = ()>,
     deadline: Duration,
 ) -> std::io::Result<bool>
@@ -372,8 +354,7 @@ where
     let stop_accepting = shutdown.clone();
     let server = axum::serve(
         listener,
-        configured_app(state, search_engine, allowed_host)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app(state, options).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move { stop_accepting.cancelled().await })
     .into_future();
@@ -434,19 +415,22 @@ mod tests {
         if let Some(encoding) = encoding {
             request = request.header(header::ACCEPT_ENCODING, encoding);
         }
-        app(AppState {
-            pool,
-            cookie_secure: true,
-            setup_token: "setup-token-test-only".into(),
-            sign_in_throttle: Default::default(),
-            account_security_throttle: Default::default(),
-            message_delivery: Default::default(),
-            session_changes: Default::default(),
-            session_cleanup: Default::default(),
-            shutdown: Default::default(),
-            ws_allowed_origins: Default::default(),
-            socket_gate: Default::default(),
-        })
+        app(
+            AppState {
+                pool,
+                cookie_secure: true,
+                setup_token: "setup-token-test-only".into(),
+                sign_in_throttle: Default::default(),
+                account_security_throttle: Default::default(),
+                message_delivery: Default::default(),
+                session_changes: Default::default(),
+                session_cleanup: Default::default(),
+                shutdown: Default::default(),
+                ws_allowed_origins: Default::default(),
+                socket_gate: Default::default(),
+            },
+            Default::default(),
+        )
         .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap()

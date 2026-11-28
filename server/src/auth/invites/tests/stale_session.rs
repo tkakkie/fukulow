@@ -41,10 +41,13 @@ async fn stale_cookie_recovery(pool: sqlx::PgPool, existing: bool) {
     let other = org_fn(&pool).await;
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     for secure in [true, false] {
-        let app = crate::app(AppState {
-            cookie_secure: secure,
-            ..AppState::for_test(pool.clone()).await
-        });
+        let app = crate::app(
+            AppState {
+                cookie_secure: secure,
+                ..AppState::for_test(pool.clone()).await
+            },
+            Default::default(),
+        );
         for stale in ["revoked", "expired", "unknown"] {
             let (id, _, account_email, token) = account(&pool, other, Role::Member).await;
             let hash = Sha256::digest(token.as_bytes()).to_vec();

@@ -23,7 +23,7 @@ impl Fixture {
         let id = Uuid::new_v4();
         channel(pool, org, id, sender, false).await;
         let state = AppState::for_test(pool.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         Self {
             app,
             state,

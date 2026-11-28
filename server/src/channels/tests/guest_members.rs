@@ -272,7 +272,7 @@ async fn directory_reads_fresh_role_after_auth_and_keeps_inactive_stale_caller_d
     let id = Uuid::new_v4();
     let token = member(&pools.admin, org, id, "member").await;
     let state = AppState::for_test(pools.app.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     for role in ["guest", "member"] {
         let captured = extract_auth(state.clone(), &token).await;
         sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2")
@@ -339,7 +339,7 @@ async fn guest_directory_role_grants_and_results_share_one_nonlocking_snapshot(p
     let peer = Uuid::new_v4();
     member(&pools.admin, org, peer, "guest").await;
     let state = AppState::for_test(pools.app.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let channel = channel_id(&app, &owner, "public").await;
     grant(&pools.admin, org, channel, guest).await;
     grant(&pools.admin, org, channel, peer).await;

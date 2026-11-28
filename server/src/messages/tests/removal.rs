@@ -39,7 +39,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
                 .bind(org).bind(channel).bind(keeper).execute(&pool).await.unwrap();
         }
         let state = AppState::for_test(pool.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         let key = Uuid::new_v4();
         let gate = GATES.register(key);
         let send = {

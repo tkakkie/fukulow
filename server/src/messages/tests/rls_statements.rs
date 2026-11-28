@@ -66,7 +66,10 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
             .fetch_one(&single)
             .await
             .unwrap();
-        let app = crate::app(AppState::for_test(senders.clone()).await);
+        let app = crate::app(
+            AppState::for_test(senders.clone()).await,
+            Default::default(),
+        );
         // A one-connection pool has no watermark slot: size admission from the
         // larger pool, then read watermarks on the reused single connection.
         let watermarks = messages::Delivery::default();

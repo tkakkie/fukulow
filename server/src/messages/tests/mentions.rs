@@ -362,7 +362,7 @@ async fn mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic(po
         .await
         .unwrap();
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let key = Uuid::new_v4();
     let pending = ambiguous_commit(key);
     assert_eq!(

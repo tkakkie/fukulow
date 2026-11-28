@@ -42,7 +42,7 @@ async fn invite_expiry_range_skips_history_with_custom_and_generic_plans(pool: s
     let anchor: (Uuid,Uuid,Uuid) = sqlx::query_as("SELECT id,owner_cursor,admin_cursor FROM invites WHERE organization_id=$1 AND expires_at<now() LIMIT 1")
         .bind(org).fetch_one(&pool).await.unwrap();
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     for (token, owner_role, cursor) in [(&owner, true, anchor.1), (&admin, false, anchor.2)] {
         assert_eq!(
             page(&app, org, token, None).await,

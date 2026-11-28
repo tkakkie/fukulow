@@ -65,14 +65,14 @@ pub(crate) async fn reject_membership(
     channel: Uuid,
 ) -> Result<(), ApiError> {
     if is_dm(connection, org, channel).await? {
-        Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "dm_membership_fixed",
-            None,
-        ))
+        Err(membership_fixed())
     } else {
         Ok(())
     }
+}
+
+pub(super) fn membership_fixed() -> ApiError {
+    ApiError(StatusCode::BAD_REQUEST, "dm_membership_fixed", None)
 }
 
 pub(crate) async fn pair(

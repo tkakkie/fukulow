@@ -30,11 +30,7 @@ pub(super) async fn transaction<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    let mut guard = TransactionConnection {
-        connection: None,
-        finished: false,
-        discard,
-    };
+    let mut guard = TransactionConnection::new(discard);
     let connection = guard
         .connection
         .insert(crate::database::acquire(pool).await?);
@@ -72,7 +68,17 @@ where
 pub(super) struct TransactionConnection {
     pub(super) connection: Option<PoolConnection<Postgres>>,
     pub(super) finished: bool,
-    pub(super) discard: Discard,
+    discard: Discard,
+}
+
+impl TransactionConnection {
+    pub(super) fn new(discard: Discard) -> Self {
+        Self {
+            connection: None,
+            finished: false,
+            discard,
+        }
+    }
 }
 
 impl Drop for TransactionConnection {

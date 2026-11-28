@@ -150,7 +150,7 @@ async fn reply_chain_watermark_saturation_preserves_denial_precedence_and_retry_
     let (_, org, owner, channel, token) = fixture(&pool).await;
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let private = Uuid::new_v4();
     super::super::channel(&pool, org, private, owner, true).await;
     let root = sent(&app, &token, private, input(Uuid::new_v4(), "Root")).await;

@@ -1344,10 +1344,13 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let app = crate::app(AppState {
-            sign_in_throttle: throttle,
-            ..AppState::with_test_pool(pool)
-        });
+        let app = crate::app(
+            AppState {
+                sign_in_throttle: throttle,
+                ..AppState::with_test_pool(pool)
+            },
+            Default::default(),
+        );
         let request = Request::post("/api/v1/session")
             .extension(ConnectInfo(
                 "[2001:db8:abcd:1:ffff:ffff:ffff:ffff]:1234"

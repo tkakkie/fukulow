@@ -300,10 +300,13 @@ async fn dm_stale_revision_cannot_subscribe_replay_or_receive_even_after_explici
         Duration::from_secs(5),
     );
     let fallback = changes.pause_fallback();
-    let server = Server::start(crate::app(AppState {
-        session_changes: changes,
-        ..f.state.clone()
-    }))
+    let server = Server::start(crate::app(
+        AppState {
+            session_changes: changes,
+            ..f.state.clone()
+        },
+        Default::default(),
+    ))
     .await;
     let mut live = server.connect(&pt).await;
     subscribe(&mut live, c, 1).await;

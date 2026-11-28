@@ -5,15 +5,13 @@ const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 const READY_RETURN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub(crate) async fn ready(pool: &PgPool) -> bool {
+    let mut guard = ReadyConnection(None);
     let Ok(Ok(connection)) =
         tokio::time::timeout(READY_ACQUIRE_TIMEOUT, crate::database::acquire(pool)).await
     else {
         return false;
     };
-    let mut guard = ReadyConnection(Some(connection));
-    let Some(connection) = guard.0.as_mut() else {
-        return false;
-    };
+    let connection = guard.0.insert(connection);
     if !matches!(
         tokio::time::timeout(
             READY_QUERY_TIMEOUT,

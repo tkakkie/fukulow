@@ -83,7 +83,7 @@ async fn reply_counts_exact_chain_totals_deduplicate_and_leave_positions_and_pub
     let (_, org, sender, channel, token) = fixture(&pool).await;
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
-    let app = crate::app(state);
+    let app = crate::app(state, Default::default());
     let root = sent(
         &app,
         &token,

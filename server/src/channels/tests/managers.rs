@@ -27,7 +27,7 @@ impl Fixture {
         let token = member(&pools.admin, org, creator, "member").await;
         let state = AppState::for_test(pools.app.clone()).await;
         let observed = RecheckObservation::install(&state.session_changes);
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         let c = create(&app, &token, "Member's private Channel", "private").await;
         assert_eq!(c["capabilities"]["can_manage_managers"]["allowed"], true);
         let channel = Uuid::parse_str(c["id"].as_str().unwrap()).unwrap();

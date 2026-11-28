@@ -22,7 +22,7 @@ async fn limited(pool: &PgPool) -> Limited {
     let state = AppState::for_test(pool.clone()).await;
     state.message_delivery.send_limiter.enforce();
     Limited {
-        app: crate::app(state.clone()),
+        app: crate::app(state.clone(), Default::default()),
         state,
         organization,
         member,

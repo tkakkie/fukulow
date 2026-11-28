@@ -1,4 +1,4 @@
-import { mount, unmount } from 'svelte'
+import { mount, unmount, type Component } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { repliesAdapter } from './replies.svelte'
@@ -7,6 +7,7 @@ import { createSession } from './session'
 import { buttonsByText, installMiniDom, MiniDomEvent } from './svelte-dom-test-helpers'
 import { syncAdapter } from './sync.svelte'
 import Timeline from './Timeline.svelte'
+import * as timelineFrame from './TimelineFrame.svelte'
 import { replyPage } from './topic-test-helpers'
 import { topicsAdapter } from './topics.svelte'
 import TopicView from './TopicView.svelte'
@@ -69,7 +70,55 @@ async function bootSession(
   return session
 }
 
+async function expectLoadErrorSuppressed<Props extends Record<string, unknown>>(
+  view: Component<Props>,
+  props: Props,
+  message: string,
+) {
+  const host = dom.doc.createElement('div')
+  dom.doc.body.appendChild(host)
+  const state = $state({ organizationUnavailable: true })
+  const frame = vi.spyOn(timelineFrame, 'default')
+  try {
+    const instance = mount(view, {
+      target: host as unknown as Element,
+      props: { ...props, get organizationUnavailable() { return state.organizationUnavailable } },
+    })
+    try {
+      await settle()
+      expect(host.textContent).toContain('この組織は利用できません。')
+      expect(host.textContent).not.toContain(message)
+      expect(frame.mock.lastCall?.[1]).toHaveProperty('loadErrorMessage', null)
+
+      state.organizationUnavailable = false
+      await settle()
+      expect(frame.mock.lastCall?.[1]).toHaveProperty('loadErrorMessage', message)
+      expect(host.textContent).toContain(message)
+    } finally {
+      await unmount(instance)
+    }
+  } finally {
+    frame.mockRestore()
+    host.remove()
+  }
+}
+
 describe('Timeline via TimelineFrame (#1127)', () => {
+  it('withholds Timeline loadErrorMessage from TimelineFrame when the Organization is unavailable', async () => {
+    const net = fakeNetwork()
+    net.pages.A = { ok: false, kind: 'network' }
+    const session = await bootSession(net, 'A', 0)
+    try {
+      await expectLoadErrorSuppressed(Timeline, {
+        channel: syncAdapter(session.sync).channel('A'),
+        channelId: 'A',
+        selfId: 'me',
+      }, 'メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。')
+    } finally {
+      session.close()
+    }
+  })
+
   it('renders .timeline-* classes, no timeline-frame* class, positioning overlay, scroll container, older control, 新着 n件 ↓, Composer slot and ReplaceDraftDialog', async () => {
     const net = fakeNetwork()
     const m1 = { ...record(10, 'A'), sender: 'other', body: '既存メッセージ' }
@@ -291,6 +340,25 @@ describe('Timeline via TimelineFrame (#1127)', () => {
 })
 
 describe('TopicView via TimelineFrame (#1127)', () => {
+  it('withholds TopicView loadErrorMessage from TimelineFrame when the Organization is unavailable', async () => {
+    const net = fakeNetwork()
+    net.topicSummaries['A:T'] = { ok: false, kind: 'network' }
+    const session = await bootSession(net, 'A', 0)
+    try {
+      await expectLoadErrorSuppressed(TopicView, {
+        channel: syncAdapter(session.sync).channel('A'),
+        topics: topicsAdapter(session.topics, 'A'),
+        channelId: 'A',
+        topicId: 'T',
+        topicName: '仕様相談',
+        topicStatus: 'error',
+        selfId: 'me',
+      }, 'トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。')
+    } finally {
+      session.close()
+    }
+  })
+
   it('renders .topic-view* classes, no timeline-frame* class, positioning overlay, scroll container, older control, 新着 n件 ↓, Composer slot and ReplaceDraftDialog', async () => {
     const net = fakeNetwork()
     const mainMsg = { ...record(1, 'A'), sender: 'other', body: 'メイン既存' }
@@ -554,6 +622,28 @@ describe('TopicView via TimelineFrame (#1127)', () => {
 })
 
 describe('ReplyPanel via TimelineFrame (#1127)', () => {
+  it('withholds ReplyPanel loadErrorMessage from TimelineFrame when the Organization is unavailable', async () => {
+    const net = fakeNetwork()
+    const root = record(1, 'A')
+    net.pages.A = ok({ history_generation: root.history_generation, as_of_seq: 1, messages: [root], has_more: false })
+    net.replyChains[`A:${root.id}`] = { ok: false, kind: 'network' }
+    const session = await bootSession(net, 'A', 1)
+    try {
+      const replies = repliesAdapter(session.replies, 'A')
+      await replies.open(root)
+      await expectLoadErrorSuppressed(ReplyPanel, {
+        channel: syncAdapter(session.sync).channel('A'),
+        replies,
+        channelId: 'A',
+        anchorMessageId: root.id,
+        resolvedAnchor: root,
+        selfId: 'me',
+      }, '返信のつながりを読み込めませんでした。通信状況を確認して、もう一度お試しください。')
+    } finally {
+      session.close()
+    }
+  })
+
   it('renders .reply-panel* classes, no timeline-frame* class, header, direct-child older button, 新着 n件 ↓, Composer slot, custom ReplaceDraftDialog and never advances read positions', async () => {
     const net = fakeNetwork()
     const rootMsg = { ...record(1, 'A'), id: 'root-1', sender: 'other', body: '親メッセージ' }

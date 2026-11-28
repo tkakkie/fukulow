@@ -1,5 +1,5 @@
 {
-  "sha256": "645154457e2f69478ed9681ee9ef8394d0b249b9a2c6c57eeea103abfcc03b71",
+  "sha256": "c67748b754ea6def54bf8bf87d3450b2282fd5e142cc52bd8cf1a06b17e9ebcc",
   "frozen": {
     "version": 24,
     "date": "2026-11-28",
@@ -400,7 +400,7 @@
       },
       {
         "path": "server/src/auth.rs",
-        "sha256": "476463f466422321ca452e3749772a6ecc9cc9f5eeabee377b0f389d34e0942a"
+        "sha256": "14ba1c0feaf96973ec77a7f4db4a52fde62d786ca7797ba4cb243f36f6991be6"
       },
       {
         "path": "server/src/auth/authorization.rs",
@@ -412,7 +412,7 @@
       },
       {
         "path": "server/src/database/context.rs",
-        "sha256": "95cd3bbb285cd1a71a5f2c2e8d5a143a5da3e29abe6f85ea972c495091638ed3"
+        "sha256": "ae3f7b19cf9c3b4d3b8759b27bfe9991785b2378d6f7266361a697b9035fb084"
       },
       {
         "path": "server/src/messages/search.rs",
