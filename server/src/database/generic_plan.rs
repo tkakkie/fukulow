@@ -19,18 +19,11 @@ pub(crate) async fn organization_statement_generic<T>(
     body: impl AsyncFnOnce(&mut PgConnection, &str) -> Result<T, sqlx::Error>,
 ) -> Result<T, sqlx::Error> {
     let sql = super::organization_statement_sql(sql);
-    let mut guard = super::TransactionConnection {
-        connection: Some(super::acquire(pool).await?),
-        finished: false,
-        discard: super::Discard::Detach,
-    };
-    let connection = guard
-        .connection
-        .as_deref_mut()
-        .ok_or(sqlx::Error::WorkerCrashed)?;
-    sqlx::Executor::execute(&mut *connection, BEGIN).await?;
-    let result = body(&mut *connection, &sql).await;
-    let finished = sqlx::Executor::execute(&mut *connection, "ROLLBACK").await;
+    let mut guard = super::TransactionConnection::new(super::Discard::Detach);
+    let connection = guard.connection.insert(super::acquire(pool).await?);
+    sqlx::Executor::execute(&mut **connection, BEGIN).await?;
+    let result = body(connection, &sql).await;
+    let finished = sqlx::Executor::execute(&mut **connection, "ROLLBACK").await;
     guard.finished = finished.is_ok();
     let value = result?;
     finished?;

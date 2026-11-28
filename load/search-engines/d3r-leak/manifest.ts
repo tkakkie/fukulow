@@ -13,7 +13,7 @@ import { bootstrap } from './samples.ts';
 
 export const root = fileURLToPath(new URL('../../../', import.meta.url));
 export const schemaCommit = '66e6e266477b1a860358b1d735ad271e7d4f6489';
-export const manifestFile = 'load/search-engines/manifest-d3r-leak-v22.json';
+export const manifestFile = 'load/search-engines/manifest-d3r-leak-v25.json';
 const d3rManifest = 'load/search-engines/manifest-v18.json';
 const harness = 'load/search-engines/d3r-leak';
 const smokeCandidates = [32, 128, 512];
@@ -38,7 +38,7 @@ export function snapshot(positiveK: number | null) {
     ...readdirSync(new URL('.', import.meta.url)).filter(file => file.endsWith('.ts') && !file.endsWith('.test.ts'))
       .map(file => `${harness}/${file}`),
   ];
-  return {version: 22, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze,
+  return {version: 25, schemaCommit, postgres: {image: base.image, settings, removedSettings}, freeze,
     reviewedAssignments, positiveK,
     migrations: base.migrations, node: base.node,
     sourceHashes: [...new Set(inputs)].sort().map(path => ({path, sha256: hash(readSource(path))}))};
