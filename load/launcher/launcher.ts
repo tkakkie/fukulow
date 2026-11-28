@@ -210,6 +210,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   const jobs: Result['jobs'] = [];
   let claimText: string | null = null;
   const ownsClaim = () => claimText !== null && d.read(q.hostBusy) === claimText;
+  let claimLostBeforeSpawn = false;
   const idleEvidence = new Map<string, IdleEvidence>();
   let child: Child | null = null;
   const started: { child: Child; job: Job }[] = [];
@@ -286,6 +287,10 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     } finally { onAbort.delete(stopRunning); child = null; }
   };
   const stop = (reason: string): Result => { log(`STOP: ${reason}`); return { outcome: 'stop', reason, jobs }; };
+  const stopForLostClaim = (where: string): Result => {
+    claimLostBeforeSpawn = true;
+    return stop(`HOST-BUSY missing, unreadable or replaced ${where}`);
+  };
   // Every process group the launcher started has ended, and no container is running: none ran when
   // HOST-BUSY was claimed, so any container now is the workload's, whether or not its label was
   // given or typed right (fail closed). Anything unconfirmed keeps HOST-BUSY held.
@@ -346,11 +351,12 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     if (claimText === null) return { hostBusy: 'never claimed', problems: [] };
     let problems: string[];
     try { problems = await stopWorkload(); } catch (e) { problems = [`workload check failed: ${String(e)}`]; }
+    // A failed ownership check at spawn stays lost even if the marker can be read again.
+    if (claimLostBeforeSpawn || (problems.length === 0 && !ownsClaim())) {
+      note('HOST-BUSY lost before release');
+      return { hostBusy: 'lost', problems };
+    }
     if (problems.length === 0) {
-      if (!ownsClaim()) {
-        note('HOST-BUSY lost before release');
-        return { hostBusy: 'lost', problems };
-      }
       try { d.remove(q.hostBusy); } catch (e) { problems.push(`HOST-BUSY removal failed: ${String(e)}`); }
     }
     note(problems.length === 0 ? 'HOST-BUSY released' : `HOST-BUSY kept: ${problems.join('; ')}`);
@@ -509,6 +515,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       const problems = preflight(d, q, job, before);
       if (problems.length > 0) return stop(`${job.name} preflight: ${problems.join('; ')}`);
       if (job.gate) {
+        if (!ownsClaim()) return stopForLostClaim(`before the gate; ${job.name} not started`);
         const gate = await run(job.gate, `${job.name}-gate.log`, job);
         log(`${job.name} gate: exit=${gate}`);
         if (aborted) return stop(`${aborted} during the gate; ${job.name} not started`);
@@ -529,7 +536,11 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       if (aborted) { sampling?.(); return stop(`${aborted}; ${job.name} not started`); }
       log(`${job.name}: start (once, no rerun)`);
       let exit: number | null;
-      try { exit = await run(d.platform.inhibit(job.command), `${job.name}.log`, job, late.policy); } finally { sampling?.(); }
+      try {
+        const command = d.platform.inhibit(job.command);
+        if (!ownsClaim()) return stopForLostClaim(`before ${job.name}; job not started`);
+        exit = await run(command, `${job.name}.log`, job, late.policy);
+      } finally { sampling?.(); }
       endLogs();
       jobs.push({ name: job.name, exit });
       record(`${job.name}-host-after.json`, d.platform.record(q.chainDir) as unknown as Record<string, unknown>);
@@ -554,7 +565,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   let failure: { error: unknown } | null = null;
   try { result = await body(); } catch (error) { failure = { error }; }
   const released = await release();
-  if (result && released.problems.length > 0) result = { outcome: 'stop', reason: `workload not confirmed stopped, HOST-BUSY kept: ${released.problems.join('; ')}`, jobs };
+  if (result && released.hostBusy === 'kept') result = { outcome: 'stop', reason: `workload not confirmed stopped, HOST-BUSY kept: ${released.problems.join('; ')}`, jobs };
   if (result?.outcome === 'done' && released.hostBusy === 'lost') result = { outcome: 'stop', reason: 'HOST-BUSY lost before release', jobs };
   // The record a judge binds to: the session id in every artefact, which jobs ran (with their
   // outputs, workload labels, exits and confirmations), and the release.

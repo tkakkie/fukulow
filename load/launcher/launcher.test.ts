@@ -476,6 +476,98 @@ test('platform parts: sleep prevention and conditions', () => {
 
 const cooling = { cooldown: { maxTctlC: 50, maxWaitSeconds: 1200 } };
 
+for (const loss of ['deleted', 'unreadable', 'replaced']) {
+  for (const phase of ['cool-down', 'preflight', 'gate run']) {
+    test(`HOST-BUSY ${loss} during the ${phase} blocks the next spawn`, async () => {
+      const w = world({ tctl: [70, 40] });
+      const d = deps(w);
+      const gate = ['node', 'gate.ts'];
+      const q = queue([job('a', { ...cooling, gate, thermalSampleSeconds: 5, postgresLogLabel: 'io.fukulow.test=a' })]);
+      const original = formatHostBusy(q.name, ['a'], d.now(), 'sess-1');
+      const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+      const loseMarker = () => {
+        assert.ok(w.files.has('/runs/chain/a-idle.json'));
+        assert.equal(w.files.get(q.hostBusy), original);
+        if (loss === 'deleted') w.files.delete(q.hostBusy);
+        if (loss === 'replaced') w.files.set(q.hostBusy, replacement);
+        if (loss === 'unreadable') {
+          const read = d.read;
+          d.read = path => path === q.hostBusy ? null : read(path);
+        }
+      };
+      if (phase === 'cool-down') {
+        const sleep = d.sleep;
+        d.sleep = ms => { loseMarker(); return sleep(ms); };
+      } else if (phase === 'preflight') {
+        const freeBytes = d.freeBytes;
+        d.freeBytes = path => { loseMarker(); return freeBytes(path); };
+      } else {
+        const spawn = d.spawn;
+        d.spawn = (argv, opts) => {
+          const child = spawn(argv, opts);
+          if (argv === q.jobs[0].gate) return { ...child, done: child.done.then(code => { loseMarker(); return code; }) };
+          return child;
+        };
+      }
+
+      const r = await launch(q, d);
+      const gateRan = phase === 'gate run';
+      const reason = gateRan ? 'before a; job not started' : 'before the gate; a not started';
+      assert.deepEqual(r, { outcome: 'stop', reason: `HOST-BUSY missing, unreadable or replaced ${reason}`, jobs: [] });
+      assert.equal(launchExitCode(r.outcome), 3);
+      assert.deepEqual(w.spawned, gateRan ? [gate] : []);
+      assert.deepEqual([w.captured.length, w.stoppedLogs, w.samplerStops], gateRan ? [1, 1, 1] : [0, 0, 0]);
+      const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+      assert.equal(session.hostBusy, 'lost');
+      assert.equal(w.files.get(q.hostBusy), loss === 'deleted' ? undefined : loss === 'replaced' ? replacement : original);
+    });
+  }
+}
+
+test('the claim is checked after job setup and an unreadable marker is left in place even if it becomes readable again', async () => {
+  const w = world();
+  const d = deps(w);
+  const q = queue([job('a', { thermalSampleSeconds: 5, postgresLogLabel: 'io.fukulow.test=a' })]);
+  const read = d.read;
+  const inhibit = d.platform.inhibit;
+  d.platform = { ...d.platform, inhibit: argv => {
+    assert.deepEqual(w.everyMs, [5000]);
+    assert.equal(w.captured.length, 1);
+    d.read = path => {
+      if (path !== q.hostBusy) return read(path);
+      d.read = read;
+      return null;
+    };
+    return inhibit(argv);
+  } };
+  const r = await launch(q, d);
+  assert.deepEqual(r, { outcome: 'stop', reason: 'HOST-BUSY missing, unreadable or replaced before a; job not started', jobs: [] });
+  assert.equal(launchExitCode(r.outcome), 3);
+  assert.deepEqual(w.spawned, []);
+  assert.deepEqual([w.samplerStops, w.stoppedLogs], [1, 1]);
+  assert.equal(JSON.parse(w.files.get('/runs/chain/session.json')!).hostBusy, 'lost');
+  assert.equal(w.files.get(q.hostBusy), formatHostBusy(q.name, ['a'], d.now(), 'sess-1'));
+});
+
+test('the second job does not spawn when HOST-BUSY is replaced after its idle wait', async () => {
+  const w = world();
+  const d = deps(w);
+  const q = queue();
+  const replacement = formatHostBusy('other', ['c'], new Date(0), 'sess-2');
+  const freeBytes = d.freeBytes;
+  d.freeBytes = path => {
+    if (w.files.has('/runs/chain/b-idle.json')) w.files.set(q.hostBusy, replacement);
+    return freeBytes(path);
+  };
+  const r = await launch(q, d);
+  assert.deepEqual(r, { outcome: 'stop', reason: 'HOST-BUSY missing, unreadable or replaced before b; job not started',
+    jobs: [{ name: 'a', exit: 0 }] });
+  assert.equal(launchExitCode(r.outcome), 3);
+  assert.deepEqual(w.envs.map(env => env?.FUKULOW_LAUNCH_JOB), ['a']);
+  assert.equal(JSON.parse(w.files.get('/runs/chain/session.json')!).hostBusy, 'lost');
+  assert.equal(w.files.get(q.hostBusy), replacement);
+});
+
 test('the cool-down waits until Tctl is at most the limit, then starts the job, and keeps every reading', async () => {
   const w = world({ tctl: [70, 60, 50] });
   const r = await launch(queue([job('a', cooling)]), deps(w));
