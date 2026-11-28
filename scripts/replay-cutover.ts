@@ -1,9 +1,9 @@
-import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { setTimeout } from 'node:timers/promises';
 import { createLog } from '../load/channel-log.ts';
 import { prefillSQL, settleSQL } from '../load/slice5/fixture.ts';
+import { psql, run } from './compose-harness.ts';
 import { postgresImageFromCompose } from './restore-drill.ts';
 
 const directory = new URL('../server/migrations/', import.meta.url);
@@ -77,9 +77,13 @@ function scale(value: string | undefined, fallback: number): number {
 async function rehearse(channelCount: number, perChannel: number, members: number) {
   if (channelCount * perChannel >= 2 ** 31 || members > 2 ** 31 - 1) throw new Error('Fixture exceeds the SQL integer range');
   const name = `fukulow-620-rehearsal-${randomUUID()}`;
-  const run = (args: string[], input?: string) => execFileSync('docker', args, { input, encoding: 'utf8' }).trim();
   const exec = ['exec', '-i', name];
-  const psql = (query: string) => run([...exec, 'psql', '-XqAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres'], query);
+  // Successful commands keep forwarding psql and Docker notices to stderr.
+  const forwardSuccessfulStderr = ({ stdout, stderr }: ReturnType<typeof run>) => {
+    if (stderr) process.stderr.write(stderr);
+    return stdout;
+  };
+  const query = (input: string) => forwardSuccessfulStderr(psql(exec, ['-qAt', '-U', 'postgres'], { input })).trim();
   const timed = (stage: string, action: () => unknown) => {
     const start = performance.now();
     const result = action();
@@ -87,33 +91,39 @@ async function rehearse(channelCount: number, perChannel: number, members: numbe
     return result;
   };
 
-  run(['run', '-d', '--name', name, '--network', 'none', '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', postgresImageFromCompose()]);
+  forwardSuccessfulStderr(run('docker', ['run', '-d', '--name', name, '--network', 'none',
+    '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', postgresImageFromCompose()]));
   try {
     for (let attempt = 0; ; attempt++) {
-      const ready = spawnSync('docker', [...exec, 'pg_isready', '-q', '-h', '127.0.0.1', '-U', 'postgres']);
-      if (ready.status === 0) break;
-      if (attempt === 119) throw new Error('Disposable PostgreSQL did not become ready');
+      try {
+        run('docker', [...exec, 'pg_isready', '-q', '-h', '127.0.0.1', '-U', 'postgres'], { captureOutput: false });
+        break;
+      } catch {
+        if (attempt === 119) throw new Error('Disposable PostgreSQL did not become ready');
+      }
       await setTimeout(250);
     }
 
     const initial = readdirSync(directory).filter(file => file.endsWith('.sql') && file < cutover).sort()
       .map(file => `BEGIN;\n${readFileSync(new URL(file, directory), 'utf8')}\nCOMMIT;`).join('\n');
-    timed('old_schema', () => psql(`${initial}\nCREATE ROLE fukulow_app NOLOGIN;`));
+    timed('old_schema', () => query(`${initial}\nCREATE ROLE fukulow_app NOLOGIN;`));
 
     const org = randomUUID();
     const channels = Array.from({ length: channelCount }, () => randomUUID());
-    timed('fixture', () => psql(fixtureSQL(org, channels, perChannel, members)));
-    timed('backup', () => run([...exec, 'pg_dump', '-U', 'postgres', '-Fc', '-f', '/tmp/pre-upgrade.dump', 'postgres']));
-    timed('standalone_validation', () => psql(preflight));
+    timed('fixture', () => query(fixtureSQL(org, channels, perChannel, members)));
+    timed('backup', () => forwardSuccessfulStderr(run('docker', [...exec, 'pg_dump', '-U', 'postgres',
+      '-Fc', '-f', '/tmp/pre-upgrade.dump', 'postgres'])));
+    timed('standalone_validation', () => query(preflight));
 
     const statements = phases.map(([, phase, statement]) => timedStatements(phase, statement));
-    console.log(psql(`BEGIN;\nSET LOCAL lock_timeout = '5s';\n${statements.join('\n')}\n${timedStatements('commit', 'COMMIT;')}`));
-    timed('postcutover_validation', () => psql(verify));
-    const counts = psql('SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM channel_log);');
+    // Rehearsal stdout includes the successful psql phase timings for operators.
+    console.log(query(`BEGIN;\nSET LOCAL lock_timeout = '5s';\n${statements.join('\n')}\n${timedStatements('commit', 'COMMIT;')}`));
+    timed('postcutover_validation', () => query(verify));
+    const counts = query('SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM channel_log);');
     if (counts !== `${channelCount * perChannel}|${channelCount}`) throw new Error('Unexpected postcutover counts');
     console.log(`PASS |${channelCount} Channels|${members} Members|${counts} (Messages|mutations). Timings in ms.`);
   } finally {
-    run(['rm', '-fv', name]);
+    forwardSuccessfulStderr(run('docker', ['rm', '-fv', name]));
   }
 }
 
