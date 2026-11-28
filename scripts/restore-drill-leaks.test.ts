@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
-import { test } from 'node:test'
+import { test, type TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const archive = 'fixture archive $private.dump'
@@ -17,7 +17,7 @@ const repository = fileURLToPath(new URL('../', import.meta.url))
 
 const dockerStub = String.raw`#!/usr/bin/env node
 const assert = require('node:assert/strict');
-const { readFileSync, realpathSync, writeFileSync, writeSync } = require('node:fs');
+const { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync, writeSync } = require('node:fs');
 const args = process.argv.slice(2);
 assert.equal(process.env.DATABASE_URL, undefined);
 assert.equal(process.cwd(), realpathSync(${JSON.stringify(repository)}));
@@ -29,11 +29,17 @@ let input = '';
 if (command === 'pg_restore') {
   input = readFileSync(0, 'utf8');
   assert.equal(input, ${JSON.stringify(archiveData)});
+  assert.deepEqual(args.slice(4), stage === 'list' ? ['--list'] : [
+    '-U', 'fukulow', '-d', 'fukulow', '--exit-on-error', '--single-transaction', '--no-owner', '--no-acl',
+  ]);
 }
 if (command === 'psql') {
   input = readFileSync(0, 'utf8');
   assert.equal(input, readFileSync('server/src/auth/end-all-sessions.sql', 'utf8'));
   assert.deepEqual(args.slice(4), ['-X', '-v', 'ON_ERROR_STOP=1', '-U', 'fukulow', '-d', 'fukulow']);
+}
+if (command === 'pg_amcheck') {
+  assert.deepEqual(args.slice(4), ['-U', 'fukulow', '-d', 'fukulow', '--install-missing', '--heapallindexed']);
 }
 if (stage === process.env.TEST_STAGE) {
   const privateValues = [input, ${JSON.stringify(archive)},
@@ -43,10 +49,18 @@ if (stage === process.env.TEST_STAGE) {
   writeFileSync(process.env.TEST_EMITTED, '');
   if (process.env.TEST_MODE === 'timeout') setTimeout(() => { process.exitCode = 43 }, 2500);
   else process.exitCode = 42;
-} else if (command === 'cat') {
-  console.log('postgres');
-} else if (stage === 'list') {
-  writeSync(1, Buffer.alloc(1024 * 1024 + 1, 'x'));
+} else {
+  if (process.env.TEST_NOISY || stage === 'list') {
+    const output = Buffer.alloc(1024 * 1024 + 1, 'x');
+    if (command !== 'cat') writeSync(1, output);
+    writeSync(2, output);
+  }
+  if (command === 'cat') {
+    const log = process.env.TEST_PID_LOG;
+    const pid = log && !existsSync(log) ? 'sh' : 'postgres';
+    if (log) appendFileSync(log, pid + '\n');
+    console.log(pid);
+  }
 }
 `
 
@@ -75,19 +89,25 @@ const caller = `
   }
 `
 
+function drillFixture(t: TestContext) {
+  const directory = mkdtempSync(join(tmpdir(), 'fukulow-drill-leaks-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  writeFileSync(join(directory, 'docker'), dockerStub, { mode: 0o700 })
+  const run = (env: NodeJS.ProcessEnv = {}) => spawnSync(process.execPath, ['--input-type=module', '--eval', caller, archive], {
+    cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', 'pipe'], timeout: 5000,
+    env: { PATH: [directory, dirname(process.execPath)].join(delimiter), ...credentials,
+      DATABASE_URL: databaseUrl, ...env },
+  })
+  return { directory, run }
+}
+
 for (const stage of ['start', 'list', 'restore', 'sessions', 'integrity', 'cleanup']) {
   for (const mode of ['failure', 'timeout']) {
     test(`restore drill suppresses ${stage} secrets on ${mode}`, t => {
-      const directory = mkdtempSync(join(tmpdir(), 'fukulow-drill-leaks-'))
-      t.after(() => rmSync(directory, { recursive: true, force: true }))
-      writeFileSync(join(directory, 'docker'), dockerStub, { mode: 0o700 })
+      const { directory, run } = drillFixture(t)
       writeFileSync(join(directory, archive), archiveData)
       const emitted = join(directory, 'emitted')
-      const result = spawnSync(process.execPath, ['--input-type=module', '--eval', caller, archive], {
-        cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', 'pipe'], timeout: 5000,
-        env: { PATH: [directory, dirname(process.execPath)].join(delimiter), ...credentials,
-          DATABASE_URL: databaseUrl, TEST_STAGE: stage, TEST_MODE: mode, TEST_EMITTED: emitted },
-      })
+      const result = run({ TEST_STAGE: stage, TEST_MODE: mode, TEST_EMITTED: emitted })
 
       assert.equal(result.error, undefined)
       assert.equal(result.status, 1)
@@ -107,3 +127,46 @@ for (const stage of ['start', 'list', 'restore', 'sessions', 'integrity', 'clean
     })
   }
 }
+
+for (const category of ['missing', 'permission']) {
+  const skip = category === 'permission' && process.getuid?.() === 0 && 'root can read mode-000 files'
+  test(`restore drill reports a ${category} archive failure at list`, { skip }, t => {
+    const { directory, run } = drillFixture(t)
+    if (category === 'permission') writeFileSync(join(directory, archive), archiveData, { mode: 0o000 })
+
+    const result = run()
+
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1)
+    const { termination, message, error } = JSON.parse(result.output[3])
+    assert.equal(termination, undefined, 'Node rejects the archive before launching pg_restore')
+    assert.equal(message, `stage=list category=${category}`)
+    assert.ok(!error.includes(archive), 'the archive path stays private')
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr, '')
+  })
+}
+
+test('restore drill keeps the PostgreSQL flags and suppresses large successful output', t => {
+  const { directory, run } = drillFixture(t)
+  writeFileSync(join(directory, archive), archiveData)
+
+  const result = run({ TEST_NOISY: '1' })
+
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.output[3])
+  assert.match(result.stdout, /^Restore drill passed in [^\n]+\n$/)
+  assert.equal(result.stderr.length, 0)
+})
+
+test('restore drill waits for postgres to be PID 1', t => {
+  const { directory, run } = drillFixture(t)
+  writeFileSync(join(directory, archive), archiveData)
+  const pidLog = join(directory, 'pid-log')
+
+  const result = run({ TEST_PID_LOG: pidLog })
+
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.output[3])
+  assert.equal(readFileSync(pidLog, 'utf8'), 'sh\npostgres\n')
+})
