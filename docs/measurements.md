@@ -137,7 +137,7 @@ Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-pl
 
 Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
 
-#1128 release Wasm (`a878e090`): 558,619 B raw, 161,082 B gzip (level 6). macOS 27.0.1 arm64 (M5), Rust 1.100.0, wasm-bindgen 0.2.130, Node 26.13.1. From root run `(cd web && node ../scripts/build-wasm.ts)` then `node scripts/check-wasm-budget.ts web/wasm`. CI reuses `npm --prefix web run build` on `ubuntu-latest` and skips the PR delta to avoid a second build.
+#491 Wasm vs. `55cba1a8` measured 573,681 → 573,507 B raw, 165,034 → 164,717 B gzip-6 (cap 196,608 B), and 125,194 → 124,788 B Brotli-11. Clean `--release` build median (3 each) 50.71 → 46.11 s on a shared M5 Mac (macOS 27.0.1, Rust 1.100.0, wasm-bindgen 0.2.130, Node 26.13.1). [#1128 commands](../load/measurements-archive.md#release-wasm-size-1128)
 
 ## Pool before and after PR #511 (#196 B)
 

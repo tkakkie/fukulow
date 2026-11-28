@@ -1,100 +1,107 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "openapi")]
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Mention {
     pub member_id: Uuid,
     /// Current retained Member name in this authorized Message snapshot.
     pub name: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Message {
     pub history_generation: Uuid,
     pub id: Uuid,
     pub channel_id: Uuid,
     /// Immutable creation position in the Channel log.
-    #[schema(minimum = 1)]
+    #[cfg_attr(feature = "openapi", schema(minimum = 1))]
     pub created_seq: i64,
     /// Last Channel event position affecting this state.
-    #[schema(minimum = 1)]
+    #[cfg_attr(feature = "openapi", schema(minimum = 1))]
     pub version: i64,
     pub deleted: bool,
     pub client_message_id: Uuid,
     /// Member id of the sender.
     pub sender: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub body: Option<String>,
-    #[schema(format = DateTime)]
+    #[cfg_attr(feature = "openapi", schema(format = DateTime))]
     pub created_at: String,
-    #[schema(required = true)]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
     pub topic_id: Option<Uuid>,
     /// Confirmed parent Message; null for a non-Reply.
-    #[schema(required = true)]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
     pub reply_to: Option<Uuid>,
     /// Stable root even when the parent is outside the loaded window; null for a non-Reply.
-    #[schema(required = true)]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
     pub reply_root_id: Option<Uuid>,
     /// Persisted accepted ids, sorted by UUID, with current retained display names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub mentions: Option<Vec<Mention>>,
 }
 
 /// Idempotency key: (organization, sender, client_message_id), derived from the session.
 /// Matching body, Channel, normalized Topic name and reply target returns the canonical Message/sequence;
 /// changing any of them returns 409.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub history_generation: Option<Uuid>,
     pub client_message_id: Uuid,
     /// 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming.
-    #[schema(min_length = 1, max_length = 4000)]
+    #[cfg_attr(feature = "openapi", schema(min_length = 1, max_length = 4000))]
     pub body: String,
     /// Join or create a Topic in this Channel. Omitted/null sends without a Topic unless replying.
     /// 1..=60 Unicode scalars, no NUL or surrounding/only trim whitespace; ASCII case folds.
-    #[schema(min_length = 1, max_length = 60)]
+    #[cfg_attr(feature = "openapi", schema(min_length = 1, max_length = 60))]
     pub topic_name: Option<String>,
     /// Confirmed parent in this Organization/Channel. Omitted/null is a non-Reply.
     /// A Reply inherits its parent's Topic; topic_name must be omitted/null.
     pub reply_to: Option<Uuid>,
 }
 
-#[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams, ToSchema))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 pub struct HistoryQuery {
     pub history_generation: Option<Uuid>,
 }
 
 /// Use after_seq XOR before_seq, or neither for the latest page. Cursors are exclusive.
-#[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams, ToSchema))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 pub struct ListMessagesQuery {
     pub history_generation: Option<Uuid>,
-    #[param(minimum = 0)]
+    #[cfg_attr(feature = "openapi", param(minimum = 0))]
     pub as_of_seq: Option<i64>,
     /// Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
-    #[param(minimum = 0)]
-    #[schema(minimum = 0)]
+    #[cfg_attr(feature = "openapi", param(minimum = 0))]
+    #[cfg_attr(feature = "openapi", schema(minimum = 0))]
     pub after_seq: Option<i64>,
     /// Return created_seq < before_seq. Cannot combine with after_seq.
-    #[param(minimum = 1)]
-    #[schema(minimum = 1)]
+    #[cfg_attr(feature = "openapi", param(minimum = 1))]
+    #[cfg_attr(feature = "openapi", schema(minimum = 1))]
     pub before_seq: Option<i64>,
     /// Page size, default 50, maximum 200.
-    #[param(minimum = 1, maximum = 200, default = 50)]
-    #[schema(minimum = 1, maximum = 200)]
+    #[cfg_attr(feature = "openapi", param(minimum = 1, maximum = 200, default = 50))]
+    #[cfg_attr(feature = "openapi", schema(minimum = 1, maximum = 200))]
     pub limit: Option<u16>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct MessagePage {
     pub history_generation: Uuid,
     /// Trusted committed event watermark; usable as the initial bootstrap cursor.
-    #[schema(minimum = 0)]
+    #[cfg_attr(feature = "openapi", schema(minimum = 0))]
     pub as_of_seq: i64,
     /// Always ascending created_seq (newest last), including latest and before_seq pages.
     pub messages: Vec<Message>,
@@ -105,22 +112,24 @@ pub struct MessagePage {
 }
 
 /// Bounded ascending Channel log page, with the same envelopes as WebSocket replay.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct ChannelEventPage {
     pub history_generation: Uuid,
     pub events: Vec<ServerEvent>,
     pub has_more: bool,
 }
 
-#[derive(Debug, Deserialize, IntoParams, ToSchema)]
-#[into_params(parameter_in = Query)]
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(IntoParams, ToSchema))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 pub struct ListChannelEventsQuery {
     pub history_generation: Option<Uuid>,
     /// Exclusive event position; 0 starts at the beginning.
-    #[param(minimum = 0)]
+    #[cfg_attr(feature = "openapi", param(minimum = 0))]
     pub after_seq: i64,
     /// Page size, default 50, maximum 200.
-    #[param(minimum = 1, maximum = 200, default = 50)]
+    #[cfg_attr(feature = "openapi", param(minimum = 1, maximum = 200, default = 50))]
     pub limit: Option<u16>,
 }
 
@@ -134,7 +143,8 @@ pub const CLOSE_ORGANIZATION_UNAVAILABLE: u16 = 4003;
 pub const CLOSE_RATE_LIMITED: u16 = 4029;
 
 /// Client -> server control messages. Cursors are per channel and exclusive.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Subscribe {
@@ -142,7 +152,7 @@ pub enum ClientMessage {
         history_generation: Option<Uuid>,
         channel_id: Uuid,
         /// Replay committed Channel events with seq > after_seq; 0 starts at the beginning.
-        #[schema(minimum = 0)]
+        #[cfg_attr(feature = "openapi", schema(minimum = 0))]
         after_seq: i64,
     },
     Unsubscribe {
@@ -150,7 +160,8 @@ pub enum ClientMessage {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MessageStateKind {
     Create,
@@ -159,7 +170,8 @@ pub enum MessageStateKind {
 }
 
 /// The body-free invalidation for a committed whole-chain Move.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MessageMoveEvent {
     #[serde(rename = "type")]
@@ -167,31 +179,34 @@ pub struct MessageMoveEvent {
     pub kind: MoveEventKind,
     pub history_generation: Uuid,
     pub channel_id: Uuid,
-    #[schema(minimum = 1)]
+    #[cfg_attr(feature = "openapi", schema(minimum = 1))]
     pub seq: i64,
-    #[schema(minimum = 1)]
+    #[cfg_attr(feature = "openapi", schema(minimum = 1))]
     pub version: i64,
     pub root_id: Uuid,
-    #[schema(required = true)]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
     pub source_topic_id: Option<Uuid>,
     pub destination_topic_id: Uuid,
     pub operation_id: Uuid,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MessageEventType {
     Message,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MoveEventKind {
     Move,
 }
 
 /// Server -> client events. Event positions and Message state versions are independent.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
     /// Own-Member DM list invalidation.
@@ -199,21 +214,24 @@ pub enum ServerEvent {
     /// Own-Member section layout invalidation.
     SectionsChanged {
         /// Canonical unsigned decimal, at most 9223372036854775807.
-        #[schema(pattern = "^(0|[1-9][0-9]*)$", max_length = 19)]
+        #[cfg_attr(
+            feature = "openapi",
+            schema(pattern = "^(0|[1-9][0-9]*)$", max_length = 19)
+        )]
         generation: String,
     },
     ActivityReady,
     ActivityReset,
     ChannelActivity {
         channel_id: Uuid,
-        #[schema(minimum = 1)]
+        #[cfg_attr(feature = "openapi", schema(minimum = 1))]
         seq: i64,
     },
     ReadPositionChanged {
         channel_id: Uuid,
-        #[schema(required = true)]
+        #[cfg_attr(feature = "openapi", schema(required = true))]
         topic_id: Option<Uuid>,
-        #[schema(minimum = 0)]
+        #[cfg_attr(feature = "openapi", schema(minimum = 0))]
         read_seq: i64,
     },
     ChannelAccessGained {
@@ -229,7 +247,7 @@ pub enum ServerEvent {
     MembersChanged,
     /// Live and replayed messages have exactly the same canonical shape.
     Message {
-        #[schema(minimum = 1)]
+        #[cfg_attr(feature = "openapi", schema(minimum = 1))]
         seq: i64,
         kind: MessageStateKind,
         message: Message,
@@ -239,7 +257,7 @@ pub enum ServerEvent {
         history_generation: Uuid,
         channel_id: Uuid,
         /// Last sequence caught up through; 0 when the channel has no messages.
-        #[schema(minimum = 0)]
+        #[cfg_attr(feature = "openapi", schema(minimum = 0))]
         caught_up_seq: i64,
     },
     /// Effective Channel access loss; the socket and other Channels stay open.

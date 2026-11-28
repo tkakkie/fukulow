@@ -13,7 +13,7 @@ workspace = true
 hold-heap-measure = []
 
 [dependencies]
-fukulow-api = { path = "../api-types" }
+fukulow-api = { path = "../api-types", features = ["openapi"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 socket2 = "0.6"
