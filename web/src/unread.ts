@@ -4,6 +4,7 @@ import { createRequestDeadlines } from './request-deadlines'
 import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
 import type { createSync } from './sync'
 import { observeGeneration } from './observe-generation'
+import { observeReadAccess } from './projection-read-fences'
 import { coversTopicCounts, ordinarySummaryFailure, stampTopicEvidence, topicBaselineStarts, type TopicCountRequirement } from './topic-summary-requests'
 import type { Topics } from './topics'
 import type { TopicBaseline } from './topic-selectors'
@@ -160,10 +161,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   async function request<T>(run: () => Promise<Result<T>>, channel?: string): Promise<Result<T>> {
     const account = session
     const operation = Promise.resolve().then(run).catch((): Result<T> => ({ ok: false, kind: 'network' }))
-    // Authentication failures outlive data authority; the old Organization's sync alone receives C10.
-    void operation.then(r => {
-      if (account === session) sync.reportAccess(r, sync)
-    })
+    observeReadAccess(sync, operation, account, () => session)
     const historyEpoch = sync.get().historyEpoch
     const deadline = deadlines.start<Result<T>>({ ok: false, kind: 'network' }, { channel, timeoutMs: options.requestTimeoutMs ?? 30_000 })
     try {

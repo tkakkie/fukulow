@@ -3,6 +3,7 @@ import * as api from './api'
 import { createRequestDeadlines } from './request-deadlines'
 import type { InitialRead, InitialTimeline } from './initial-timeline'
 import { observeGeneration } from './observe-generation'
+import { isBelowMutationFloor, observeReadAccess } from './projection-read-fences'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
 import { coversTopicCounts, readActivitySummary, stampTopicEvidence, topicBaselineStarts, type TopicCountRequirement } from './topic-summary-requests'
@@ -249,7 +250,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
 
   async function read<T>(channel: string, w: Window, slot: ReadSlot, run: () => Promise<Result<T>>, bootstrap = false, withTimeout = true, signal?: AbortSignal, early?: InitialRead<T & Pick<TimelinePage, 'history_generation'>>) {
     const started = sync.get().channels[channel]
-    const mutationFloor = started?.mutationSeq ?? 0
+    const startedMutationSeq = started?.mutationSeq ?? 0
     const versionEpoch = started?.versionEpoch
     const token = Symbol(slot)
     w.reads.set(slot, token)
@@ -265,12 +266,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     // An unversioned startup read cannot supersede a generation learned while it was in flight.
     const reuse = !early?.signal.aborted && prefetched &&
       (!prefetched.ok || knownGeneration === undefined || prefetched.data?.history_generation === knownGeneration)
-    // Session replacement fences late authentication failures; same-session late 401 remains authoritative.
     const session = sessionToken
     const operation = (reuse ? Promise.resolve(prefetched) : Promise.resolve().then(() => { startedAt = stampTopicEvidence(); return run() })).catch((): Result<T> => ({ ok: false, kind: 'network' }))
-    void operation.then(r => {
-      if (session === sessionToken) sync.reportAccess(r, sync)
-    })
+    observeReadAccess(sync, operation, session, () => sessionToken)
     const deadline = withTimeout || signal ? deadlines.start<Result<T>>({ ok: false, kind: 'network' }, {
       timeoutMs: withTimeout ? options.requestTimeoutMs ?? 30_000 : undefined,
       signal,
@@ -282,10 +280,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
         return { result, isCurrent: () => false, startedAt }
       }
       const state = sync.get().channels[channel]
-      const mutationSeq = state?.mutationSeq ?? 0
-      const floor = mutationFloor < mutationSeq ? mutationSeq : state?.moveSeq ?? 0
       const belowFloor = response.ok && response.data && typeof response.data === 'object' &&
-        'as_of_seq' in response.data && typeof response.data.as_of_seq === 'number' && response.data.as_of_seq < floor
+        'as_of_seq' in response.data && typeof response.data.as_of_seq === 'number' &&
+        isBelowMutationFloor(response.data.as_of_seq, startedMutationSeq, state)
       const result: Result<T> = belowFloor ? { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' } : response.ok && !completeCountFields(response.data) ? { ok: false, kind: 'network' } : response
       // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
       if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() &&

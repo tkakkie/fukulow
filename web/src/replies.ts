@@ -2,6 +2,7 @@ import * as api from './api'
 import { createRequestDeadlines } from './request-deadlines'
 import { knownMessageState } from './identity-order'
 import { observeGeneration } from './observe-generation'
+import { isBelowMutationFloor, observeReadAccess } from './projection-read-fences'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
 import { REPLY_MESSAGE_LIMIT, type ChannelState } from './protocol-types'
@@ -160,7 +161,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; requestTim
     if (!w || !current(channel, w) || w.loading || (!w.hasMore && !w.restart)) return
     const requestedAfter = w.restart ? w.restartAfter : w.after
     const requestedW = w.restart ? undefined : w.asOfSeq
-    const mutationFloor = sync.get().channels[channel]?.mutationSeq ?? 0
+    const startedMutationSeq = sync.get().channels[channel]?.mutationSeq ?? 0
     const versionEpoch = sync.get().channels[channel]?.versionEpoch
     const token = Symbol(), session = sessionToken
     w.read = token; w.loading = true; w.error = false; notify(new Set([channel]))
@@ -168,10 +169,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; requestTim
     const anchor = w.anchor.id, generation = sync.get().historyGeneration
     const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, anchor, { history_generation: generation, as_of_seq: requestedW, after_seq: requestedAfter }))
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
-    // C6 late 401 and C10 remain authoritative for this Account Session, even after timeout or unwatch.
-    void operation.then(r => {
-      if (session === sessionToken) sync.reportAccess(r, sync)
-    })
+    observeReadAccess(sync, operation, session, () => sessionToken)
     const apply = operation.then(result => {
       if (!isCurrent()) return
       w.loading = false
@@ -181,10 +179,11 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; requestTim
       })
       if (observed === 'stale') return
       const state = sync.get().channels[channel]
-      const mutationSeq = state?.mutationSeq ?? 0
-      const floor = mutationFloor < mutationSeq ? mutationSeq : state?.moveSeq ?? 0
-      if (result.ok && result.data.as_of_seq < floor) result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
+      if (result.ok && isBelowMutationFloor(result.data.as_of_seq, startedMutationSeq, state)) {
+        result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
+      }
       if (!result.ok && result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) {
+        const mutationSeq = state?.mutationSeq ?? 0
         w.messages.clear(); w.asOfSeq = undefined; w.moveBaseline = undefined; w.after = 0; w.hasMore = true
         if (!w.restart) { w.restart = true; w.restartAfter = 0 }
         // Edit/Delete can leave complete current stream records. A Move restart keeps the chain hidden until its page arrives.
