@@ -1,224 +1,19 @@
-import type { Result, ServerEvent } from './api'
-import { createRequestDeadlines } from './request-deadlines'
+import { createActivityRoutingCore, type ActivityFacts } from './core-wasm'
+import type { AccessLifetime } from './protocol-types'
+import type { ActivityNotice, ActivityTarget, Invalidation } from './activity-target'
 
-export type ActivityRead<T> = { startedAt: number; result: Result<T> }
-export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
-export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
-export type ReadReason = 'initial' | Invalidation
-export type FencedInvalidation = Exclude<Invalidation, 'notice'>
-export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number, discovery?: boolean): void; ready?(): boolean; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
+export * from './activity-target'
 
-/** Shared bounds for every held REST target; late completions never regain authority. */
-export function createActivityTarget<T>(options: {
-  canLoad?(): boolean
-  load(signal: AbortSignal, reasons: readonly ReadReason[]): Promise<Result<T>>
-  retryQueuedTerminal?: boolean
-  covers?(value: T): boolean
-  /** A snapshot can carry authoritative data even when a derived baseline needs a follow-up. */
-  acceptBelowFloor?: boolean
-  /** Current active connection epoch, or null while disconnected. */
-  connectionEpoch?(): number | null
-  /** Re-applies already-accepted current-connection state after reconcile clears derived baselines. */
-  onReadyCovered?(): void
-  hide?(reason: FencedInvalidation): void
-  error?(result: Exclude<Result<T>, { ok: true }>): void
-  terminal?(result: Result<T>): boolean
-  random?: () => number
-  timeoutMs?: number
-  /** A bounded multi-lane target owns retry admission; deadlines remain shared here. */
-  manualRetry?: boolean
-  settled?(): void
-} & (
-  { stampRead?: never; accept(value: T): void } |
-  { stampRead(): number; accept(value: T, startedAt: number): void }
-)) {
-  const random = options.random ?? Math.random
-  const deadlines = createRequestDeadlines()
-  let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
-  let inFlightEpoch: number | null = null, inFlightGen = -1, acceptedEpoch: number | null = null
-  let readyReplacementGen = -1
-  let noticePending = false, servingNotice = false
-  const pendingReasons = new Set<ReadReason>()
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let retry = false, due = 0, stopped = false
-  let failure: Exclude<Result<T>, { ok: true }> | undefined
-  let completion: (() => void) | undefined
-  let controller: AbortController | undefined
-  let running: Promise<ActivityRead<T> | undefined> | undefined
-  function schedule(ms: number) {
-    if (timer !== undefined || closed) return
-    due = Date.now() + ms
-    const own = generation
-    timer = setTimeout(() => { timer = undefined; if (closed || own !== generation) return; retry = false; void run() }, ms)
-  }
-  function scheduleRetry(retryAfterMs = 0) {
-    retry = true
-    const cap = Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5))
-    schedule(Math.max(retryAfterMs, cap / 2 + random() * cap / 2))
-  }
-  // ensure() joins the load in flight instead of settling before it.
-  function run() {
-    const started = !inFlight, pending = execute()
-    if (started && inFlight) {
-      running = pending
-      // Callers observe the rejection on pending itself; the bookkeeping chain must not add another.
-      void pending.finally(() => { if (running === pending) running = undefined }).catch(() => {})
-    }
-    return pending
-  }
-  function replaceFencedRead() {
-    if (!dirty || retry) return
-    if (readyReplacementGen === generation) void run()
-    else schedule(200)
-  }
-  async function execute() {
-    if (closed || !dirty) return
-    if (inFlight) { queued = true; return }
-    if (retry || options.canLoad?.() === false) return
-    inFlight = true; queued = false; failure = undefined
-    servingNotice = noticePending; noticePending = false
-    const reasons = [...pendingReasons]; pendingReasons.clear()
-    const own = generation
-    const epoch = options.connectionEpoch?.() ?? null
-    inFlightEpoch = epoch; inFlightGen = own
-    const startedAt = options.stampRead?.() ?? 0
-    const request = new AbortController()
-    controller = request
-    let cancelled = false
-    let pending: Promise<Result<T>>
-    try { pending = options.load(request.signal, reasons).catch((): Result<T> => ({ ok: false, kind: 'network' })) }
-    catch { pending = Promise.resolve({ ok: false, kind: 'network' }) }
-    const networkFailure: Result<T> = { ok: false, kind: 'network' }
-    completion = () => { cancelled = true; request.abort(); deadlines.cancel() }
-    const result = await deadlines.wait(pending, networkFailure, {
-      timeoutMs: options.timeoutMs ?? 10_000,
-      onTimeout: () => { request.abort(); return networkFailure },
-    })
-    completion = undefined
-    if (controller === request) controller = undefined
-    const wasServingNotice = servingNotice
-    inFlight = false; inFlightEpoch = null; inFlightGen = -1
-    servingNotice = false
-    if (closed) return
-    if (cancelled) { if (dirty) schedule(0); return }
-    try { if (result.ok) {
-      if (own !== generation) {
-        if (wasServingNotice) noticePending = true
-        if (dirty) for (const r of reasons) pendingReasons.add(r)
-        replaceFencedRead()
-        return
-      }
-      const covered = options.covers?.(result.data) !== false
-      if (!covered) {
-        // A below-floor snapshot never satisfies the notice, even when acceptBelowFloor applies its data.
-        if (wasServingNotice) noticePending = true
-        for (const r of reasons) pendingReasons.add(r)
-        if (++belowFloor >= 3) scheduleRetry()
-        else schedule(200)
-        if (!options.acceptBelowFloor) return
-      } else {
-        dirty = queued; attempt = 0; belowFloor = 0
-      }
-      failure = undefined; stopped = false; acceptedEpoch = epoch
-      if (options.stampRead) options.accept(result.data, startedAt)
-      else options.accept(result.data)
-      if (covered && dirty) schedule(200)
-    } else {
-      if (own === generation) { belowFloor = 0; acceptedEpoch = null; failure = result; options.error?.(result) }
-      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true; return { startedAt, result } }
-      if (options.manualRetry) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); return }
-      if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
-        if (wasServingNotice) noticePending = true
-        for (const r of reasons) pendingReasons.add(r)
-        scheduleRetry(result.retryAfterMs ?? 0)
-      } else if (own !== generation) {
-        if (wasServingNotice) noticePending = true
-        if (dirty) for (const r of reasons) pendingReasons.add(r)
-        replaceFencedRead()
-      } else if (queued && options.retryQueuedTerminal) {
-        if (wasServingNotice) noticePending = true
-        schedule(200)
-      } else { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true }
-    }
-    if (own === generation) return { startedAt, result }
-    } finally { options.settled?.() }
-  }
-  function fence() {
-    generation++
-    inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null
-    if (timer === undefined) return
-    const remaining = Math.max(0, due - Date.now())
-    clearTimeout(timer); timer = undefined; schedule(remaining)
-  }
-  function invalidate(reason: Invalidation = 'notice', delay = 200) {
-    if (closed) return
-    pendingReasons.add(reason)
-    if (reason !== 'notice') { fence(); options.hide?.(reason) }
-    else noticePending = true
-    stopped = false; failure = undefined; dirty = true
-    if (inFlight) { queued = true; return }
-    // Multi-lane admission may make other work eligible before a retained retry deadline.
-    if (options.manualRetry && timer !== undefined && Date.now() + delay < due) { clearTimeout(timer); timer = undefined }
-    schedule(delay)
-  }
-  return {
-    invalidate,
-    fence,
-    ready() {
-      const epoch = options.connectionEpoch?.() ?? null
-      if (closed || epoch === null) return false
-      if (inFlight && inFlightGen === generation) {
-        if (inFlightEpoch === epoch) {
-          options.hide?.('reconcile')
-          return true
-        }
-        if (inFlightEpoch === null) {
-          invalidate('reconcile')
-          readyReplacementGen = generation
-          return true
-        }
-      }
-      if (acceptedEpoch === epoch) {
-        options.onReadyCovered?.()
-        return true
-      }
-      return false
-    },
-    // An in-flight snapshot can cover a newer notice if it passes covers().
-    demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
-    failure: () => failure,
-    inFlight: () => inFlight,
-    idle: () => !closed && !inFlight && !dirty && !retry && !stopped,
-    pendingNotice: () => !closed && (servingNotice || (noticePending && dirty)),
-    ensure() {
-      if (inFlight) return running
-      if (!closed && !stopped && !dirty && timer === undefined && !retry) {
-        if (pendingReasons.size === 0) pendingReasons.add('initial')
-        dirty = true; return run()
-      }
-    },
-    refresh(reason: ReadReason = 'reconcile') {
-      if (closed) return
-      pendingReasons.add(reason)
-      stopped = false; dirty = true
-      if (inFlight) { queued = true; return running }
-      if (!retry) { clearTimeout(timer); timer = undefined; return run() }
-    },
-    flushQueued() {
-      if (closed) return
-      if (inFlight) return running
-      if (dirty && !retry && timer !== undefined) { clearTimeout(timer); timer = undefined; return run() }
-    },
-    retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
-    suspend() { generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; dirty = false; queued = false; noticePending = false; servingNotice = false; pendingReasons.clear(); retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
-    close() { closed = true; generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; noticePending = false; servingNotice = false; pendingReasons.clear(); clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
-  }
-}
-
-/** Notice routing owns no counts, cursors, Message records or pending sends. */
 export function createActivity(options: {
   watched(channel: string): boolean
   covered?(notice: ActivityNotice, target?: string): boolean
+  watermark?(channel: string): number | undefined
+  mainReadSeq?(channel: string): number
+  topicReadSeq?(channel: string, topic: string): number
+  connectionEpoch?(): number | null
+  lifetime?(): AccessLifetime
+  ready?(): void
+  read?(notice: Extract<ActivityNotice, { type: 'read_position_changed' }>): void
   revoke?(channel: string): void
   access?(channel: string): void
   reconcile?(): void
@@ -226,83 +21,109 @@ export function createActivity(options: {
   random?: () => number
   periodMs?: number
 }) {
+  const core = createActivityRoutingCore()
   const targets = new Map<string, ActivityTarget>()
-  const random = options.random ?? Math.random, period = options.periodMs ?? 30_000
-  let timer: ReturnType<typeof setTimeout> | undefined, generation = 0, closed = false
+  const random = options.random ?? Math.random
+  let timer: ReturnType<typeof setTimeout> | undefined
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
   const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200, discovery?: boolean) => targets.get(key)?.invalidate(reason, delay, discovery)
-  const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
-  function all(delay: number, reason: Invalidation = 'reconcile', ready = false) {
-    options.reconcile?.()
-    // Identity authority must be invalidated before the Member lists decide what to retain.
-    invalidate('capabilities', reason, delay)
-    for (const [key, target] of targets) {
-      if (key === 'capabilities') continue
-      if (ready && target.ready?.()) continue
-      target.invalidate(reason, delay)
+  const memberKey = (id: string) => `channel-members:${id}`
+  const readKey = (id: string, topic: string | null) => topic === null ? `main:${id}` : `topic:${id}:${topic}`
+
+  function facts(event: ActivityNotice): ActivityFacts {
+    if (!('channel_id' in event)) return {}
+    const id = event.channel_id
+    const kind = options.kind?.(id)
+    const list = kind === 'dm' ? 'dms' : 'channels'
+    const hasKindLookup = options.kind !== undefined
+    if (event.type === 'channel_activity') {
+      return { kind, hasKindLookup, watched: options.watched(id),
+        listCovered: options.covered?.(event, list), asOfSeq: options.watermark?.(id) }
+    }
+    if (event.type === 'read_position_changed') {
+      return { kind, hasKindLookup, listCovered: options.covered?.(event, list),
+        mainReadSeq: event.topic_id === null ? options.mainReadSeq?.(id) : undefined }
+    }
+    return { kind }
+  }
+
+  function readProjectionFacts(event: Extract<ActivityNotice, { type: 'read_position_changed' }>): ActivityFacts {
+    const { channel_id: id, topic_id: topic } = event
+    const watched = options.watched(id)
+    return { afterLists: true, watched,
+      projectionCovered: watched ? options.covered?.(event, readKey(id, topic)) : undefined,
+      topicReadSeq: watched && topic !== null ? options.topicReadSeq?.(id, topic) : undefined,
     }
   }
-  function periodic(own: number, first: boolean) {
-    timer = setTimeout(() => {
-      if (closed || generation !== own) return
-      all(200, 'periodic')
-      periodic(own, false)
-    }, first ? random() * period : period + (random() * 2 - 1) * period / 10)
+
+  function dispatch(input: Parameters<typeof core.step>[0]) {
+    const event = input.type === 'notice' ? input.event : undefined
+    const id = event && 'channel_id' in event ? event.channel_id : undefined
+    const connection = 'connection' in input ? input.connection : undefined
+    // Read observation can change coverage. Both callbacks can retire the current scope.
+    function continueNotice() {
+      if (input.type === 'notice') notice(input.event, input.connection, facts(input.event))
+    }
+    for (const effect of core.step(input, options.lifetime?.() ?? 'current')) {
+      switch (effect.type) {
+        case 'inspect': continueNotice(); break
+        case 'ready_targets': options.ready?.(); continueNotice(); break
+        case 'observe_read':
+          if (event?.type === 'read_position_changed') options.read?.(event)
+          continueNotice()
+          break
+        case 'inspect_read_projection':
+          // List invalidation can synchronously notify subscribers before the watched check.
+          if (event?.type === 'read_position_changed') notice(event, connection, readProjectionFacts(event))
+          break
+        case 'notify_sections': if (event) targets.get('sections')?.notice?.(event); break
+        case 'revoke': if (id !== undefined) options.revoke?.(id); break
+        case 'gain': if (id !== undefined) options.access?.(id); break
+        case 'retire_channel_members':
+          if (id !== undefined) { const key = memberKey(id); retire(targets.get(key)); targets.delete(key) }
+          break
+        case 'invalidate': {
+          let key: string = effect.target
+          if (effect.target === 'channel-members' && id !== undefined) key = memberKey(id)
+          if (effect.target === 'main' && id !== undefined) key = readKey(id, null)
+          if (effect.target === 'topic' && event?.type === 'read_position_changed') key = readKey(event.channel_id, event.topic_id)
+          invalidate(key, effect.reason, effect.debounce, effect.discovery ?? undefined)
+          break
+        }
+        case 'invalidate_member_lists':
+          for (const key of targets.keys()) if (key === effect.key || key.startsWith(effect.prefix)) invalidate(key, effect.reason, effect.debounce)
+          break
+        case 'reconcile': {
+          const delay = effect.jitter === null ? effect.debounce : core.delay(effect.jitter, options.periodMs, random())
+          options.reconcile?.()
+          invalidate(effect.first, effect.reason, delay)
+          for (const [key, target] of targets) {
+            if (key === effect.first || (effect.ready && target.ready?.())) continue
+            target.invalidate(effect.reason, delay)
+          }
+          break
+        }
+        case 'arm': {
+          const tick = () => dispatch({ type: 'tick', generation: effect.generation, connection, current_connection: options.connectionEpoch?.() })
+          timer = setTimeout(tick, core.delay(effect.timing, options.periodMs, random()))
+          break
+        }
+        case 'cancel': clearTimeout(timer); break
+        case 'disconnect_targets': targets.forEach(target => target.disconnected?.()); break
+        case 'close_targets': targets.forEach(target => target.close()); targets.clear(); break
+      }
+    }
   }
-  const channelLists = (reason: Invalidation) => {
-    if (reason === 'access') invalidate('sections', reason)
-    invalidate('channels', reason)
-    invalidate('archived-channels', reason)
-  }
-  const lists = (kind: 'dm' | 'channel' | undefined, reason: Invalidation = 'notice') => {
-    if (kind !== 'dm') channelLists(reason)
-    // Only access changes and unknown kinds can reveal a DM the list has not discovered (P-D5 notice delta).
-    if (kind !== 'channel') invalidate('dms', reason, 200, reason === 'access' || kind === undefined)
+  function notice(event: ActivityNotice, connection?: number, routingFacts?: ActivityFacts) {
+    dispatch({ type: 'notice', event, connection, current_connection: options.connectionEpoch?.(), facts: routingFacts })
   }
   return {
     hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
     invalidate,
-    invalidateMemberLists,
-    notice(event: ActivityNotice) {
-      if (closed) return
-      switch (event.type) {
-        case 'activity_ready':
-          clearTimeout(timer); periodic(++generation, true); all(200, 'reconcile', true); break
-        case 'activity_reset': all(random() * 2000); break
-        case 'sections_changed': targets.get('sections')?.notice?.(event); break
-        case 'channel_activity': {
-          const kind = options.kind?.(event.channel_id)
-          if ((options.kind && kind === undefined) || (!options.watched(event.channel_id) && !options.covered?.(event, kind === 'dm' ? 'dms' : 'channels'))) lists(kind)
-          break
-        }
-        case 'read_position_changed': {
-          const kind = options.kind?.(event.channel_id)
-          if ((options.kind && kind === undefined) || !options.covered?.(event, kind === 'dm' ? 'dms' : 'channels')) lists(kind)
-          if (options.watched(event.channel_id)) {
-            const key = event.topic_id === null ? `main:${event.channel_id}` : `topic:${event.channel_id}:${event.topic_id}`
-            if (!options.covered?.(event, key)) invalidate(key)
-          }
-          break
-        }
-        case 'channel_access_revoked':
-        case 'channel_access_gained': {
-          const id = event.channel_id, kind = options.kind?.(id)
-          if (event.type === 'channel_access_revoked') {
-            options.revoke?.(id); retire(targets.get(`channel-members:${id}`)); targets.delete(`channel-members:${id}`)
-          } else options.access?.(id)
-          lists(kind, 'access')
-          if (kind !== 'dm') invalidate('open-channel', 'access')
-          invalidateMemberLists()
-          break
-        }
-        case 'dm_list_changed': invalidate('dms', 'access', 200, true); break
-        case 'channel_list_changed': channelLists('access'); invalidate('open-channel', 'access'); break
-        case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
-        case 'members_changed': invalidate('capabilities', 'access'); invalidateMemberLists(); break
-      }
-    },
-    disconnected() { clearTimeout(timer); generation++; targets.forEach(target => target.disconnected?.()) },
-    close() { closed = true; clearTimeout(timer); generation++; targets.forEach(target => target.close()); targets.clear() },
+    invalidateMemberLists: () => dispatch({ type: 'invalidate_member_lists' }),
+    notice: (event: ActivityNotice, connection?: number) => notice(event, connection),
+    disconnected: () => dispatch({ type: 'disconnected' }),
+    close: () => dispatch({ type: 'close' }),
   }
 }
 export type Activity = ReturnType<typeof createActivity>

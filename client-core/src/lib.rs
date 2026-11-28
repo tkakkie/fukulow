@@ -1,5 +1,6 @@
 //! Deterministic Message sync policy. The owner supplies all I/O results and timer ticks.
 mod access;
+pub mod activity_routing;
 #[cfg(any(feature = "wasm", test))]
 mod boundary_delta;
 mod engine;

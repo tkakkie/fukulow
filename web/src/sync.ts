@@ -97,7 +97,7 @@ export function createSync(options: SyncOptions) {
   let socket: { id: number; transport: Connection } | undefined
   const timers = new Map<number, unknown>()
   const requests = createRequestDeadlines()
-  const noticeListeners = new Set<(notice: ActivityNotice) => void>()
+  const noticeListeners = new Set<(notice: ActivityNotice, connection: number) => void>()
   const inputListeners = new Set<(input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void>()
   const listeners = new Set<SyncListener>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -151,7 +151,8 @@ export function createSync(options: SyncOptions) {
       if (delivery?.type === 'activity') {
         // Rust classified this validated frame. Forward the original payload.
         const notice = input.event as ActivityNotice
-        noticeListeners.forEach(l => l(notice))
+        const connection = input.connection
+        noticeListeners.forEach(l => l(notice, connection))
         return Promise.resolve()
       }
       // Input observers still receive the attributed event or abnormal close.
@@ -479,7 +480,7 @@ export function createSync(options: SyncOptions) {
 
   return {
     onInput(listener: (input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void) { inputListeners.add(listener); return () => { inputListeners.delete(listener) } },
-    onActivity(listener: (notice: ActivityNotice) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
+    onActivity(listener: (notice: ActivityNotice, connection: number) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
     get: () => state,
     reportAccess,
     request: (id: number) => core.request(id),

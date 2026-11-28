@@ -3,6 +3,34 @@ use crate::{boundary_delta::Boundary, *};
 use serde::{Deserialize, de::value::StrDeserializer};
 use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct WasmActivityRouting(activity_routing::ActivityRouting);
+
+#[wasm_bindgen]
+impl WasmActivityRouting {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn step(&mut self, input: &str, lifetime: &str) -> Result<String, JsValue> {
+        let input = serde_json::from_str(input).map_err(error)?;
+        let lifetime =
+            AccessLifetime::deserialize(StrDeserializer::<serde::de::value::Error>::new(lifetime))
+                .map_err(error)?;
+        serde_json::to_string(&self.0.step(input, lifetime)).map_err(error)
+    }
+
+    pub fn delay(timing: &str, period: Option<f64>, draw: f64) -> Result<f64, JsValue> {
+        let timing = activity_routing::ActivityDelay::deserialize(StrDeserializer::<
+            serde::de::value::Error,
+        >::new(timing))
+        .map_err(error)?;
+        Ok(activity_routing::activity_delay(timing, period, draw))
+    }
+}
+
 fn error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }

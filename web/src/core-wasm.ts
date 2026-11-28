@@ -1,7 +1,8 @@
-import init, { WasmCore } from '../wasm/fukulow_client_core'
+import init, { WasmActivityRouting, WasmCore } from '../wasm/fukulow_client_core'
 import { createValues } from './core-values'
 import { identityOrder, rememberIdentityResponse } from './identity-order'
-import type { Message } from './api'
+import type { Channel, Message } from './api'
+import type { ActivityNotice, Invalidation } from './activity-target'
 import type { AccessEndpoint, AccessLifetime, AccessOutcome, ChannelState, CoreResult, Failure, Input, Pending, Purpose, State, SyncCore, SyncView } from './protocol-types'
 
 // A Node micro-benchmark on a 200-Message Channel had find and Map break even at ~4 inserts and Map
@@ -26,6 +27,55 @@ export function accessOutcome(endpoint: AccessEndpoint, lifetime: AccessLifetime
 export function isGenerationConflict(failure: { status: Failure; error?: string }): boolean {
   const status = typeof failure.status === 'number' ? failure.status : undefined
   return WasmCore.isGenerationConflict(status, failure.error)
+}
+
+export type ActivityFacts = {
+  kind?: Channel['kind'] | 'dm'
+  hasKindLookup?: boolean
+  watched?: boolean
+  listCovered?: boolean
+  projectionCovered?: boolean
+  afterLists?: boolean
+  asOfSeq?: number
+  mainReadSeq?: number
+  topicReadSeq?: number
+}
+type ActivityEpoch = { connection?: number; current_connection?: number | null }
+type ActivityInput =
+  | ({ type: 'notice'; event: ActivityNotice; facts?: ActivityFacts } & ActivityEpoch)
+  | ({ type: 'tick'; generation: number } & ActivityEpoch)
+  | { type: 'disconnected' | 'close' | 'invalidate_member_lists' }
+type ActivityDelay = 'first' | 'periodic' | 'reset'
+type ActivityTarget =
+  | 'channels' | 'archived-channels' | 'open-channel' | 'dms' | 'sections' | 'capabilities'
+  | 'channel-members' | 'main' | 'topic'
+type ActivityEffect =
+  | { type: 'inspect' | 'ready_targets' | 'observe_read' | 'inspect_read_projection' | 'notify_sections' | 'revoke' | 'retire_channel_members' | 'gain' }
+  | { type: 'invalidate'; target: ActivityTarget; reason: Invalidation; debounce: number; discovery: boolean | null }
+  | { type: 'invalidate_member_lists'; key: string; prefix: string; reason: Invalidation; debounce: number }
+  | { type: 'reconcile'; reason: Invalidation; first: string; ready: boolean; debounce: number; jitter: ActivityDelay | null }
+  | { type: 'arm'; generation: number; timing: ActivityDelay }
+  | { type: 'cancel' | 'disconnect_targets' | 'close_targets' }
+
+export function createActivityRoutingCore() {
+  const core = new WasmActivityRouting()
+  return {
+    step(input: ActivityInput, lifetime: AccessLifetime): ActivityEffect[] {
+      let encoded: unknown = input.type
+      if (input.type === 'notice') {
+        const { type, event, ...context } = input
+        const notice = event.type === 'channel_activity' ? { channel_activity: event.seq }
+          : event.type === 'read_position_changed' ? { read_position_changed: { read_seq: event.read_seq, topic: event.topic_id !== null } }
+            : event.type
+        encoded = { [type]: { ...context, event: notice } }
+      } else if (input.type === 'tick') {
+        const { type, ...tick } = input
+        encoded = { [type]: tick }
+      }
+      return JSON.parse(core.step(JSON.stringify(encoded), lifetime)) as ActivityEffect[]
+    },
+    delay: (timing: ActivityDelay, period: number | undefined, draw: number) => WasmActivityRouting.delay(timing, period, draw),
+  }
 }
 
 type Interned<T> = Omit<T, 'body'> & { body?: number }

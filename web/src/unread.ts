@@ -725,6 +725,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   if (active()) { reconcile(); void refresh() }
   return {
     subscribe,
+    activityWatermark: (id: string) => channels.get(id)?.aggregate?.as_of_seq,
     activityMainCoverage(id: string) {
       const c = channels.get(id), row = c?.aggregate
       if (!c || !row || !completeCountFields(row)) return -1
