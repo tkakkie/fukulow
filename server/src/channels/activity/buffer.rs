@@ -16,17 +16,22 @@ pub(super) struct Proof {
 }
 #[derive(Default)]
 pub(super) struct Recovery {
-    pub(super) state: Mutex<RecoveryState>,
+    state: Mutex<RecoveryState>,
 }
 #[derive(Default)]
-pub(super) struct RecoveryState {
-    pub(super) live: usize,
-    pub(super) settled: bool,
+struct RecoveryState {
+    live: usize,
+    settled: bool,
 }
 impl Recovery {
     pub(super) fn valid(&self) -> bool {
         let state = lock_ignoring_poison(&self.state);
         state.settled || state.live != 0
+    }
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> (usize, bool) {
+        let state = lock_ignoring_poison(&self.state);
+        (state.live, state.settled)
     }
 }
 pub(super) struct QueryToken {

@@ -2420,11 +2420,10 @@ mod tests {
             assert_eq!(buffer.proofs.len(), 1);
             let pending = buffer.pending.front().unwrap();
             let recovery = pending.recovery.as_ref().unwrap();
-            let state = recovery.state.lock().unwrap();
-            assert!(state.settled);
-            assert_eq!(state.live, 1);
+            let (live, settled) = recovery.snapshot();
+            assert!(settled);
+            assert_eq!(live, 1);
             assert_eq!(Arc::strong_count(recovery), 2);
-            drop(state);
             pending.valid.retire();
         }
         // A later smaller value must not hide recovery for an earlier valid
