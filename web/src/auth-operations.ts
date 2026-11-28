@@ -1,6 +1,6 @@
 import { errorMessage, type AuthState, type restore, type setupAndSignIn, type signIn, type signOut } from './auth'
 import type { AcceptInviteRequest, Identity } from './api'
-import type { createInviteAcceptance } from './members'
+import type { createInviteAcceptance } from './invite-acceptance'
 
 type Invitation = Pick<ReturnType<typeof createInviteAcceptance>, 'accept' | 'signOutAndContinue'>
 type Dependencies = {
