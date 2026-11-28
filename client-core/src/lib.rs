@@ -7,12 +7,14 @@ pub mod reply_counts;
 mod responses;
 mod retention;
 mod sends;
+mod sync_delay;
 #[cfg(test)]
 mod test_support;
 mod transitions;
 mod types;
 #[cfg(feature = "wasm")]
 mod wasm;
+pub use sync_delay::sync_delay;
 pub use types::*;
 
 use std::collections::BTreeMap;

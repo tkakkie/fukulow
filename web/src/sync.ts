@@ -9,10 +9,10 @@ import {
 import type { DraftStore } from './drafts'
 import * as api from './api'
 import { createRequestDeadlines } from './request-deadlines'
-import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { createCore, inputMessages } from '#sync-core'
+import { syncDelay } from './core-wasm'
 import { messageBodyError, topicNameError } from './message-rules'
 import type { SyncCore } from './protocol-types'
 import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
@@ -77,7 +77,7 @@ export function createSync(options: SyncOptions) {
   const transport = options.api ?? timelineApi(options.organizationId ?? '')
   const connect = options.connect ?? (handlers => connectRealtime(handlers, undefined, options.organizationId))
   const newId = options.newId ?? (() => crypto.randomUUID())
-  const fillDelay = options.delay ?? backoffCap
+  const fillDelay = options.delay ?? (attempt => syncDelay('fill_backoff', attempt))
   const random = options.random ?? Math.random
   const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms))
   const cancel = options.cancel ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
@@ -311,9 +311,10 @@ export function createSync(options: SyncOptions) {
         break
       }
       case 'wait': {
-        const ms = effect.purpose === 'send_retry' ? effect.delayMs
-          : effect.purpose === 'reorder_grace' ? options.graceMs ?? 100
-          : effect.purpose === 'reconnect_backoff' ? reconnectDelay(effect.attempt, random) : fillDelay(effect.attempt)
+        const ms = effect.purpose === 'send_retry' ? syncDelay(effect.purpose, 0, effect.delayMs)
+          : effect.purpose === 'reorder_grace' ? syncDelay(effect.purpose, effect.attempt, options.graceMs ?? 100)
+          : effect.purpose === 'reconnect_backoff' ? syncDelay(effect.purpose, effect.attempt, random())
+          : fillDelay(effect.attempt)
         // Browser timers overflow above signed 32-bit milliseconds; split long waits to avoid an early send.
         const arm = (remaining: number) => {
           const chunk = Math.min(remaining, 2_147_483_647)
