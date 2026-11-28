@@ -5,19 +5,27 @@ import { setTimeout } from 'node:timers/promises'
 
 type RunOptions = Pick<SpawnSyncOptions, 'cwd' | 'env' | 'input' | 'timeout' | 'maxBuffer'> & {
   failureOutput?: 'suppress' | 'stderr' | 'both'
+  stdin?: number
+  captureOutput?: boolean
+  acceptStatus?: (status: number) => boolean
 }
 
 export function run(command: string, args: readonly string[], {
   cwd, env, input, timeout, maxBuffer = 1024 * 1024, failureOutput = 'suppress',
+  stdin, captureOutput = true, acceptStatus = status => status === 0,
 }: RunOptions = {}): { stdout: string; stderr: string } {
   let result
   try {
-    result = spawnSync(command, args, { cwd, env, input, timeout, maxBuffer, encoding: 'utf8', stdio: 'pipe' })
+    const output = captureOutput ? 'pipe' : 'ignore'
+    result = spawnSync(command, args, { cwd, env, input, timeout, maxBuffer, encoding: 'utf8',
+      stdio: [stdin ?? 'pipe', output, output] })
   } catch {
     // Argument validation errors can include the supplied values.
     throw new Error('Command could not be started')
   }
-  if (result.status === 0 && !result.error) return { stdout: result.stdout, stderr: result.stderr }
+  if (!result.error && result.status !== null && acceptStatus(result.status)) {
+    return { stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+  }
 
   if (failureOutput === 'both' && result.stdout) process.stdout.write(result.stdout)
   if ((failureOutput === 'stderr' || failureOutput === 'both') && result.stderr) process.stderr.write(result.stderr)
