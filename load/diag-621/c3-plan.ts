@@ -9,6 +9,8 @@ const permutations: Arm[][] = [
 const units = [1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1];
 export const rate = 250;
 export const measuredSeconds = 8;
+export const warmSeconds = 10;
+export const planVersion = '4.1';
 export const deadlineMs = 60 * 60 * 1000;
 
 export type Window = { id: string; index: number; round: number; shape: Shape; arm: Arm; position: number };
@@ -32,17 +34,15 @@ export function scheduleReason(smoke: boolean, observed: readonly Window[]): str
     ? undefined : 'recorded windows do not match the published schedule';
 }
 
-export const smokeWarmup = (late: boolean) => late ? 10 : 3;
-
 export async function prepareWindow(window: Window, operations: {
   clone(db: string): void; disableMaintenance(db: string): void; settle(db: string): Promise<unknown>;
-  restart(arm: Arm, db: string): Promise<void>;
+  restart(arm: Arm, db: string): Promise<string>;
 }) {
   const db = `diag_${window.index}`;
   operations.clone(db);
   operations.disableMaintenance(db);
-  // Before the app starts, so the existing readiness-to-warm-up sequence is unchanged.
+  // Catalog maintenance must finish before the app starts.
   await operations.settle(db);
-  await operations.restart(window.arm, db);
-  return db;
+  const url = await operations.restart(window.arm, db);
+  return { db, url };
 }

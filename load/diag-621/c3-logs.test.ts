@@ -11,7 +11,8 @@ const marker = (ms: number, stage: string) => log(ms, 'dead.ff', 'fukulow', 'dia
 const lines = [receipt(20, 'dead.1'), auth(35, 'dead.1'), marker(50, 'BEGIN'), receipt(99, 'dead.2'), auth(103, 'dead.2'),
   receipt(101, 'dead.3'), auth(105, 'dead.3'), log(120, 'dead.3', 'fukulow_app', 'diag_1', 'disconnection: session time: 0:00:00.019'),
   receipt(200, 'dead.4'), auth(215, 'dead.4', 'other'), receipt(450, 'dead.5'), auth(460, 'dead.5'), marker(500, 'END')];
-const verify = (entries: string[]) => connectionEvidence(entries.join('\n'), 'diag_1', epoch + 75, epoch + 100, epoch + 400);
+const verify = (entries: string[], preGrowAt?: number) =>
+  connectionEvidence(entries.join('\n'), 'diag_1', epoch + 75, epoch + 100, epoch + 400, preGrowAt);
 
 test('pairs receipts with authorization even for disconnected sessions; filters role/database and detects late receipt not authorization', () => {
   assert.ok(logSettings.includes('log_connections=receipt,authorization'));
@@ -23,6 +24,14 @@ test('pairs receipts with authorization even for disconnected sessions; filters 
   assert.equal(evidence.lines.some(line => line.includes('dead.4')), false);
   const auto = log(300, 'dead.ee', '', 'diag_1', 'automatic analyze of table "diag_1.public.messages"');
   assert.deepEqual(verify([...lines, auto]).automaticMaintenance, [auto]);
+});
+
+test('disconnect after pre-grow is captured even in the same millisecond as the begin marker', () => {
+  const disconnected = log(50, 'dead.1', 'fukulow_app', 'diag_1', 'disconnection: session time: 0:00:00.030');
+  const entries = [...lines.slice(0, 2), disconnected, ...lines.slice(2)];
+  assert.deepEqual(verify(entries, epoch + 40).preMarkerDisconnects.map(row => row.line), [disconnected]);
+  assert.deepEqual(verify(entries, epoch + 51).preMarkerDisconnects, []);
+  assert.deepEqual(verify([...lines.slice(0, 3), disconnected, ...lines.slice(3)], epoch + 40).preMarkerDisconnects, []);
 });
 
 test('both correctly placed coverage markers and receipt/authorization evidence are mandatory', () => {
