@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import ts from 'typescript';
 import { localImports, missingFromProvenance } from './provenance-coverage.ts';
+import { harnessHashes } from './provenance.ts';
 
 function tree(files: Record<string, string>) {
   const root = mkdtempSync(join(tmpdir(), 'harness-coverage-'));
@@ -107,8 +109,7 @@ test('several entries are walked together and each entry must be listed', () => 
   assert.deepEqual(missingFromProvenance(['load/a.ts', 'load/b.ts'], ['load/a.ts', 'load/shared.ts'], root), ['load/b.ts', 'load/only-b.ts']);
 });
 
-// The real `load/record.ts` provenance list, read from its source: the string array that
-// `harness: Object.fromEntries([...].map(...))` hashes.
+// The real `load/record.ts` provenance list, read from the array in its `harness` property.
 const checkout = resolve(import.meta.dirname, '../..');
 function recordList(): string[] {
   const source = ts.createSourceFile('record.ts', readFileSync(join(checkout, 'load/record.ts'), 'utf8'), ts.ScriptTarget.Latest, true);
@@ -134,14 +135,25 @@ test('the real load/record.ts provenance list covers everything record.ts reache
   for (const path of reached) assert.deepEqual(missingFromProvenance('load/record.ts', list.filter(p => p !== path), checkout), [path], path);
 });
 
-test('the k6 scripts record.ts runs are covered too, apart from the two gaps pinned here until record.ts next changes', () => {
+test('the k6 scripts record.ts runs are covered too', () => {
   // record.ts runs LOAD_SCRIPT (load/scenario.ts by default, or load/throughput.ts) in k6; they import
-  // load/scheduler.ts and more, which record.ts never imports itself. The pinned gaps are real: add
-  // them to the list when record.ts next changes (#866 adoption rule) and empty this array.
+  // load/scheduler.ts and more, which record.ts never imports itself.
   const entries = ['load/record.ts', 'load/scenario.ts', 'load/throughput.ts'];
-  const gaps = ['load/events.ts', 'web/src/api-schema.d.ts'];
+  const gaps: string[] = [];
   const list = recordList();
   assert.deepEqual(missingFromProvenance(entries, list, checkout), gaps);
   for (const path of ['load/scheduler.ts', 'load/scenario.ts', 'load/seed.ts', 'web/src/reconnect.ts'])
     assert.deepEqual(missingFromProvenance(entries, list.filter(p => p !== path), checkout), [...gaps, path].sort(), path);
+});
+
+test('record.ts hashes the extracted measurement modules with the same SHA-256 as its inline hashing', () => {
+  const list = recordList();
+  const extracted = [
+    'web/scripts/first-paint-summary.ts', 'web/scripts/measure-stats.ts', 'web/scripts/measure-receive-path.ts',
+    'web/scripts/mixed-traces.ts', 'web/scripts/receive-cases.ts',
+  ];
+  assert.deepEqual(missingFromProvenance('web/scripts/first-paint-summary.ts', list, checkout), []);
+  for (const path of extracted) assert.ok(list.includes(path), path);
+  const inline = Object.fromEntries(list.map(path => [path, createHash('sha256').update(readFileSync(join(checkout, path))).digest('hex')]));
+  assert.equal(JSON.stringify(harnessHashes(list, checkout)), JSON.stringify(inline));
 });

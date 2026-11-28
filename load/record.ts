@@ -11,6 +11,7 @@ import { sampledCpuPeaks, type ResourceSample } from './throughput-summary.ts';
 import { requireSuccessfulRun } from './summary.ts';
 import { loadRecipe } from './generator.ts';
 import { appEvidence, proxyEvidence, type AppEvidence, type ProxyEvidence } from './app-evidence.ts';
+import { harnessHashes } from './harness-core/provenance.ts';
 const execAsync = promisify(execFile);
 const proxy = process.env.LOAD_PROXY as Proxy | undefined;
 if (proxy && !['caddy', 'nginx'].includes(proxy)) throw new Error('LOAD_PROXY must be caddy or nginx');
@@ -121,9 +122,10 @@ try {
   writeFileSync(`${output}/server-source.patch`, command('git', ['-C', env.LOAD_SERVER_SOURCE, 'diff', 'HEAD']));
   const metadata = {
     hostNode: process.version,
-    harness: Object.fromEntries(['Makefile', 'Dockerfile', 'compose.yml', 'deploy/Caddyfile', 'deploy/nginx.conf', 'deploy/nginx-acme.sh', 'web/scripts/first-paint.ts', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
-      'load/seed.ts', 'load/session-layout.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/generator.ts', 'load/app-evidence.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
-      [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
+    harness: harnessHashes(['Makefile', 'Dockerfile', 'compose.yml', 'deploy/Caddyfile', 'deploy/nginx.conf', 'deploy/nginx-acme.sh', 'web/scripts/first-paint.ts', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
+      'load/seed.ts', 'load/session-layout.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/generator.ts', 'load/app-evidence.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml',
+      'web/scripts/first-paint-summary.ts', 'web/scripts/read-reasons.ts', 'web/scripts/measure-stats.ts', 'web/scripts/mixed-traces.ts',
+      'web/scripts/measure-receive-path.ts', 'web/scripts/receive-cases.ts', 'load/harness-core/nearest-rank.ts', 'load/harness-core/provenance.ts', 'load/events.ts', 'web/src/api-schema.d.ts']),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
     serverDirty: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'status', '--porcelain']),
