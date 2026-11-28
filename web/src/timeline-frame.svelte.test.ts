@@ -11,6 +11,13 @@ function textSnippet(tag: string, text: string) {
   }))
 }
 
+function nonSvelteClasses(el: { getAttribute(name: string): string | null } | null): string[] {
+  const raw = el?.getAttribute('class') ?? ''
+  return raw
+    .split(/\s+/)
+    .filter((cls) => cls.length > 0 && !cls.startsWith('svelte-'))
+}
+
 describe('TimelineFrame (#842)', () => {
   it('renders shared banners with C10 > C9 > load-error precedence and non-live reconnecting notice', async () => {
     const host = dom.doc.createElement('div')
@@ -185,5 +192,167 @@ describe('TimelineFrame (#842)', () => {
     flushSync()
     expect(buttonsByText(host, '新着 5件 ↓')).toHaveLength(0)
     await unmount(instPinned)
+  })
+
+  it('preserves exact frame class lists and older-button DOM nesting per view', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+
+    // 1. Timeline: main view with wrapped older controls and exact timeline-* classes
+    const timelineInst = mount(TimelineFrame, {
+      target: host as unknown as Element,
+      props: {
+        ariaLabel: 'タイムライン',
+        classes: {
+          root: 'timeline-section',
+          banner: 'timeline-section__banner',
+          positioning: 'timeline-positioning',
+          scroll: 'timeline-scroll',
+          scrollPositioning: 'timeline-scroll--positioning',
+          older: 'timeline-older',
+          newBelow: 'timeline-new-below',
+          composer: 'timeline-composer',
+        },
+        reconnecting: true,
+        loadErrorMessage: '読み込みエラー',
+        positioning: true,
+        showOlder: true,
+        pinned: false,
+        newerCount: 2,
+        onconfirmreplace: () => {},
+        oncancelreplace: () => {},
+        composer: textSnippet('div', 'composer'),
+      },
+    })
+    flushSync()
+    const timelineRoot = host.children[0]
+    expect(timelineRoot.tagName).toBe('SECTION')
+    expect(nonSvelteClasses(timelineRoot)).toEqual(['timeline-section'])
+    const timelineBanners = host.querySelectorAll('.timeline-section__banner')
+    expect(timelineBanners).toHaveLength(2)
+    for (const banner of timelineBanners) {
+      expect(nonSvelteClasses(banner)).toEqual(['timeline-section__banner'])
+      expect(banner.parentElement).toBe(timelineRoot)
+    }
+    const timelinePositioning = host.querySelector('.timeline-positioning')
+    expect(nonSvelteClasses(timelinePositioning)).toEqual(['timeline-positioning'])
+    expect(timelinePositioning?.parentElement).toBe(timelineRoot)
+    const timelineScroll = host.querySelector('.timeline-scroll')
+    expect(nonSvelteClasses(timelineScroll)).toEqual(['timeline-scroll', 'timeline-scroll--positioning'])
+    expect(timelineScroll?.parentElement).toBe(timelineRoot)
+    const timelineOlder = host.querySelector('.timeline-older')
+    expect(nonSvelteClasses(timelineOlder)).toEqual(['timeline-older'])
+    expect(timelineOlder?.parentElement).toBe(timelineScroll)
+    expect(buttonsByText(host, '以前のメッセージを読み込む')[0]?.parentElement).toBe(timelineOlder)
+    const timelineNewBelow = host.querySelector('.timeline-new-below')
+    expect(nonSvelteClasses(timelineNewBelow)).toEqual(['timeline-new-below'])
+    expect(timelineNewBelow?.parentElement).toBe(timelineRoot)
+    const timelineComposer = host.querySelector('.timeline-composer')
+    expect(nonSvelteClasses(timelineComposer)).toEqual(['timeline-composer'])
+    expect(timelineComposer?.parentElement).toBe(timelineRoot)
+    await unmount(timelineInst)
+
+    // 2. TopicView: main view with wrapped older controls and exact topic-view* classes
+    const topicInst = mount(TimelineFrame, {
+      target: host as unknown as Element,
+      props: {
+        ariaLabel: 'トピックタイムライン',
+        classes: {
+          root: 'topic-view',
+          banner: 'topic-view__banner',
+          positioning: 'topic-view__positioning',
+          scroll: 'topic-view__scroll',
+          scrollPositioning: 'topic-view__scroll--positioning',
+          older: 'topic-view__older',
+          newBelow: 'topic-view__new-below',
+          composer: 'topic-view__composer',
+        },
+        reconnecting: true,
+        loadErrorMessage: '読み込みエラー',
+        positioning: true,
+        showOlder: true,
+        pinned: false,
+        newerCount: 1,
+        onconfirmreplace: () => {},
+        oncancelreplace: () => {},
+        composer: textSnippet('div', 'composer'),
+      },
+    })
+    flushSync()
+    const topicRoot = host.children[0]
+    expect(topicRoot.tagName).toBe('SECTION')
+    expect(nonSvelteClasses(topicRoot)).toEqual(['topic-view'])
+    const topicBanners = host.querySelectorAll('.topic-view__banner')
+    expect(topicBanners).toHaveLength(2)
+    for (const banner of topicBanners) {
+      expect(nonSvelteClasses(banner)).toEqual(['topic-view__banner'])
+      expect(banner.parentElement).toBe(topicRoot)
+    }
+    const topicPositioning = host.querySelector('.topic-view__positioning')
+    expect(nonSvelteClasses(topicPositioning)).toEqual(['topic-view__positioning'])
+    expect(topicPositioning?.parentElement).toBe(topicRoot)
+    const topicScroll = host.querySelector('.topic-view__scroll')
+    expect(nonSvelteClasses(topicScroll)).toEqual(['topic-view__scroll', 'topic-view__scroll--positioning'])
+    expect(topicScroll?.parentElement).toBe(topicRoot)
+    const topicOlder = host.querySelector('.topic-view__older')
+    expect(nonSvelteClasses(topicOlder)).toEqual(['topic-view__older'])
+    expect(topicOlder?.parentElement).toBe(topicScroll)
+    expect(buttonsByText(host, '以前のメッセージを読み込む')[0]?.parentElement).toBe(topicOlder)
+    const topicNewBelow = host.querySelector('.topic-view__new-below')
+    expect(nonSvelteClasses(topicNewBelow)).toEqual(['topic-view__new-below'])
+    expect(topicNewBelow?.parentElement).toBe(topicRoot)
+    const topicComposer = host.querySelector('.topic-view__composer')
+    expect(nonSvelteClasses(topicComposer)).toEqual(['topic-view__composer'])
+    expect(topicComposer?.parentElement).toBe(topicRoot)
+    await unmount(topicInst)
+
+    // 3. ReplyPanel: panel view with direct-child older button and exact reply-panel* classes
+    const replyInst = mount(TimelineFrame, {
+      target: host as unknown as Element,
+      props: {
+        variant: 'panel',
+        rootTag: 'div',
+        classes: {
+          root: 'reply-panel',
+          header: 'reply-panel__header',
+          banner: 'reply-panel__banner',
+          scroll: 'reply-panel__scroll',
+          newBelow: 'reply-panel__new-below',
+          composer: 'reply-panel__composer',
+        },
+        loadErrorMessage: '読み込みエラー',
+        showOlder: true,
+        olderLabel: '以前の返信を読み込む',
+        pinned: false,
+        newerCount: 1,
+        onconfirmreplace: () => {},
+        oncancelreplace: () => {},
+        headerExtra: textSnippet('div', 'actions'),
+        composer: textSnippet('div', 'composer'),
+      },
+    })
+    flushSync()
+    const replyRoot = host.children[0]
+    expect(replyRoot.tagName).toBe('DIV')
+    expect(nonSvelteClasses(replyRoot)).toEqual(['reply-panel'])
+    const replyHeader = host.querySelector('.reply-panel__header')
+    expect(nonSvelteClasses(replyHeader)).toEqual(['reply-panel__header'])
+    expect(replyHeader?.parentElement).toBe(replyRoot)
+    const replyBanner = host.querySelector('.reply-panel__banner')
+    expect(nonSvelteClasses(replyBanner)).toEqual(['reply-panel__banner'])
+    expect(replyBanner?.parentElement).toBe(replyHeader)
+    const replyScroll = host.querySelector('.reply-panel__scroll')
+    expect(nonSvelteClasses(replyScroll)).toEqual(['reply-panel__scroll'])
+    expect(replyScroll?.parentElement).toBe(replyRoot)
+    const replyOlderBtn = buttonsByText(host, '以前の返信を読み込む')[0]
+    expect(replyOlderBtn).toBeDefined()
+    expect(replyOlderBtn.parentElement).toBe(replyScroll)
+    const replyNewBelow = host.querySelector('.reply-panel__new-below')
+    expect(nonSvelteClasses(replyNewBelow)).toEqual(['reply-panel__new-below'])
+    expect(replyNewBelow?.parentElement).toBe(replyRoot)
+    const replyComposer = host.querySelector('.reply-panel__composer')
+    expect(nonSvelteClasses(replyComposer)).toEqual(['reply-panel__composer'])
+    expect(replyComposer?.parentElement).toBe(replyRoot)
+    await unmount(replyInst)
   })
 })

@@ -99,21 +99,21 @@
 
 {#snippet stateBanners()}
   {#if reconnecting}
-    <div class={['timeline-frame__banner', classes?.banner]}>
+    <div class={classes?.banner}>
       <StatusBanner tone="info" role={null} message="再接続しています…" />
     </div>
   {/if}
 
   {#if organizationUnavailable}
-    <div class={['timeline-frame__banner', classes?.banner]}>
+    <div class={classes?.banner}>
       <OrganizationUnavailableBanner {onrecheckmembership} {onswitchorganization} />
     </div>
   {:else if channelUnavailable}
-    <div class={['timeline-frame__banner', classes?.banner]}>
+    <div class={classes?.banner}>
       <ChannelUnavailableBanner {ongoToChannelList} variant={channelUnavailableVariant} />
     </div>
   {:else if loadErrorMessage}
-    <div class={['timeline-frame__banner', classes?.banner]}>
+    <div class={classes?.banner}>
       <StatusBanner
         tone="danger"
         role="alert"
@@ -125,13 +125,28 @@
   {/if}
 {/snippet}
 
+{#snippet olderControls()}
+  <Button variant="secondary" disabled={olderDisabled} onclick={onloadolder}>
+    {olderLabel}
+  </Button>
+  {#if olderError}
+    <StatusBanner
+      tone="danger"
+      role="alert"
+      message="以前のメッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+      actionLabel="再試行"
+      onaction={onloadolder}
+    />
+  {/if}
+{/snippet}
+
 <svelte:element
   this={rootTag}
-  class={['timeline-frame', variant === 'panel' && 'timeline-frame--panel', classes?.root]}
+  class={classes?.root}
   aria-label={ariaLabel}
 >
   {#if variant === 'panel' || headerExtra}
-    <div class={['timeline-frame__header', classes?.header]}>
+    <div class={classes?.header}>
       {@render stateBanners()}
       {@render headerExtra?.()}
     </div>
@@ -140,18 +155,13 @@
   {/if}
 
   {#if positioning}
-    <div class={['timeline-frame__positioning', classes?.positioning]}>
+    <div class={classes?.positioning}>
       <Skeleton rows={4} label={positioningLabel} />
     </div>
   {/if}
 
   <div
-    class={[
-      'timeline-frame__scroll',
-      classes?.scroll,
-      positioning && 'timeline-frame__scroll--positioning',
-      positioning && classes?.scrollPositioning,
-    ]}
+    class={[classes?.scroll, positioning && classes?.scrollPositioning]}
     aria-busy={positioning ? 'true' : undefined}
     inert={positioning}
     bind:this={scrollEl}
@@ -160,34 +170,27 @@
     {@render beforeOlder?.()}
 
     {#if showOlder}
-      <div class={['timeline-frame__older', classes?.older]}>
-        <Button variant="secondary" disabled={olderDisabled} onclick={onloadolder}>
-          {olderLabel}
-        </Button>
-        {#if olderError}
-          <StatusBanner
-            tone="danger"
-            role="alert"
-            message="以前のメッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-            actionLabel="再試行"
-            onaction={onloadolder}
-          />
-        {/if}
-      </div>
+      {#if classes?.older}
+        <div class={classes.older}>
+          {@render olderControls()}
+        </div>
+      {:else}
+        {@render olderControls()}
+      {/if}
     {/if}
 
     {@render children?.()}
   </div>
 
   {#if !pinned && newerCount > 0}
-    <div class={['timeline-frame__new-below', classes?.newBelow]}>
+    <div class={classes?.newBelow}>
       <Button variant="primary" onclick={onjumptobottom}>
         新着 {newerCount}件 ↓
       </Button>
     </div>
   {/if}
 
-  <div class={['timeline-frame__composer', classes?.composer]}>
+  <div class={classes?.composer}>
     {@render composer()}
   </div>
 
@@ -203,60 +206,75 @@
 </svelte:element>
 
 <style>
-  .timeline-frame {
+  .timeline-section,
+  .topic-view,
+  .reply-panel {
     position: relative;
     display: grid;
     grid-template-rows: auto 1fr auto;
     height: 100%;
     min-height: 0;
     min-width: 0;
+  }
+
+  .timeline-section,
+  .topic-view {
     gap: var(--space-8);
   }
 
-  .timeline-frame--panel {
-    gap: 0;
+  .reply-panel {
     overflow: hidden;
   }
 
-  .timeline-frame__header {
+  .reply-panel__header {
     display: grid;
     gap: var(--space-8);
     min-width: 0;
   }
 
-  .timeline-frame__banner {
+  .timeline-section__banner,
+  .topic-view__banner {
     padding: 0 var(--space-16);
     min-width: 0;
   }
 
-  .timeline-frame--panel .timeline-frame__banner {
+  .reply-panel__banner {
     padding: var(--space-8) var(--space-12) 0;
+    min-width: 0;
   }
 
-  .timeline-frame__scroll {
-    /* Explicit column: the positioning overlay shares this cell, and auto-placement would move this into an implicit column. */
+  .timeline-scroll,
+  .topic-view__scroll,
+  .reply-panel__scroll {
     grid-row: 2;
-    grid-column: 1;
     overflow-y: auto;
     overflow-anchor: none;
-    padding: var(--space-8) var(--space-16);
     display: flex;
     flex-direction: column;
-    gap: var(--space-8);
     min-height: 0;
     min-width: 0;
   }
 
-  .timeline-frame--panel .timeline-frame__scroll {
+  .timeline-scroll,
+  .topic-view__scroll {
+    /* Explicit column: the positioning overlay shares this cell, and auto-placement would move this into an implicit column. */
+    grid-column: 1;
+    padding: var(--space-8) var(--space-16);
+    gap: var(--space-8);
+  }
+
+  .reply-panel__scroll {
     padding: var(--space-12);
     gap: var(--space-12);
   }
 
-  .timeline-frame__scroll--positioning {
+  .timeline-scroll--positioning,
+  .topic-view__scroll--positioning {
     visibility: hidden;
   }
 
-  .timeline-frame__positioning {
+  .timeline-positioning,
+  .topic-view__positioning {
     grid-row: 2;
     grid-column: 1;
     padding: var(--space-8) var(--space-16);
@@ -264,14 +282,17 @@
     min-width: 0;
   }
 
-  .timeline-frame__older {
+  .timeline-older,
+  .topic-view__older {
     display: grid;
     justify-items: start;
     gap: var(--space-8);
     min-width: 0;
   }
 
-  .timeline-frame__new-below {
+  .timeline-new-below,
+  .topic-view__new-below,
+  .reply-panel__new-below {
     position: absolute;
     bottom: calc(var(--space-24) * 4);
     left: 50%;
@@ -279,13 +300,19 @@
     z-index: 10;
   }
 
-  .timeline-frame__composer {
+  .timeline-composer,
+  .topic-view__composer,
+  .reply-panel__composer {
     grid-row: 3;
-    padding: 0 var(--space-12) var(--space-12);
     min-width: 0;
   }
 
-  .timeline-frame--panel .timeline-frame__composer {
+  .timeline-composer,
+  .topic-view__composer {
+    padding: 0 var(--space-12) var(--space-12);
+  }
+
+  .reply-panel__composer {
     display: grid;
     gap: var(--space-8);
     padding: var(--space-8) var(--space-12) var(--space-12);
