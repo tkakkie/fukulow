@@ -29,7 +29,7 @@ export function trafficReasons(traffic: Traffic, measured: boolean) {
     why.push('measured errors, drops or accepted count outside plan');
   }
   if (measured && (!Array.isArray(vus) || !vus.length || vus.some(row => !Number.isFinite(row.wallMs) || !count(row.value) || row.value > 200)
-    || !vus.some(row => row.wallMs >= scenario && row.wallMs <= Math.max(...requests.map(row => row.end)) + 1000 && row.value > 0))) {
+    || !vus.some(row => row.wallMs >= scenario && row.wallMs <= Math.max(...requests.map(row => row.end)) + 1000))) {
     why.push('k6 VU samples missing or malformed');
   }
   return why;

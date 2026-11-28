@@ -22,7 +22,7 @@ export function parseTraffic(stdout: string, points: string): Traffic {
 export const logSettings = ['log_connections=receipt,authorization', 'log_disconnections=on', 'log_timezone=UTC',
   'log_line_prefix=%m [%c] %u %d | ', 'log_autovacuum_min_duration=0'];
 
-export function connectionEvidence(log: string, database: string, warm: number, first: number, drain: number) {
+export function connectionEvidence(log: string, database: string, warm: number, first: number, drain: number, preGrowAt?: number) {
   const parsed = log.split('\n').flatMap(line => {
     const match = /^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d\.\d{3}) UTC \[([\da-f]+\.[\da-f]+)\] (\S*) (\S*) \| LOG:\s+(.*)$/.exec(line);
     if (!match) return [];
@@ -45,6 +45,8 @@ export function connectionEvidence(log: string, database: string, warm: number, 
   }
   return { lines: [...before, ...connections, ...after].map(row => row.line), starts,
     late: starts.filter(row => row.wallMs > first && row.wallMs <= drain),
+    preMarkerDisconnects: preGrowAt === undefined ? [] : parsed.slice(0, parsed.indexOf(before[0]))
+      .filter(row => row.db === database && row.role === 'fukulow_app' && row.wallMs >= preGrowAt && row.message.startsWith('disconnection:')),
     automaticMaintenance: parsed.filter(row => /automatic (?:vacuum|analyze|aggressive vacuum)/i.test(row.message)
       && row.wallMs >= before[0].wallMs && row.wallMs <= after[0].wallMs).map(row => row.line) };
 }

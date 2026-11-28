@@ -3,6 +3,7 @@ import { closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Tick } from './c3-observer.ts';
+import { incompletePreGrow, preGrowReason, type BackendActivity, type PoolSnapshot } from './c3-pool.ts';
 
 const exec = promisify(execFile);
 const maxBuffer = 32 * 1024 * 1024;
@@ -37,6 +38,44 @@ export function runtime(deadline: number, pg: string, label: string, signal: Abo
   }
   const sqlArgs = (db: string, role: string) => ['exec', '-i', pg, 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', role, '-d', db];
   const sql = (db: string, query: string, operation: string, role = 'fukulow') => docker(operation, sqlArgs(db, role), query);
+  const appBackends = `FROM pg_stat_activity WHERE datname = current_database()
+    AND usename = 'fukulow_app' AND backend_type = 'client backend'`;
+  const poolSQL = `SELECT json_build_object('wallMs', floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint,
+    'pids', coalesce(json_agg(pid ORDER BY pid), '[]')) ${appBackends};`;
+  async function preGrowPool(db: string, url: string, organization: string, tokens: readonly string[]) {
+    const cap = Math.min(10000, active()), end = performance.now() + cap;
+    const timeout = AbortSignal.timeout(cap), stage = AbortSignal.any([signal, timeout]);
+    const endpoint = `${url}/api/v1/orgs/${organization}/channels`;
+    let snapshot: PoolSnapshot | undefined;
+    while (performance.now() < end && !stage.aborted) {
+      await Promise.allSettled(Array.from({ length: 40 }, async (_, index) => {
+        const response = await fetch(endpoint, { headers: { Authorization: `Bearer ${tokens[index % tokens.length]}` }, signal: stage });
+        await response.arrayBuffer();
+      }));
+      if (performance.now() >= end || stage.aborted) break;
+      try {
+        snapshot = json<PoolSnapshot>((await exec('docker', [...sqlArgs(db, 'fukulow'), '-c', poolSQL],
+          { signal: stage, maxBuffer })).stdout);
+      } catch (error) {
+        if (timeout.aborted) break;
+        signal.throwIfAborted();
+        throw new Error(incompletePreGrow, { cause: error });
+      }
+      if (performance.now() < end && !preGrowReason(snapshot.pids)) return { snapshot, completed: true };
+    }
+    signal.throwIfAborted();
+    return { snapshot, completed: false };
+  }
+  const beginCoverage = (db: string) => json<PoolSnapshot>(sql(db,
+    `${poolSQL}\nDO $$ BEGIN RAISE LOG 'C3_COVERAGE_BEGIN'; END $$;`, 'sample pool and write begin marker'));
+  function backendActivity(db: string) {
+    const query = `SELECT coalesce(json_agg(s ORDER BY s.pid), '[]')
+      FROM (SELECT pid, backend_start, state, query ${appBackends}) s;`;
+    const activity = json<BackendActivity[]>(docker('read after-drain app backend activity', sqlArgs(db, 'fukulow'), query,
+      Math.min(5000, active())));
+    if (!Array.isArray(activity) || activity.some(row => !row)) throw new Error('malformed after-drain app backend activity');
+    return activity;
+  }
   const asyncSQL = async (db: string, query: string) => {
     try {
       return (await exec('docker', [...sqlArgs(db, 'fukulow'), '-c', query], { timeout: Math.min(5000, active()), maxBuffer, signal })).stdout.trim();
@@ -82,7 +121,7 @@ export function runtime(deadline: number, pg: string, label: string, signal: Abo
       if (ids.length) docker(`remove ${command}`, [...remove, ...ids], undefined, 15000);
     }
   }
-  return { docker, sql, asyncSQL, task, wait, pid, logs, cleanup, active, remove };
+  return { docker, sql, preGrowPool, beginCoverage, backendActivity, asyncSQL, task, wait, pid, logs, cleanup, active, remove };
 }
 
 export function ticks(path: string): Tick[] {

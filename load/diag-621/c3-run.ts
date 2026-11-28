@@ -14,11 +14,12 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { seed, type Stack } from '../slice5/stack.ts';
-import { deadlineMs, measuredSeconds, prepareWindow, rate, schedule, type Window } from './c3-plan.ts';
+import { deadlineMs, measuredSeconds, planVersion, prepareWindow, rate, schedule, warmSeconds, type Window } from './c3-plan.ts';
 import { verifyPins, verifySmoke, type Pin, type Pins } from './c3-pins.ts';
 import { countChecks, disableMaintenance, fixtureChecks, fixtureReasons, maintenanceReasons, maintenanceSQL,
   settleFixture, shapeSQL, workersSQL, type Maintenance, type Workers } from './c3-fixture.ts';
 import { connectionEvidence, logSettings, parseTraffic } from './c3-logs.ts';
+import { attributeLateBackends, incompletePreGrow, markerPoolReason, preMarkerDisconnect, type BackendActivity } from './c3-pool.ts';
 import { settleCatalogs, settleRecorder, type CatalogSettle } from './c3-catalog-settle.ts';
 import { c3ExitCode, summarizeC3, type WindowResult } from './c3-summary.ts';
 import { evictionReason, statementEvidence, statementSQL } from './c3-statements.ts';
@@ -27,10 +28,10 @@ import { bounded, dump, json, read, runtime, ticks } from './c3-runtime.ts';
 import { decide, type Statement } from './validity.ts';
 import { checkpoint, controlSQL, walCheckpoints, type Control } from './window.ts';
 
-const [outputArg, pinsArg, mode, smokeArg, warmArg, ...extra] = process.argv.slice(2);
+const [outputArg, pinsArg, mode, smokeArg, ...extra] = process.argv.slice(2);
 const smoke = mode === '--smoke';
-if (!outputArg || !pinsArg || extra.length || !(smoke && !smokeArg && !warmArg || mode === '--full' && smokeArg && ['3', '10'].includes(warmArg))) {
-  console.error('INVALID: usage: c3-run.ts <new-output-dir> <pins.json> (--smoke | --full <smoke-summary.json> <3|10>)');
+if (!outputArg || !pinsArg || extra.length || !(smoke && smokeArg === undefined || mode === '--full' && smokeArg)) {
+  console.error('INVALID: usage: c3-run.ts <new-output-dir> <pins.json> (--smoke | --full <smoke-summary.json>)');
   process.exit(1);
 }
 
@@ -50,7 +51,6 @@ const pgImage = 'postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad2
 const k6Image = 'grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276';
 const observerImage = 'node:26.13.1-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc';
 const password = randomUUID(), setupToken = randomUUID();
-const warmSeconds = smoke ? 3 : Number(warmArg);
 const plan = schedule(smoke), problems: string[] = [], results: WindowResult[] = [];
 const storageFile = resolve(output, 'tmpfs.ndjson');
 const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', timeout: active() });
@@ -162,7 +162,7 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
     storageStart = ticks(storageFile).length;
     const { organization, channels, tokens } = seedFixture;
     dump(fixtureFile, { organization, channels: window.shape === 'hot-17' ? channels.slice(0, 1) : channels, tokens });
-    const db = await prepareWindow(window, {
+    const { db, url } = await prepareWindow(window, {
       clone(name) {
         sql('postgres', 'CHECKPOINT;', 'checkpoint before sample clone');
         sql('postgres', `CREATE DATABASE ${name} TEMPLATE seed_base;`, 'clone settled seed');
@@ -170,8 +170,11 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
       },
       disableMaintenance: name => { sql(name, disableMaintenance, 'disable automatic maintenance on clone'); },
       settle: () => settle(window.id, resolve(dir, 'catalog-settle.json')),
-      async restart(arm, name) { appUp = true; await appStart(app, name, pins[arm]); },
+      restart(arm, name) { appUp = true; return appStart(app, name, pins[arm]); },
     });
+    const preGrow = await runtimeEnv.preGrowPool(db, url, organization, tokens);
+    record('pool-pre-grow', preGrow);
+    if (!preGrow.completed || !preGrow.snapshot) throw new Error(incompletePreGrow);
     const cpuTask = observe(observer, cpuPath, app);
     cpuUp = true;
     await wait('first cgroup sample', () => ticks(cpuPath).length);
@@ -179,7 +182,10 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
     record('maintenance-before', maintenanceBefore);
     worker = monitor(dir);
     await wait('first maintenance sample', () => worker?.samples.length);
-    sql(db, `DO $$ BEGIN RAISE LOG 'C3_COVERAGE_BEGIN'; END $$;`, 'write begin marker');
+    const markerPool = runtimeEnv.beginCoverage(db);
+    record('pool-coverage-begin', markerPool);
+    const poolReason = markerPoolReason(preGrow.snapshot.pids, markerPool.pids);
+    if (poolReason) throw new Error(poolReason);
     const warm = await traffic(dir, fixtureFile, 'warm', warmSeconds);
     result.reasons.push(...trafficReasons(warm, false));
     const cp = checkpoint((query, operation) => sql('postgres', query, operation));
@@ -226,11 +232,18 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
     stop(observer);
     cpuUp = false;
     await bounded(cpuTask.done, Math.min(5000, active()), signal, 'CPU sampler did not exit after removal');
+    let activity: BackendActivity[] = [], activityError: string | undefined;
+    try { activity = runtimeEnv.backendActivity(db); }
+    catch (error) { activityError = reason(error); }
     stop(app);
     appUp = false;
-    const log = connectionEvidence(runtimeEnv.logs(), db, warm.scenario, first, cpu.endWallMs);
+    const log = connectionEvidence(runtimeEnv.logs(), db, warm.scenario, first, cpu.endWallMs, preGrow.snapshot.wallMs);
     record('connections', log);
+    record('vus', { warm: warm.vus, measured: trafficMeasured.vus });
     result.late = log.late.length > 0;
+    // The log covers a disconnect between the pool snapshot and the marker.
+    if (log.preMarkerDisconnects.length) result.reasons.push(preMarkerDisconnect);
+    record('late-backends', { activity, activityError, late: attributeLateBackends(log.late, activity) });
     if (log.automaticMaintenance.length) result.reasons.push('automatic maintenance logged in the window');
     const fixture = json<Record<string, number>>(sql(db, fixtureChecks, 'verify exact search terms and Unread counts'));
     const counts = json<Record<string, number>>(sql(db, countChecks, 'verify write totals and integrity'));
@@ -277,9 +290,9 @@ try {
   if (!busy || !existsSync(busy) || !process.env.FUKULOW_LAUNCH_JOB) throw new Error('run requires the approved launcher and its HOST-BUSY marker');
   pins = json<Pins>(read(resolve(pinsArg)));
   recordedPins = pins;
-  Object.assign(manifest, { smoke, warmSeconds, rate, measuredSeconds, schedule: plan, pins, pgImage, k6Image, observerImage, logSettings });
+  Object.assign(manifest, { planVersion, smoke, warmSeconds, rate, measuredSeconds, schedule: plan, pins, pgImage, k6Image, observerImage, logSettings });
   dump(resolve(output, 'manifest.json'), manifest);
-  if (!smoke) verifySmoke(json(read(resolve(smokeArg))), pins, warmSeconds);
+  if (!smoke) verifySmoke(json(read(resolve(smokeArg))), pins);
   verifyPins(pins, git, image => json(docker('inspect pinned image', ['image', 'inspect', '--format',
     '{"id":{{json .Id}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}', image])),
   (arm, evidence) => dump(resolve(output, `pin-${arm}.json`), evidence));
@@ -323,10 +336,11 @@ finally {
   process.removeListener('SIGTERM', onInterrupt);
   rmSync(scratch, { recursive: true, force: true });
   const summary = summarizeC3(smoke, results, problems);
-  dump(resolve(output, 'summary.json'), { ...summary, pins: recordedPins, elapsedSeconds: (performance.now() - started) / 1000 });
+  dump(resolve(output, 'summary.json'), { ...summary, pins: recordedPins, harness: recordedPins?.harness,
+    elapsedSeconds: (performance.now() - started) / 1000 });
   for (const row of summary.windows) dump(resolve(output, row.window.id, 'result.json'), row);
   if (!summary.valid) console.error('INVALID: see summary.json and the retained raw evidence');
   else if ('primary' in summary) console.log(JSON.stringify(summary.primary));
-  else if ('warmSeconds' in summary) console.log(`Smoke selected ${summary.warmSeconds} s warm-up; no reading.`);
+  else console.log(`Smoke valid with ${summary.warmSeconds} s warm-up.`);
   process.exitCode = c3ExitCode(summary);
 }

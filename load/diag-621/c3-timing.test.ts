@@ -67,9 +67,18 @@ test('requires valid per-request timing, latency and VU samples; first-second la
   assert.throws(() => latency(data.requests.slice(0, 1), origin), /segment missing/);
   for (const patch of [{ requests: [] }, { requests: [data.requests[0], data.requests[0]] },
     { requests: [{ ...data.requests[0], latency: NaN }] }, { requests: [{ ...data.requests[0], vu: 0 }] },
-    { requests: [{ ...data.requests[0], end: origin - 1 }] }, { vus: [] }, { vus: [{ value: -1, wallMs: origin }] }]) {
+    { requests: [{ ...data.requests[0], end: origin - 1 }] }, { vus: [] }, { vus: [{ value: -1, wallMs: origin }] },
+    { vus: [{ value: 0, wallMs: origin - 1 }] }]) {
     assert.match(trafficReasons({ ...data, ...patch }, true).join(), /missing or malformed/);
   }
+});
+
+test('eight zero-valued VU gauges are valid with complete per-request VU evidence', () => {
+  const data = sample();
+  data.vus = Array.from({ length: 8 }, (_, index) => ({ wallMs: origin + 1000 * index, value: 0 }));
+  assert.deepEqual(trafficReasons(data, true), []);
+  data.requests[0].vu = 201;
+  assert.deepEqual(trafficReasons(data, true), ['request, latency or VU evidence missing or malformed']);
 });
 
 test('tmpfs peak is checked over all samples with a strict 90% upper limit', () => {

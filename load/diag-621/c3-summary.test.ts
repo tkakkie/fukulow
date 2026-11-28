@@ -36,10 +36,10 @@ test('each scheduled arm restarts on its own freshly prepared and settled clone;
   const calls: string[] = [];
   const operations = { clone: (db: string) => { calls.push(`clone ${db}`); },
     disableMaintenance: (db: string) => { calls.push(`disable ${db}`); }, settle: async (db: string) => { calls.push(`settle ${db}`); },
-    restart: async (arm: string, db: string) => { calls.push(`start ${arm} ${db}`); } };
+    restart: async (arm: string, db: string) => { calls.push(`start ${arm} ${db}`); return 'http://app'; } };
   const [first, second, third] = schedule(true);
-  assert.equal(await prepareWindow(first, operations), 'diag_1');
-  assert.equal(await prepareWindow(second, operations), 'diag_2');
+  assert.deepEqual(await prepareWindow(first, operations), { db: 'diag_1', url: 'http://app' });
+  assert.deepEqual(await prepareWindow(second, operations), { db: 'diag_2', url: 'http://app' });
   assert.deepEqual(calls, ['clone diag_1', 'disable diag_1', 'settle diag_1', 'start base diag_1',
     'clone diag_2', 'disable diag_2', 'settle diag_2', 'start split diag_2']);
   await assert.rejects(prepareWindow(third, { ...operations, disableMaintenance: () => { throw new Error('cannot prepare clone'); } }), /cannot prepare/);
@@ -96,16 +96,17 @@ test('paired means use 12 deltas and the 11 df t critical value; medians never a
   assert.doesNotMatch(JSON.stringify(result), /\b(?:PASS|FAIL)\b/);
 });
 
-test('smoke selects a single warm-up without a reading; full runs reject late, missing or invalid base windows', () => {
+test('smoke uses a fixed 10 s warm-up; smoke and full runs reject late backends', () => {
   const smoke = evidence(true);
-  const short = summarizeC3(true, smoke, []);
-  assert.ok('warmSeconds' in short);
-  assert.equal(short.warmSeconds, 3);
+  const passed = summarizeC3(true, smoke, []);
+  assert.equal(passed.valid, true);
+  assert.equal(passed.warmSeconds, 10);
+  assert.ok(!('primary' in passed));
   smoke[0].late = true;
-  const selected = summarizeC3(true, smoke, []);
-  assert.ok('warmSeconds' in selected);
-  assert.equal(selected.warmSeconds, 10);
-  assert.ok(!('primary' in selected));
+  const failed = summarizeC3(true, smoke, []);
+  assert.equal(c3ExitCode(failed), 1);
+  assert.equal(failed.windows[0].valid, false);
+  assert.match(failed.windows[0].reasons.join(), /late app backend/);
   const full = evidence();
   full[0].late = true;
   const invalid = summarizeC3(false, full, []);
@@ -118,6 +119,15 @@ test('smoke selects a single warm-up without a reading; full runs reject late, m
   assert.match(missing.reasons.join(), /deadline expired.*published schedule/);
   assert.match(missing.windows[0].reasons.join(), /base is missing or INVALID/);
   assert.equal(c3ExitCode(summarizeC3(false, evidence(), [])), 0);
+});
+
+test('an incomplete pool pre-grow makes a smoke window invalid', () => {
+  const smoke = evidence(true);
+  smoke[2].reasons.push('pool pre-grow incomplete');
+  const result = summarizeC3(true, smoke, []);
+  assert.equal(c3ExitCode(result), 1);
+  assert.equal(result.windows[2].valid, false);
+  assert.match(result.windows[2].reasons.join(), /pool pre-grow incomplete/);
 });
 
 test('window defects and fatal setup reasons propagate to INVALID without replacement windows', () => {

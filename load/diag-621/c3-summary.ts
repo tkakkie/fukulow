@@ -1,4 +1,4 @@
-import { scheduleReason, smokeWarmup, type Window } from './c3-plan.ts';
+import { planVersion, scheduleReason, warmSeconds, type Window } from './c3-plan.ts';
 import { statementReasons, type statementEvidence } from './c3-statements.ts';
 
 export const metrics = ['dbCpuUsec', 'appCpuUsec', 'executorUsec', 'latencyP50Usec', 'latencyP95Usec', 'walBytes', 'walRecords', 'walFpi'] as const;
@@ -38,7 +38,7 @@ export function summarizeC3(smoke: boolean, evidence: WindowResult[], problems: 
   for (const row of windows) {
     if (!row.metrics || !metrics.every(metric => Number.isFinite(row.metrics?.[metric]) && row.metrics![metric] >= 0)) row.reasons.push('window metrics missing or malformed');
     if (typeof row.late !== 'boolean') row.reasons.push('late-backend evidence missing');
-    if (!smoke && row.late) row.reasons.push('late app backend');
+    if (row.late) row.reasons.push('late app backend');
     if (!row.statements) row.reasons.push('statement evidence missing');
     else if (row.window.arm === 'base') row.reasons.push(...statementReasons('base', row.statements));
   }
@@ -50,9 +50,8 @@ export function summarizeC3(smoke: boolean, evidence: WindowResult[], problems: 
     else if (!base) row.reasons.push('same-shape, same-round base is missing or INVALID');
   }
   const valid = !reasons.length && windows.every(row => !row.reasons.length);
-  const result = { smoke, valid, reasons, windows: windows.map(row => ({ ...row, valid: !row.reasons.length })) };
-  if (!valid) return result;
-  if (smoke) return { ...result, warmSeconds: smokeWarmup(windows.some(row => row.late)) };
+  const result = { planVersion, smoke, warmSeconds, valid, reasons, windows: windows.map(row => ({ ...row, valid: !row.reasons.length })) };
+  if (!valid || smoke) return result;
   const pairs = shapes.flatMap(shape => comparisons.flatMap(([candidate, baseline]) => metrics.map(metric => {
     const rows = windows.filter(row => row.window.shape === shape);
     const deltas = rows.filter(row => row.window.arm === candidate).map(row => ({ round: row.window.round,
@@ -65,7 +64,9 @@ export function summarizeC3(smoke: boolean, evidence: WindowResult[], problems: 
     ...effect(windows.filter(row => row.window.shape === shape), metric) }))),
   primary: { dbCpuUsec: primary('dbCpuUsec', 20), latencyP50Usec: primary('latencyP50Usec', 30) },
   limits: ['Prepared-statement warmth is not measured.', 'SQL await time inside the app is not measured.',
-    'Exploratory attribution on Docker; no capacity or formal-gate inference.', 'Automatic maintenance is disabled on send relations.'] };
+    'Exploratory attribution on Docker; no capacity or formal-gate inference.', 'Automatic maintenance is disabled on send relations.',
+    'The pool is pre-grown to 20 backends; measurements cover warm steady state.',
+    'Attribution reports the last query of each late backend still connected at the after-drain read.'] };
 }
 
 export function c3ExitCode(result: { valid: boolean }) { return result.valid ? 0 : 1; }
