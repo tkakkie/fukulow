@@ -5,12 +5,12 @@
 // fixture input type is handled (#545).
 import type { components } from '../src/api-schema.d.ts'
 import type { Input, SyncView } from '../src/protocol-types.ts'
+import { FIXTURE_GENERATION } from './client-core-ids.ts'
 import { fixtureEvents, fixtureMove, type Effect as FixtureEffect, type Observed, type ResolvedInput } from './realtime-fixtures.ts'
 
 export { loadClientScenarios } from './realtime-fixtures.ts'
 
 type Message = components['schemas']['Message']
-const GENERATION = '00000000-0000-4000-8000-000000000515'
 
 export const msgFromFixture = (m: ResolvedInput['message'], channel: string): Message => ({
   mentions: [], ...m!, channel_id: channel, topic_id: m?.topic ?? null, reply_to: m?.reply_to ?? null, reply_root_id: m?.reply_root_id ?? null,
@@ -33,7 +33,7 @@ export function makeProtocolClient(onInput: (input: Input) => void, { initialSta
       const channel = (i.channel ?? e?.channel ?? Object.entries(state.channels)
         .find(([, c]) => c.pending.some((p) => p.clientMessageId === i.client_message_id))?.[0] ?? 'A') as string
       const msg = () => msgFromFixture(i.message, channel)
-      const generation = (i.history_generation as string | undefined) ?? GENERATION
+      const generation = (i.history_generation as string | undefined) ?? FIXTURE_GENERATION
       let input: Input
       switch (i.type) {
         case 'organization_refused': input = { type: 'organization_unavailable' }; break

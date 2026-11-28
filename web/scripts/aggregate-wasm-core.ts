@@ -2,6 +2,11 @@
 // Usage: node web/scripts/aggregate-wasm-core.ts <dir> [--seed 466]
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import type { CellSummary } from './first-paint-summary.ts'
+import { medianOf } from './measure-stats.ts'
+import { BULK_CASES } from './receive-cases.ts'
+
+export { medianOf, nearestRank, olsSlope } from './measure-stats.ts'
 
 export type Arm = 'B' | 'W' | 'R'
 export type MetricConfig = { thresholdPct: number; minDetectableFloor: number; baselineSpreadFloor: number }
@@ -13,35 +18,9 @@ export type ComparisonResult = {
   ci: BootstrapCI; straddlesThreshold: boolean; status: 'MET' | 'MISSED' | 'INCONCLUSIVE'
 }
 
-/** Nearest-rank percentile: index = ceil(q * N) - 1 (q in [0, 1] or [0, 100]). */
-export function nearestRank(values: number[], q: number): number {
-  if (values.length === 0) return 0
-  const ratio = q > 1 ? q / 100 : q
-  const sorted = [...values].sort((a, b) => a - b)
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(ratio * sorted.length) - 1))]
-}
-
-export function medianOf(values: number[]): number {
-  if (values.length === 0) return 0
-  const sorted = [...values].sort((a, b) => a - b)
-  const mid = Math.floor(sorted.length / 2)
-  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
-}
-
 const summarizeRounds = (values: number[]): ArmSummary =>
   values.length === 0 ? { median: 0, min: 0, max: 0, rounds: [] }
     : { median: medianOf(values), min: Math.min(...values), max: Math.max(...values), rounds: [...values] }
-
-/** Ordinary least-squares linear regression slope (y per unit x). */
-export function olsSlope(xs: number[], ys: number[]): number {
-  const n = Math.min(xs.length, ys.length)
-  if (n < 2) return 0
-  const meanX = xs.slice(0, n).reduce((a, b) => a + b, 0) / n
-  const meanY = ys.slice(0, n).reduce((a, b) => a + b, 0) / n
-  let num = 0, den = 0
-  for (let i = 0; i < n; i++) { const dx = xs[i] - meanX; num += dx * (ys[i] - meanY); den += dx * dx }
-  return den === 0 ? 0 : num / den
-}
 
 /** Deterministic Mulberry32 PRNG. */
 function createRng(seed = 466): () => number {
@@ -147,7 +126,7 @@ function walkFiles(dir: string, suffix: string, out: string[] = []): string[] {
   return out.sort()
 }
 
-type FirstPaintCell = { pathLabel: string; network: string; cache: string; fcpMs: { p50: number; p95: number }; timelineVisibleMs: { p50: number; p95: number } }
+type FirstPaintCell = Pick<CellSummary, 'pathLabel' | 'network' | 'cache' | 'fcpMs' | 'timelineVisibleMs'>
 type FirstPaintRound = { arm: Arm; round: number; cells: Record<string, FirstPaintCell> }
 
 function parseFirstPaintFiles(dir: string): Record<Arm, FirstPaintRound[]> {
@@ -170,8 +149,6 @@ function parseFirstPaintFiles(dir: string): Record<Arm, FirstPaintRound[]> {
   for (const arm of ['B', 'W', 'R'] as const) out[arm].sort((a, b) => a.round - b.round)
   return out
 }
-
-const BULK_CASES = ['history_8x50', 'history_2x200', 'catchup_250', 'catchup_1000'] as const
 
 // A missing section or value is an error: it must never turn into 0 (a perfect score) or a passed gate.
 function parseRoundFile(file: string): RoundData {
@@ -268,16 +245,15 @@ export function aggregateDirectory(dir: string, seed = 466, roundCounts: readonl
   const rateR = summarizeRounds(rRounds.map((x) => x.maxSustainableRate))
   const rateStatus: 'MET' | 'MISSED' = rateW.median >= 500 && rateB.median >= 500 ? 'MET' : 'MISSED'
 
-  const bulkCases = BULK_CASES
-  const bulkW = Object.fromEntries(bulkCases.map((k, idx) => [k, {
+  const bulkW = Object.fromEntries(BULK_CASES.map((k, idx) => [k, {
     p50: evaluateMetric(bRounds.map((x) => x.bulk[k]?.p50 ?? 0), wRounds.map((x) => x.bulk[k]?.p50 ?? 0), bulkCfg, seed + 20 + idx * 4),
     p95: evaluateMetric(bRounds.map((x) => x.bulk[k]?.p95 ?? 0), wRounds.map((x) => x.bulk[k]?.p95 ?? 0), bulkCfg, seed + 21 + idx * 4),
   }]))
-  const bulkR = Object.fromEntries(bulkCases.map((k, idx) => [k, {
+  const bulkR = Object.fromEntries(BULK_CASES.map((k, idx) => [k, {
     p50: evaluateMetric(bRounds.map((x) => x.bulk[k]?.p50 ?? 0), rRounds.map((x) => x.bulk[k]?.p50 ?? 0), bulkCfg, seed + 22 + idx * 4),
     p95: evaluateMetric(bRounds.map((x) => x.bulk[k]?.p95 ?? 0), rRounds.map((x) => x.bulk[k]?.p95 ?? 0), bulkCfg, seed + 23 + idx * 4),
   }]))
-  const bulkStatus = combineStatuses(bulkCases.flatMap((k) => [bulkW[k].p50.status, bulkW[k].p95.status]))
+  const bulkStatus = combineStatuses(BULK_CASES.flatMap((k) => [bulkW[k].p50.status, bulkW[k].p95.status]))
 
   const steadyW = evaluateMetric(bRounds.map((x) => x.steadyMiB), wRounds.map((x) => x.steadyMiB), memSteadyCfg, seed + 40)
   const steadyR = evaluateMetric(bRounds.map((x) => x.steadyMiB), rRounds.map((x) => x.steadyMiB), memSteadyCfg, seed + 41)
@@ -290,7 +266,7 @@ export function aggregateDirectory(dir: string, seed = 466, roundCounts: readonl
   const slopeStatus: 'PASS' | 'HOLD' = slopeW.median <= 64.0 && wasmPagesAddedMax === 0 ? 'PASS' : 'HOLD'
 
   const bulkCellStr = (armMap: typeof bulkW, side: 'baseline' | 'candidate') =>
-    bulkCases.map((k) => side === 'baseline'
+    BULK_CASES.map((k) => side === 'baseline'
       ? `${k}: ${armMap[k].p50.baseline.median.toFixed(2)}/${armMap[k].p95.baseline.median.toFixed(2)}`
       : `${k}: ${armMap[k].p50.candidate.median.toFixed(2)}/${armMap[k].p95.candidate.median.toFixed(2)} (${fmtDelta(armMap[k].p95.medianDeltaPct)})`).join('; ')
 

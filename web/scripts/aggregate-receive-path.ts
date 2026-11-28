@@ -2,10 +2,10 @@
 // Usage: node web/scripts/aggregate-receive-path.ts <dir>
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { medianOf, nearestRank } from './aggregate-wasm-core.ts'
+import { medianOf, nearestRank } from './measure-stats.ts'
+import { A2_FRAMES, BULK_CASES as A1_CASES } from './receive-cases.ts'
 
-export const A1_CASES = ['history_8x50', 'history_2x200', 'catchup_250', 'catchup_1000'] as const
-export const A2_FRAMES = [250, 1000] as const
+export { A1_CASES, A2_FRAMES }
 const ROUNDS = 5, REPETITIONS = 100
 const NOISE_PCT = 10, OVERHEAD_PCT = 10, SHARE_MIN = 0.3, S1_SAVING_MS = 3, S2_TOTAL_MS = 100
 

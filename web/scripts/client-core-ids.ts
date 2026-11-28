@@ -2,6 +2,8 @@
 import { createHash } from 'node:crypto'
 import type { Input } from '../src/protocol-types.ts'
 
+export const FIXTURE_GENERATION = '00000000-0000-4000-8000-000000000515'
+
 export function fixtureUuid(symbol: string): string {
   if (/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(symbol)) return symbol.toLowerCase()
   const hex = createHash('sha256').update('fukulow fixture uuid\0').update(symbol).digest('hex').slice(0, 32)

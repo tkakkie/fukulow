@@ -12,6 +12,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { Message as WireMessage, ServerEvent, UnreadChannel } from '../src/api-schema.d.ts'
+import { FIXTURE_GENERATION } from './client-core-ids.ts'
 import { isObject, validateSchema, type Json, type Schema } from './json-schema-subset.ts'
 
 export const defaultDir = resolve(import.meta.dirname, '../../contract/realtime')
@@ -418,7 +419,7 @@ export function partitionScenarios<T extends { proposed?: Proposed }>(all: T[]):
 
 export function expandMessage(spec: Record<string, Json>, channel?: string): Message[] {
   const seqs = 'created_seq' in spec ? [spec.created_seq as number] : Array.from({ length: (spec.to as number) - (spec.from as number) + 1 }, (_, i) => (spec.from as number) + i)
-  return seqs.map((seq) => ({ history_generation: typeof spec.history_generation === 'string' ? spec.history_generation : '00000000-0000-4000-8000-000000000515',
+  return seqs.map((seq) => ({ history_generation: typeof spec.history_generation === 'string' ? spec.history_generation : FIXTURE_GENERATION,
     created_seq: seq, version: (spec.version as number | undefined) ?? seq, deleted: spec.deleted === true,
     ...(typeof spec.topic === 'string' ? { topic: spec.topic } : {}),
     ...(typeof spec.reply_to === 'string' ? { reply_to: spec.reply_to } : {}),
