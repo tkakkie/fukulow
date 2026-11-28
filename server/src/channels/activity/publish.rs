@@ -15,11 +15,11 @@ use uuid::Uuid;
 
 #[derive(Clone, Default)]
 pub(crate) struct ActivityBatch {
-    pub(super) senders: Vec<(Uuid, i64)>,
+    senders: Vec<(Uuid, i64)>,
     everyone: Option<i64>,
 }
 impl ActivityBatch {
-    pub(super) fn add(&mut self, sender: Option<Uuid>, seq: i64) {
+    fn add(&mut self, sender: Option<Uuid>, seq: i64) {
         let Some(sender) = sender else {
             self.everyone = self.everyone.max(Some(seq));
             return;
@@ -34,13 +34,28 @@ impl ActivityBatch {
         self.senders.truncate(2);
     }
 
-    pub(super) fn eligible(&self, member: Uuid) -> Option<i64> {
+    fn eligible(&self, member: Uuid) -> Option<i64> {
         self.everyone
             .max(self.senders.iter().find(|r| r.0 != member).map(|r| r.1))
     }
 
     fn is_empty(&self) -> bool {
         self.everyone.is_none() && self.senders.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn add_for_test(&mut self, sender: Option<Uuid>, seq: i64) {
+        self.add(sender, seq);
+    }
+
+    #[cfg(test)]
+    pub(super) fn eligible_for_test(&self, member: Uuid) -> Option<i64> {
+        self.eligible(member)
+    }
+
+    #[cfg(test)]
+    pub(super) fn sender_count(&self) -> usize {
+        self.senders.len()
     }
 }
 

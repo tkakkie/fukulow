@@ -1942,12 +1942,12 @@ mod tests {
         ] {
             let mut senders = ActivityBatch::default();
             for (sender, seq) in rows {
-                senders.add(Some(sender), seq);
+                senders.add_for_test(Some(sender), seq);
             }
-            assert_eq!(senders.eligible(alice), Some(2));
-            assert_eq!(senders.eligible(bob), Some(3));
-            assert_eq!(senders.eligible(third), Some(3));
-            assert!(senders.senders.len() <= 2);
+            assert_eq!(senders.eligible_for_test(alice), Some(2));
+            assert_eq!(senders.eligible_for_test(bob), Some(3));
+            assert_eq!(senders.eligible_for_test(third), Some(3));
+            assert!(senders.sender_count() <= 2);
         }
     }
 }
