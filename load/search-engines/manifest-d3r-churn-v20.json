@@ -1,5 +1,5 @@
 {
-  "sha256": "768056823e3348c9f38145936b75092eaee137b13209d5556ca0f16ff297540b",
+  "sha256": "62bdbd1bbc8ea7c8bd60d2db8afdedd0970ffc91cb3ed69cfd6f159ea801ad0d",
   "frozen": {
     "version": 20,
     "experiment": "#689 item 4c Phase A",
@@ -27,6 +27,9 @@
         "statement_timeout": "2s"
       },
       "termBackfillTransaction": {
+        "statement_timeout": "0"
+      },
+      "fixtureRlsProbeSession": {
         "statement_timeout": "0"
       }
     },
@@ -446,11 +449,11 @@
       },
       {
         "path": "load/search-engines/d3r-churn/design.ts",
-        "sha256": "f5b73d91f88f31452f63c8bcc69cf0183f25be6be25f9f111a1d44bfe52d0913"
+        "sha256": "064603d3ca8223ec82ff9aac534083cafabcdbd58bb969f887a15a7b0d6a7bee"
       },
       {
         "path": "load/search-engines/d3r-churn/fixture.ts",
-        "sha256": "061fa395b19e3a71091c5644012ca452c2cc8650d270f891409b3f9f9cb5638b"
+        "sha256": "ad6b4a0c0b28572587814778c2b4dffdac8e4371851a3258b303644a9fcedb7a"
       },
       {
         "path": "load/search-engines/d3r-churn/host-guard.ts",
@@ -506,7 +509,7 @@
       },
       {
         "path": "load/search-engines/d3r-churn/worker.ts",
-        "sha256": "931976f0c42973321143898810aef1554cec2b8f15a419ec11f5cc6c2a2ed709"
+        "sha256": "5313b119e727520ae86adb61c2e8db0f39d10c12ef9e21e6827d75ccf829b63c"
       },
       {
         "path": "load/search-engines/d3r-leak/arms.ts",

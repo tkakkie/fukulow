@@ -9,7 +9,7 @@ import { callerLock } from '../d3r-leak/host.ts';
 import * as archives from './archive.ts';
 import { appSql, images as resolveImages, maintenanceSql, refreshRestoredRole, start, startApp, stopApp, verifyApp, verifyImage, type Names } from './cluster.ts';
 import { db, full, modelLabel, sessionOverrides, stages, appSettings } from './design.ts';
-import { checkBodyHash, consistency, freshFixture, prepareBodies, verifyFixture, verifyMigrationHistory } from './fixture.ts';
+import { checkBodyHash, consistency, freshFixture, prepareBodies, recordFixtureRls, verifyMigrationHistory } from './fixture.ts';
 import { identity } from './identity.ts';
 import { loadManifest, verifyProduct } from './manifest.ts';
 import { planModel, runModel } from './model.ts';
@@ -57,7 +57,7 @@ export async function worker(args: Options, resources: Names) {
     const {tsv, bodyPool, bodyHash} = await prepareBodies(args.out, args.rows, !!receipt, smoke ? 1 : full.rate * full.sendSeconds);
     if (receipt) rmSync(tsv);
     const fresh = receipt ? undefined : await freshFixture(resources, args.rows, args.out, tsv);
-    save(join(args.out, 'rls.json'), verifyFixture(resources, args.rows));
+    recordFixtureRls(resources, args.rows, args.out);
     evidence.backfillVerified = true;
     persist();
     if (args.preserve && fresh) {

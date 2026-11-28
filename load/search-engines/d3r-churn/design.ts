@@ -15,7 +15,8 @@ export const appSettings = { FUKULOW_SEARCH_ENGINE: 'disabled', FUKULOW_ADDR: '0
   FUKULOW_SEND_BURST: '1000000', FUKULOW_SEND_REFILL_PER_SECOND: '1000000' };
 export const sessionOverrides = { sqlApp: { jit: 'off', statement_timeout: '10s' },
   searchTransaction: { plan_cache_mode: 'force_generic_plan', statement_timeout: '2s' },
-  termBackfillTransaction: { statement_timeout: '0' } };
+  termBackfillTransaction: { statement_timeout: '0' },
+  fixtureRlsProbeSession: { statement_timeout: '0' } };
 export const k6Reference = 'grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276';
 export const stages = {
   smoke: 'SMOKE / NOT EVIDENCE',

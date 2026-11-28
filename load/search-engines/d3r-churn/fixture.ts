@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { docker, save } from '../bench.ts';
+import { CommandTimeoutError, docker, save, SqlStatementTimeoutError } from '../bench.ts';
 import { backfill, verifiedBackfill, verifyTerms } from '../d3r/backfill.ts';
 import { readSource, sources } from '../d3r/path.ts';
 import { directRls, directRlsExpected, forceSearchRls, verifyRls } from '../d3r/rls.ts';
@@ -10,7 +10,7 @@ import { withSession } from '../d3r/session.ts';
 import { hash, appSessionSettings } from '../manifest.ts';
 import { copySql, finishSql, fixtureSql, generate, literal, member, org } from '../seed.ts';
 import { appSql, owner, type Names } from './cluster.ts';
-import { base, db, full } from './design.ts';
+import { base, db, full, sessionOverrides } from './design.ts';
 
 const authFixture = readSource('server/tests/auth.rs');
 export const loadEmail = 'synthetic-1-1@example.invalid';
@@ -52,7 +52,7 @@ export function verifyMigrationHistory(resources: Names) {
     error);
 }
 
-export function verifyFixture(resources: Names, rows: number) {
+function verifyFixture(resources: Names, rows: number) {
   assert.equal(owner(resources, 'SELECT count(*) FROM public.messages WHERE NOT deleted;'), String(rows), 'Backfill Message count mismatch');
   assert.equal(owner(resources, 'SELECT count(*) FROM public.messages WHERE deleted;'), '0', 'Backfill contains deleted Messages');
   assert.equal(owner(resources, positionViolations), '0', 'Fixture Message positions do not cover each Channel watermark');
@@ -60,9 +60,21 @@ export function verifyFixture(resources: Names, rows: number) {
   const rls = verifyRls(app, {...appSessionSettings, jit: 'off'});
   // Very small smoke can have no Messages in Organization 2. Verify its control from the fixture count.
   const hasSecond = owner(resources, `SELECT EXISTS (SELECT FROM public.messages WHERE organization_id='${org(2)}');`) === 't';
-  assert.equal(directRls(app), hasSecond ? directRlsExpected : directRlsExpected.replace(`${org(2)}\nt|t`, `${org(2)}\nf|f`),
+  // The positive Organization 2 probe can scan past the Organization 1 term rows.
+  const probe = directRls(text => app(`SET statement_timeout = ${sessionOverrides.fixtureRlsProbeSession.statement_timeout};\n${text}`));
+  assert.equal(probe, hasSecond ? directRlsExpected : directRlsExpected.replace(`${org(2)}\nt|t`, `${org(2)}\nf|f`),
     'Organization RLS controls differ');
   return rls;
+}
+
+export function recordFixtureRls(resources: Names, rows: number, out: string) {
+  try {
+    save(`${out}/rls.json`, verifyFixture(resources, rows));
+  } catch (error) {
+    const reason = error instanceof SqlStatementTimeoutError ? ' (SQLSTATE 57014)' :
+      error instanceof CommandTimeoutError ? ' (command timed out)' : '';
+    throw new Error(`fixture RLS verification failed${reason}`);
+  }
 }
 
 async function bodies(tsv: string, count: number, dest: string) {
