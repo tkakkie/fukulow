@@ -5,7 +5,7 @@ use axum::{
 };
 
 use super::{limiter, no_store_json};
-use crate::auth::{ApiError, ErrorBody};
+use crate::auth::{ApiError, ApiErrorDetail, ErrorBody};
 
 #[derive(Debug)]
 pub enum MessageError {
@@ -97,14 +97,16 @@ impl IntoResponse for MessageError {
             Self::ChainTooLarge => (StatusCode::CONFLICT, "chain_too_large"),
             Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
             Self::DmTopicsNotAllowed => (StatusCode::BAD_REQUEST, "dm_topics_not_allowed"),
-            Self::DmPeerDeactivated => (StatusCode::CONFLICT, "dm_peer_deactivated"),
-            Self::DmPeerAccessLapsed => (StatusCode::CONFLICT, "dm_peer_access_lapsed"),
+            Self::DmPeerDeactivated => return ApiError::dm_peer_deactivated().into_response(),
+            Self::DmPeerAccessLapsed => return ApiError::dm_peer_access_lapsed().into_response(),
             Self::ReplyTopicNotAllowed => (StatusCode::BAD_REQUEST, "reply_topic_not_allowed"),
             Self::ReplyParentNotFound => (StatusCode::NOT_FOUND, "reply_parent_not_found"),
             Self::ReplyChainNotFound => (StatusCode::NOT_FOUND, "reply_chain_not_found"),
             Self::TopicNotFound => (StatusCode::NOT_FOUND, "topic_not_found"),
-            Self::NotFound => (StatusCode::NOT_FOUND, "channel not found"),
-            Self::OrganizationUnavailable => (StatusCode::NOT_FOUND, "organization_unavailable"),
+            Self::NotFound => return ApiError::channel_not_found().into_response(),
+            Self::OrganizationUnavailable => {
+                return ApiError::organization_unavailable().into_response();
+            }
             Self::Conflict => (
                 StatusCode::CONFLICT,
                 "client message id reused with different body, channel, Topic or reply target",
@@ -156,11 +158,11 @@ fn retry_later(status: StatusCode, seconds: u64, error: &str) -> Response {
 }
 
 pub(super) fn dm_error(error: ApiError) -> MessageError {
-    match error.1 {
-        "organization_unavailable" => MessageError::OrganizationUnavailable,
-        "channel not found" => MessageError::NotFound,
-        "dm_peer_deactivated" => MessageError::DmPeerDeactivated,
-        "dm_peer_access_lapsed" => MessageError::DmPeerAccessLapsed,
+    match error.2 {
+        Some(ApiErrorDetail::OrganizationUnavailable) => MessageError::OrganizationUnavailable,
+        Some(ApiErrorDetail::ChannelNotFound) => MessageError::NotFound,
+        Some(ApiErrorDetail::DmPeerDeactivated) => MessageError::DmPeerDeactivated,
+        Some(ApiErrorDetail::DmPeerAccessLapsed) => MessageError::DmPeerAccessLapsed,
         _ => MessageError::Database(sqlx::Error::Protocol("DM authorization failed".into())),
     }
 }

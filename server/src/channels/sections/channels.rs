@@ -81,7 +81,7 @@ pub(super) fn authorize_supplied(
             .iter()
             .all(|row| can_read(owner, role, row.public, grants.contains(&row.id)))
     {
-        return Err(channel_not_found());
+        return Err(ApiError::channel_not_found());
     }
     if locked.iter().any(|row| row.archived) {
         return Err(channel_archived());
@@ -151,7 +151,7 @@ pub(super) async fn visible_placement(
     .bind(channel)
     .fetch_optional(tx)
     .await?
-    .ok_or_else(channel_not_found)?;
+    .ok_or_else(ApiError::channel_not_found)?;
     if archived {
         return Err(channel_archived());
     }

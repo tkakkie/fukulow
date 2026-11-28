@@ -54,13 +54,55 @@ pub struct ApiError(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApiErrorDetail {
+    OrganizationUnavailable,
+    ChannelNotFound,
+    ChannelNameAlreadyExists,
+    DmPeerDeactivated,
+    DmPeerAccessLapsed,
+    LockContention,
     RetryAfter(std::time::Duration),
     LockNotAvailable,
 }
 
 impl ApiError {
     pub(crate) fn organization_unavailable() -> Self {
-        Self(StatusCode::NOT_FOUND, "organization_unavailable", None)
+        Self(
+            StatusCode::NOT_FOUND,
+            "organization_unavailable",
+            Some(ApiErrorDetail::OrganizationUnavailable),
+        )
+    }
+
+    pub(crate) fn channel_not_found() -> Self {
+        Self(
+            StatusCode::NOT_FOUND,
+            "channel not found",
+            Some(ApiErrorDetail::ChannelNotFound),
+        )
+    }
+
+    pub(crate) fn channel_name_already_exists() -> Self {
+        Self(
+            StatusCode::CONFLICT,
+            "channel name already exists",
+            Some(ApiErrorDetail::ChannelNameAlreadyExists),
+        )
+    }
+
+    pub(crate) fn dm_peer_deactivated() -> Self {
+        Self(
+            StatusCode::CONFLICT,
+            "dm_peer_deactivated",
+            Some(ApiErrorDetail::DmPeerDeactivated),
+        )
+    }
+
+    pub(crate) fn dm_peer_access_lapsed() -> Self {
+        Self(
+            StatusCode::CONFLICT,
+            "dm_peer_access_lapsed",
+            Some(ApiErrorDetail::DmPeerAccessLapsed),
+        )
     }
 
     pub(crate) fn forbidden() -> Self {
@@ -72,7 +114,11 @@ impl ApiError {
     }
 
     pub(crate) fn lock_contention() -> Self {
-        Self(StatusCode::SERVICE_UNAVAILABLE, "lock_contention", None)
+        Self(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "lock_contention",
+            Some(ApiErrorDetail::LockContention),
+        )
     }
 
     // Opt in inside a writer's transaction body, before COMMIT is attempted.
@@ -84,7 +130,7 @@ impl ApiError {
     }
 
     pub(crate) fn is_lock_contention(&self) -> bool {
-        self.0 == StatusCode::SERVICE_UNAVAILABLE && self.1 == "lock_contention"
+        self.2 == Some(ApiErrorDetail::LockContention)
     }
 
     fn unauthorized() -> Self {
@@ -737,7 +783,7 @@ impl FromRequestParts<AppState> for Auth {
         )
         .await?
         .ok_or_else(ApiError::unauthorized)?;
-        let unavailable = || ApiError(StatusCode::NOT_FOUND, "organization_unavailable", None);
+        let unavailable = ApiError::organization_unavailable;
         let auth = Self {
             identity: Identity {
                 organization: Organization {
@@ -781,9 +827,7 @@ impl DeferredOrganizationAuth {
     fn from_auth_result(result: Result<Auth, ApiError>) -> Result<Self, ApiError> {
         match result {
             Ok(auth) => Ok(Self(Some(auth))),
-            Err(error)
-                if error.0 == StatusCode::NOT_FOUND && error.1 == "organization_unavailable" =>
-            {
+            Err(error) if error.2 == Some(ApiErrorDetail::OrganizationUnavailable) => {
                 Ok(Self(None))
             }
             Err(error) => Err(error),
@@ -978,12 +1022,9 @@ mod tests {
 
     #[test]
     fn deferred_organization_auth_rejects_other_errors_unchanged() {
-        let deferred = DeferredOrganizationAuth::from_auth_result(Err(ApiError(
-            StatusCode::NOT_FOUND,
-            "organization_unavailable",
-            None,
-        )))
-        .unwrap();
+        let deferred =
+            DeferredOrganizationAuth::from_auth_result(Err(ApiError::organization_unavailable()))
+                .unwrap();
         assert!(deferred.0.is_none());
         for (status, code) in [
             (StatusCode::NOT_FOUND, "scoped_session_unavailable"),
@@ -1002,6 +1043,25 @@ mod tests {
             assert_eq!(error.1, code);
             assert_eq!(error.2, retry);
         }
+    }
+
+    #[test]
+    fn typed_auth_error_matches_ignore_error_text() {
+        let mut typed = ApiError::organization_unavailable();
+        typed.1 = "renamed";
+        assert!(
+            DeferredOrganizationAuth::from_auth_result(Err(typed)).is_ok_and(|d| d.0.is_none())
+        );
+        let untyped = ApiError(StatusCode::NOT_FOUND, "organization_unavailable", None);
+        assert!(DeferredOrganizationAuth::from_auth_result(Err(untyped)).is_err());
+
+        let mut typed = ApiError::lock_contention();
+        typed.1 = "renamed";
+        assert!(typed.is_lock_contention());
+        assert!(
+            !ApiError(StatusCode::SERVICE_UNAVAILABLE, "lock_contention", None)
+                .is_lock_contention()
+        );
     }
 
     // The real app uses the process-global PASSWORD_WORKERS. These saturation tests

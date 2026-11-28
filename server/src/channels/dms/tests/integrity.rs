@@ -1,6 +1,47 @@
 use super::*;
 
 #[fukulow_test::test]
+async fn dm_send_locks_preserve_nonparticipant_and_stale_grant_error_bodies(pool: PgPool) {
+    let f = Fixture::new(pool, "member").await;
+    let channel = f.dm().await;
+    let outsider = Uuid::new_v4();
+    let token = member(&f.pools.admin, f.org, outsider, "member").await;
+    let outsider_auth = extract_auth(f.state.clone(), &token).await;
+    let sender_auth = extract_auth(f.state.clone(), &f.bt).await;
+    let lock = |sender| {
+        crate::database::organization(&f.pools.app, f.org, async move |tx: &mut PgConnection| {
+            send_locks(tx, f.org, sender, channel, &[]).await
+        })
+    };
+    assert!(
+        lock((f.b, sender_auth.membership_revision))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    f.deactivate(f.b).await;
+    f.reactivate(f.b).await;
+    let refreshed = extract_auth(f.state.clone(), &f.bt).await;
+    for (sender, error) in [
+        (
+            (outsider, outsider_auth.membership_revision),
+            "channel not found",
+        ),
+        (
+            (f.b, sender_auth.membership_revision),
+            "organization_unavailable",
+        ),
+        ((f.b, refreshed.membership_revision), "channel not found"),
+    ] {
+        let response = lock(sender).await.unwrap_err().into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(response).await, json!({"error": error}));
+    }
+    f.pools.app.close().await;
+}
+
+#[fukulow_test::test]
 async fn open_denials_reveal_no_pair_or_positions_and_sql_rejects_foreign_third_or_mutated_pairs(
     pool: PgPool,
 ) {

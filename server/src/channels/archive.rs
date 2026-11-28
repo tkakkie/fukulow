@@ -35,10 +35,6 @@ pub enum UpdateChannelRequest {
     Archive { archived: bool },
 }
 
-fn channel_not_found() -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, "channel not found", None)
-}
-
 fn dm_channel_fixed() -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, "dm_channel_fixed", None)
 }
@@ -71,9 +67,9 @@ pub async fn get_channel(
             let row = visible_channel_rows(tx, &auth, ChannelSelection::ById(id))
                 .await?
                 .pop()
-                .ok_or_else(channel_not_found)?;
+                .ok_or_else(ApiError::channel_not_found)?;
             if row.id.is_none() {
-                return Err(channel_not_found());
+                return Err(ApiError::channel_not_found());
             }
             row.ordinary(org).ok_or_else(dm_channel_fixed)
         },
@@ -159,7 +155,7 @@ async fn update(
     .await?
     {
         LockedAccess::OrganizationUnavailable => return Err(ApiError::organization_unavailable()),
-        LockedAccess::ChannelUnavailable => return Err(channel_not_found()),
+        LockedAccess::ChannelUnavailable => return Err(ApiError::channel_not_found()),
         LockedAccess::Visible {
             actor,
             resource,

@@ -208,10 +208,30 @@ test('v20 records the database context refactor with v19 conditions', () => {
     ['load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
 });
 
-test('v23 records the transaction connection guard refactor with v20 conditions', () => {
-  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+function pinnedV21(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v21.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), 'ae7f8cac55ee3efaa7ce8d8e2819d1056140a30016c5ebae00c4c60232ce42e1');
+  const v21 = JSON.parse(text);
+  assert.equal(v21.sha256, 'e48cdeeb9d8da843bb917f184818e6411d4bf8a2bf2cef8de6f34d426f2736e2');
+  assert.equal(v21.sha256, hash(JSON.stringify(v21.frozen)));
+  return v21;
+}
+
+test('v21 records typed API errors with v20 conditions', () => {
+  const {version, sourceHashes, ...conditions} = pinnedV21().frozen;
   const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV20().frozen;
-  assert.deepEqual([previousVersion, version], [20, 23]); // v21 and v22 are reserved.
+  assert.equal(version, previousVersion + 1);
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs', 'server/src/channels.rs']);
+});
+
+test('v23 records the transaction connection guard refactor with v21 conditions', () => {
+  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV21().frozen;
+  assert.deepEqual([previousVersion, version], [21, 23]); // v22 is reserved.
   assert.deepEqual(conditions, previousConditions);
   assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
   const before = new Map(previousSources.map(source => [source.path, source.sha256]));

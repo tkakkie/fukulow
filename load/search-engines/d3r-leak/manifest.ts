@@ -54,13 +54,16 @@ export function verifyPinnedSchema() {
   const files = git('ls-tree', '-r', '--name-only', schemaCommit, 'server/migrations').split('\n').filter(file => file.endsWith('.sql'));
   assert.deepEqual(files, base.migrations, 'Pinned migration list differs from d3r v18');
   const expected = new Map(base.sourceHashes.map(file => [file.path, file.sha256]));
-  for (const file of [...files, ...Object.values(sources).filter(file => file !== sources.context)]) {
+  const historicalSources: readonly string[] = [sources.auth, sources.channels, sources.context];
+  for (const file of [...files, ...Object.values(sources).filter(file => !historicalSources.includes(file))]) {
     assert.equal(hash(readSource(file)), expected.get(file), `Pinned source hash mismatch: ${file}`);
   }
-  // The current context is frozen by the leak manifest. Use the Git blob for the historical pin.
-  const pinnedContext = execFileSync('git', ['-C', root, 'cat-file', 'blob', `${schemaCommit}:${sources.context}`],
-    {encoding: 'utf8', timeout: timeouts.docker, killSignal: 'SIGKILL'});
-  assert.equal(hash(pinnedContext), expected.get(sources.context), `Pinned source hash mismatch: ${sources.context}`);
+  // These checkout files are frozen by the leak manifest. Use Git blobs for the historical pins.
+  for (const file of historicalSources) {
+    const pinned = execFileSync('git', ['-C', root, 'cat-file', 'blob', `${schemaCommit}:${file}`],
+      {encoding: 'utf8', timeout: timeouts.docker, killSignal: 'SIGKILL'});
+    assert.equal(hash(pinned), expected.get(file), `Pinned source hash mismatch: ${file}`);
+  }
   loadManifest();
   return productionPath();
 }
