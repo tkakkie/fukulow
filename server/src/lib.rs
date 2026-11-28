@@ -169,6 +169,10 @@ fn configured_app(
             axum::routing::post(auth::security::revoke_others),
         )
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
+        .route(
+            "/api/v1/orgs/{org}/startup",
+            get(messages::startup::get_startup),
+        )
         .merge(channels::sections::router(
             state.message_delivery.channel_access.activity.clone(),
         ))

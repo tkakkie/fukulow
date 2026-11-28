@@ -3,6 +3,7 @@
 API contract and generated types. [Index and writing rules](../decisions.md)
 
 ## API contract
+- [#955](https://github.com/tkakkie/fukulow/issues/955) Bundle first-display reads to save round trips and keep HTML static. Measure the bundle before considering inline data.
 - #301 Cap `POST /api/v1/orgs/{org}/message-authors` at 100 IDs before dedup (400 `ErrorBody` above). Leave omissions unresolved so foreign, unknown and unreadable authors stay indistinguishable.
 - `make api` exports without a database. Isolate pinned `openapi-typescript` because its TypeScript 5 peer conflicts with the SPA’s TypeScript 6.
 - #23 With neither `after_seq` nor `before_seq`, return the latest page. With both, return 400. Pages ascend by seq and set `has_more` in the query direction. REST and shared schema both use 1..=200. REST metadata alone defaults to 50 so generated TypeScript accepts omitted limits. Every shared `ListMessagesQuery` field stays optional.

@@ -36,15 +36,28 @@ pub async fn lookup_authors(
         return Err(ApiError::bad_request());
     }
     let organization = auth.identity.organization.organization_id;
-    crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
-        let channels = channels::visible_list(&mut *tx, &auth, None).await?;
-        let channels: Vec<_> = channels.into_iter().map(|channel| channel.id).collect();
-        #[cfg(test)]
-        super::tests::authors::pause(organization).await;
-        let authors: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT sender FROM messages WHERE organization_id=$1 AND sender=ANY($2) AND channel_id=ANY($3)",
-        ).bind(organization).bind(&input.ids).bind(channels).fetch_all(&mut *tx).await?;
-        let identities = display_identities(tx, organization, &authors).await?;
-        Ok(no_store_json(AuthorIdentities { identities }))
-    }).await
+    let identities = crate::database::organization_read_only(
+        &state.pool,
+        organization,
+        async |tx: &mut sqlx::PgConnection| readable_identities(tx, &auth, &input.ids).await,
+    )
+    .await?;
+    Ok(no_store_json(identities))
+}
+
+pub(super) async fn readable_identities(
+    tx: &mut sqlx::PgConnection,
+    auth: &Auth,
+    ids: &[Uuid],
+) -> Result<AuthorIdentities, ApiError> {
+    let organization = auth.identity.organization.organization_id;
+    let channels = channels::visible_list(&mut *tx, auth, None).await?;
+    let channels: Vec<_> = channels.into_iter().map(|channel| channel.id).collect();
+    #[cfg(test)]
+    super::tests::authors::pause(organization).await;
+    let authors: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT sender FROM messages WHERE organization_id=$1 AND sender=ANY($2) AND channel_id=ANY($3)",
+    ).bind(organization).bind(ids).bind(channels).fetch_all(&mut *tx).await?;
+    let identities = display_identities(tx, organization, &authors).await?;
+    Ok(AuthorIdentities { identities })
 }

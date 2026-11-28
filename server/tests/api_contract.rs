@@ -26,8 +26,8 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // Every operation documents the common shutdown response.
-const EXPECTED_API_OPERATIONS: usize = 53;
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 398;
+const EXPECTED_API_OPERATIONS: usize = 54;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 405;
 
 #[test]
 fn newer_projection_openapi_documents_the_shared_continuation() {

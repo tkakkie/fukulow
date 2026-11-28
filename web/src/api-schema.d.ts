@@ -632,6 +632,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/startup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_startup"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/ws": {
         parameters: {
             query?: never;
@@ -1479,6 +1495,17 @@ export interface components {
             /** Format: password */
             password: string;
         };
+        StartupResponse: {
+            channel_list: components["schemas"]["ChannelList"];
+            timeline?: components["schemas"]["StartupTimeline"] | null;
+        };
+        StartupTimeline: {
+            authors: components["schemas"]["AuthorIdentities"];
+            /** Format: uuid */
+            channel_id: string;
+            /** @description The initial subscription resumes from this page's generation and event watermark. */
+            page: components["schemas"]["TimelinePage"];
+        };
         Subscribe: {
             /**
              * Format: int64
@@ -1731,6 +1758,8 @@ export type SessionResponse = components['schemas']['SessionResponse'];
 export type SetupRequest = components['schemas']['SetupRequest'];
 export type SetupStatus = components['schemas']['SetupStatus'];
 export type SignInRequest = components['schemas']['SignInRequest'];
+export type StartupResponse = components['schemas']['StartupResponse'];
+export type StartupTimeline = components['schemas']['StartupTimeline'];
 export type Subscribe = components['schemas']['Subscribe'];
 export type Subscribed = components['schemas']['Subscribed'];
 export type TimelineItem = components['schemas']['TimelineItem'];
@@ -6154,6 +6183,89 @@ export interface operations {
                 };
             };
             /** @description search_unavailable when disabled or search_timeout when the database statement deadline expires; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_startup: {
+        parameters: {
+            query?: {
+                /** @description Selected Channel. Defaults to the first visible active Channel in the list. */
+                channel_id?: string;
+            };
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Visible active Channels and the selected Channel's initial Timeline with its author identities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartupResponse"];
+                };
+            };
+            /** @description Invalid Organization or Channel id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description history_generation_changed between Channel list and Timeline snapshots */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure or commit barrier timeout */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Projection watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

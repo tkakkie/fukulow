@@ -38,7 +38,13 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
     as_of_seq: 10_001, has_more: false,
     items: [root, far, messages.at(-1)!].map(message => ({ kind: 'message', message })),
   }
-  await page.route(`**${base}/timeline*`, route => route.fulfill({ json: timeline }))
+  await page.route(url => url.pathname === `/api/v1/orgs/${orgId}/startup` &&
+    url.searchParams.get('channel_id') === channelId, async route => {
+    const response = await secretSafe(() => route.fetch())
+    const data = await secretSafe(() => response.json()) as components['schemas']['StartupResponse']
+    data.timeline!.page = timeline
+    await route.fulfill({ response, json: data })
+  })
   // Keep the synthetic projection and subscription watermark in the same generation.
   await page.routeWebSocket(`**/api/v1/orgs/${orgId}/ws`, ws => {
     ws.onMessage(data => {

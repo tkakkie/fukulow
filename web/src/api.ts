@@ -167,6 +167,11 @@ const querySuffix = (query: object) => {
 export const getOrganizationMe = (organizationId: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
   call<Identity>(f, `${orgPath(organizationId)}/me`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
+export type { StartupResponse } from './api-schema'
+export const getStartup = (organizationId: string, channelId: string | null, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['StartupResponse']>(f,
+    `${orgPath(organizationId)}/startup${querySuffix({ channel_id: channelId ?? undefined })}`, { cache: 'no-store', signal }, true)
+
 export const isSessionEnded = (r: Result<unknown>) =>
   !r.ok && r.kind === 'http' && r.status === 401
 
