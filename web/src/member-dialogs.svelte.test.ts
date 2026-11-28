@@ -60,14 +60,14 @@ describe('Member confirmation Dialogs', () => {
       const row = opener.closest('li')!
       opener.click()
       await settle()
-      const dialog = host.querySelector('[role="dialog"]')!
+      const dialog = host.querySelector('dialog:modal')!
       expect(dialog.textContent).toContain(peer.name)
       const focused = dom.doc.activeElement
       expect(focused?.textContent.trim()).toBe('キャンセル')
       const expectMounted = (stage: string) => {
         expect(host.querySelector(selector) === opener, stage).toBe(true)
         expect(row.isConnected && opener.closest('li') === row, stage).toBe(true)
-        expect(host.querySelector('[role="dialog"]') === dialog, stage).toBe(true)
+        expect(host.querySelector('dialog:modal') === dialog, stage).toBe(true)
         expect(dom.doc.activeElement === focused, stage).toBe(true)
       }
 
@@ -111,7 +111,7 @@ describe('Member confirmation Dialogs', () => {
       details.open = true
       queryAll(host, 'button').find(button => button.textContent.trim() === '佐藤を無効化')!.click()
       await settle()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toContain(peer.name)
+      expect(host.querySelector('dialog:modal')?.textContent).toContain(peer.name)
       if (change === 'demotion') {
         identity = { member: { ...self, role: 'guest' }, organization: { ...admin.organization, capabilities: {
           ...admin.organization.capabilities, can_deactivate_members: { allowed: false },
@@ -121,13 +121,13 @@ describe('Member confirmation Dialogs', () => {
         await controller.load()
       }
       await settle()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toBeUndefined()
+      expect(host.querySelector('dialog:modal')?.textContent).toBeUndefined()
       expect(dom.doc.activeElement?.localName).toBe('summary')
       expect(deactivateMember).not.toHaveBeenCalled()
       identity = admin
       await controller.load()
       await settle()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toBeUndefined()
+      expect(host.querySelector('dialog:modal')?.textContent).toBeUndefined()
     } finally { await unmount(instance); controller.close() }
   }
 
@@ -157,7 +157,7 @@ describe('Member confirmation Dialogs', () => {
       const opener = action === 'removal' ? '佐藤をチャンネルから外す' : '佐藤のチャンネル管理者を付与する'
       host.querySelector(`button[aria-label="${opener}"]`)!.click()
       await settle()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toContain(peer.name)
+      expect(host.querySelector('dialog:modal')?.textContent).toContain(peer.name)
       if (change === 'permission loss') {
         currentChannel = channel('A')
       } else {
@@ -165,14 +165,14 @@ describe('Member confirmation Dialogs', () => {
         await controller.load()
       }
       await settle()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toBeUndefined()
+      expect(host.querySelector('dialog:modal')?.textContent).toBeUndefined()
       expect(dom.doc.activeElement?.localName).toBe('section')
       expect(removeChannelMember).not.toHaveBeenCalled()
       expect(changeChannelManager).not.toHaveBeenCalled()
       currentChannel = adminChannel
       await controller.load()
       await settle()
-      expect(host.querySelector('[role="dialog"]')?.textContent).toBeUndefined()
+      expect(host.querySelector('dialog:modal')?.textContent).toBeUndefined()
     } finally { await unmount(instance); controller.close() }
   }
 

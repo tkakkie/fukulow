@@ -639,7 +639,7 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
 
     buttonsByText(host, '編集して送り直す')[0].click()
     flushSync()
-    const dialog = host.querySelector('[role="dialog"]')
+    const dialog = host.querySelector('dialog:modal')
     expect(dialog).not.toBeNull()
     expect(dialog?.textContent).toContain('入力中の下書きを置き換えますか？')
 
@@ -2112,14 +2112,14 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
 
       const textarea = host.querySelector('textarea')!
       expect(textarea.value).toBe('入力途中のトピック下書き')
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
 
       // 1. Clicking 編集して送り直す with a non-empty draft opens the replace dialog without mutating draft or pending
       buttonsByText(host, '編集して送り直す')[0].click()
       flushSync()
       await tick()
 
-      const dialog = host.querySelector('[role="dialog"]')
+      const dialog = host.querySelector('dialog:modal')
       expect(dialog).not.toBeNull()
       expect(dialog!.getAttribute('aria-label')).toBe('入力中の下書きを置き換えますか？')
       expect(buttonsByText(dialog!, '置き換える')).toHaveLength(1)
@@ -2133,7 +2133,7 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       await tick()
       flushSync()
 
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
       expect(tc.composer.draft).toBe('入力途中のトピック下書き')
       expect(textarea.value).toBe('入力途中のトピック下書き')
       expect(ch.timeline.pending).toHaveLength(1)
@@ -2142,13 +2142,13 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       // 3. Reopen and click 置き換える: replaces the draft, removes the failed send, and returns focus to Composer
       buttonsByText(host, '編集して送り直す')[0].click()
       flushSync()
-      const reopened = host.querySelector('[role="dialog"]')!
+      const reopened = host.querySelector('dialog:modal')!
       buttonsByText(reopened, '置き換える')[0].click()
       flushSync()
       await tick()
       flushSync()
 
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
       expect(tc.composer.draft).toBe('拒否されたトピック本文')
       expect(textarea.value).toBe('拒否されたトピック本文')
       expect(ch.timeline.pending).toHaveLength(0)
@@ -2171,7 +2171,7 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       await tick()
       flushSync()
 
-      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(host.querySelector('dialog:modal')).toBeNull()
       expect(tc.composer.draft).toBe('二度目の拒否トピック本文')
       expect(textarea.value).toBe('二度目の拒否トピック本文')
       expect(dom.doc.activeElement).toBe(textarea)

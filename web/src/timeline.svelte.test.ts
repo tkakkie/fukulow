@@ -441,14 +441,14 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const textarea = host.querySelector('textarea')!
     expect(textarea.value).toBe('入力途中の大事な下書き')
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
 
     // 1. Clicking 編集して送り直す with a non-empty draft opens the confirmation dialog without mutating state
     buttonsByText(host, '編集して送り直す')[0].click()
     flushSync()
     await tick()
 
-    const dialog = host.querySelector('[role="dialog"]')
+    const dialog = host.querySelector('dialog:modal')
     expect(dialog).not.toBeNull()
     expect(dialog!.getAttribute('aria-label')).toBe('入力中の下書きを置き換えますか？')
     expect(buttonsByText(dialog!, '置き換える')).toHaveLength(1)
@@ -462,7 +462,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     await settle()
     flushSync()
 
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(ch.composer.draft).toBe('入力途中の大事な下書き')
     expect(textarea.value).toBe('入力途中の大事な下書き')
     expect(ch.timeline.pending).toHaveLength(1)
@@ -471,13 +471,13 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     // 3. Reopen and click 置き換える: replaces the draft, removes the failed Message, and focuses Composer
     buttonsByText(host, '編集して送り直す')[0].click()
     flushSync()
-    const reopened = host.querySelector('[role="dialog"]')!
+    const reopened = host.querySelector('dialog:modal')!
     buttonsByText(reopened, '置き換える')[0].click()
     flushSync()
     await settle()
     flushSync()
 
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(ch.composer.draft).toBe('拒否されたメッセージ本文')
     expect(textarea.value).toBe('拒否されたメッセージ本文')
     expect(ch.timeline.pending).toHaveLength(0)
@@ -498,7 +498,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
     await settle()
     flushSync()
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(textarea.value).toBe('二度目の拒否メッセージ')
     expect(dom.doc.activeElement).toBe(textarea)
 

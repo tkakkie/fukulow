@@ -57,7 +57,7 @@
     children?: Snippet
   } = $props()
 
-  let dialogEl = $state<HTMLElement | null>(null)
+  let dialogEl = $state<HTMLDialogElement | null>(null)
   let wasOpen = false
   let openerEl: FocusableTarget | null = null
 
@@ -67,14 +67,25 @@
   }
 
   $effect(() => {
-    if (open && !wasOpen) {
-      wasOpen = true
-      const active = typeof document !== 'undefined' ? document.activeElement : null
-      openerEl = active instanceof HTMLElement ? active : null
-      void tick().then(() => {
-        if (!open || !dialogEl) return
-        focusDialogOnOpen(getFocusableControls(), dialogEl)
-      })
+    const el = dialogEl
+    if (open && el) {
+      if (!wasOpen) {
+        wasOpen = true
+        const active = typeof document !== 'undefined' ? document.activeElement : null
+        openerEl = active instanceof HTMLElement && active !== document.body && active !== document.documentElement ? active : null
+        if (!el.open) {
+          el.showModal()
+        }
+        void tick().then(() => {
+          if (!open || !dialogEl) return
+          focusDialogOnOpen(getFocusableControls(), dialogEl)
+        })
+      }
+      return () => {
+        if (el.open) {
+          el.close()
+        }
+      }
     } else if (!open && wasOpen) {
       wasOpen = false
       const opener = openerEl
@@ -88,6 +99,11 @@
       })
     }
   })
+
+  function handleDialogCancel(e: Event) {
+    // Keep dialog open state controlled by Svelte so Escape during IME composition or busy cannot close it natively.
+    e.preventDefault()
+  }
 
   function handleDialogKeydown(e: KeyboardEvent) {
     if (!open) return
@@ -147,48 +163,37 @@
 {/snippet}
 
 {#if open}
-  <div class="ui-dialog-backdrop">
-    <div
-      bind:this={dialogEl}
-      class="ui-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      tabindex="-1"
-      onkeydown={handleDialogKeydown}
-    >
-      <header class="ui-dialog__header">
-        <h2 class="ui-dialog__title">{title}</h2>
-      </header>
-      {#if description}
-        <p class="ui-dialog__description">{description}</p>
-      {/if}
-      {#if form}
-        <form class="ui-dialog__form" onsubmit={handleFormSubmit}>
-          {@render dialogContent()}
-        </form>
-      {:else}
+  <dialog
+    bind:this={dialogEl}
+    class="ui-dialog"
+    aria-modal="true"
+    aria-label={title}
+    oncancel={handleDialogCancel}
+    onkeydown={handleDialogKeydown}
+  >
+    <header class="ui-dialog__header">
+      <h2 class="ui-dialog__title">{title}</h2>
+    </header>
+    {#if description}
+      <p class="ui-dialog__description">{description}</p>
+    {/if}
+    {#if form}
+      <form class="ui-dialog__form" onsubmit={handleFormSubmit}>
         {@render dialogContent()}
-      {/if}
-    </div>
-  </div>
+      </form>
+    {:else}
+      {@render dialogContent()}
+    {/if}
+  </dialog>
 {/if}
 
 <style>
-  .ui-dialog-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 900;
-    display: grid;
-    place-items: center;
-    padding: var(--space-16);
-  }
-
   .ui-dialog {
     display: flex;
     flex-direction: column;
     gap: var(--space-12);
-    width: 100%;
+    margin: auto;
+    width: calc(100% - 2 * var(--space-16));
     max-width: 24rem;
     max-height: calc(100vh - 2 * var(--space-16));
     max-height: calc(100dvh - 2 * var(--space-16));
@@ -198,6 +203,10 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-16);
+  }
+
+  .ui-dialog::backdrop {
+    background-color: transparent;
   }
 
   .ui-dialog__header {

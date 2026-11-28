@@ -1,4 +1,4 @@
-import { flushSync, mount, unmount } from 'svelte'
+import { flushSync, mount, tick, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import Composer from './Composer.svelte'
 import SectionDialogs, { type SectionDialogMode } from './SectionDialogs.svelte'
@@ -807,6 +807,126 @@ describe('Dialog form mode and SectionDialogs (#838)', () => {
     expect(onclose).toHaveBeenCalledTimes(2)
     expect(onrename).not.toHaveBeenCalled()
 
+    await unmount(instance)
+  })
+})
+
+describe('Dialog native <dialog> + showModal() (#843)', () => {
+  it('opens with showModal(), matches dialog:modal, closes cleanly, and blocks Esc during IME composition and while busy', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const opener = dom.doc.createElement('button')
+    opener.textContent = '開く'
+    host.appendChild(opener)
+    opener.focus()
+
+    const onconfirm = vi.fn()
+    const oncancel = vi.fn()
+    const state = $state({ open: false, busy: false })
+
+    const instance = mount(Dialog, {
+      target: host as unknown as Element,
+      props: {
+        get open() { return state.open },
+        get busy() { return state.busy },
+        title: '確認ダイアログ',
+        confirmLabel: '確定',
+        onconfirm,
+        oncancel,
+      },
+    })
+    flushSync()
+    expect(dom.doc.querySelector('dialog:modal')).toBeNull()
+
+    state.open = true
+    flushSync()
+    const dialog = dom.doc.querySelector('dialog:modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog?.tagName).toBe('DIALOG')
+    expect(dialog?.open).toBe(true)
+    expect(dialog?.getAttribute('aria-modal')).toBe('true')
+
+    // Esc during IME composition (isComposing: true) does not close or call oncancel.
+    const imeEsc = dialog!.keydown('Escape', { isComposing: true })
+    expect(imeEsc.defaultPrevented).toBe(false)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Esc during IME composition (keyCode: 229) does not close or call oncancel.
+    const ime229Esc = dialog!.keydown('Escape', { keyCode: 229 })
+    expect(ime229Esc.defaultPrevented).toBe(false)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Native cancel event is prevented so the browser cannot close <dialog> behind Svelte state.
+    const nativeCancel = new MiniDomEvent('cancel', { cancelable: true })
+    dialog!.dispatchEvent(nativeCancel)
+    expect(nativeCancel.defaultPrevented).toBe(true)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Esc while busy calls preventDefault, stops propagation, and does not close or call oncancel.
+    state.busy = true
+    flushSync()
+    const busyEsc = dialog!.keydown('Escape')
+    expect(busyEsc.defaultPrevented).toBe(true)
+    expect(busyEsc.cancelBubble).toBe(true)
+    expect(oncancel).not.toHaveBeenCalled()
+    expect(dialog?.open).toBe(true)
+
+    // Esc when not busy and not composing calls preventDefault, stops propagation, and invokes oncancel.
+    state.busy = false
+    flushSync()
+    const normalEsc = dialog!.keydown('Escape')
+    expect(normalEsc.defaultPrevented).toBe(true)
+    expect(normalEsc.cancelBubble).toBe(true)
+    expect(oncancel).toHaveBeenCalledTimes(1)
+
+    // Closing via open=false calls close() and removes dialog:modal.
+    const closeSpy = vi.fn()
+    dialog!.addEventListener('close', closeSpy)
+    state.open = false
+    flushSync()
+    expect(closeSpy).toHaveBeenCalledTimes(1)
+    expect(dialog!.open).toBe(false)
+    expect(dom.doc.querySelector('dialog:modal')).toBeNull()
+
+    await unmount(instance)
+  })
+
+  it('omits disallowed tabindex on <dialog> and falls back to focusing <dialog> when it has no focusable controls', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const opener = dom.doc.createElement('button')
+    opener.textContent = '開く'
+    host.appendChild(opener)
+    opener.focus()
+
+    const state = $state({ open: true })
+    const instance = mount(Dialog, {
+      target: host as unknown as Element,
+      props: {
+        get open() { return state.open },
+        title: '操作なしダイアログ',
+        description: 'ボタンがありません。',
+      },
+    })
+    flushSync()
+    await tick()
+
+    const dialog = dom.doc.querySelector('dialog:modal')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.getAttribute('tabindex')).toBeNull()
+    expect(dom.doc.activeElement).toBe(dialog)
+
+    // Tab with no focusable controls keeps focus on <dialog> itself.
+    const tab = dialog!.keydown('Tab')
+    expect(tab.defaultPrevented).toBe(true)
+    expect(dom.doc.activeElement).toBe(dialog)
+
+    state.open = false
+    flushSync()
+    await tick()
     await unmount(instance)
   })
 })

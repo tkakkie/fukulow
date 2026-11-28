@@ -399,6 +399,8 @@ export class MiniElement extends MiniNode {
   readonly localName: string
   private readonly attrs = new Map<string, string>()
   private _value = ''
+  private _modal = false
+  returnValue = ''
   defaultValue = ''
   checked = false
   scrollIntoView() {}
@@ -472,8 +474,28 @@ export class MiniElement extends MiniNode {
     const next = Boolean(v)
     const prev = this.attrs.has('open')
     if (next) this.attrs.set('open', '')
-    else this.attrs.delete('open')
+    else {
+      this.attrs.delete('open')
+      this._modal = false
+    }
     if (this.tagName === 'DETAILS' && next !== prev) this.dispatchEvent(new MiniDomEvent('toggle'))
+  }
+
+  get isModal(): boolean {
+    return this.tagName === 'DIALOG' && this.open && this._modal
+  }
+
+  showModal(): void {
+    this._modal = true
+    this.attrs.set('open', '')
+  }
+
+  close(returnValue?: string): void {
+    if (returnValue !== undefined) this.returnValue = returnValue
+    const wasOpen = this.attrs.has('open')
+    this._modal = false
+    this.attrs.delete('open')
+    if (wasOpen) this.dispatchEvent(new MiniDomEvent('close'))
   }
 
   get type(): string {
@@ -1046,6 +1068,9 @@ function matchesCompound(el: MiniElement, compound: string): boolean {
     } else if (rest.startsWith(':disabled')) {
       if (!el.disabled) return false
       rest = rest.slice(':disabled'.length)
+    } else if (rest.startsWith(':modal')) {
+      if (!el.isModal) return false
+      rest = rest.slice(':modal'.length)
     } else if (rest.startsWith('#')) {
       const m = /^#([a-zA-Z0-9_-]+)/.exec(rest)
       if (!m || el.id !== m[1]) return false
@@ -1127,6 +1152,7 @@ const GLOBAL_KEYS = [
   'Element',
   'HTMLElement',
   'HTMLButtonElement',
+  'HTMLDialogElement',
   'HTMLInputElement',
   'HTMLTextAreaElement',
   'HTMLSelectElement',
@@ -1162,6 +1188,7 @@ function installGlobals(options: MiniDomOptions = {}): { doc: MiniDocument; win:
     Element: MiniElement,
     HTMLElement: MiniElement,
     HTMLButtonElement: MiniElement,
+    HTMLDialogElement: MiniElement,
     HTMLInputElement: MiniElement,
     HTMLTextAreaElement: MiniElement,
     HTMLSelectElement: MiniElement,

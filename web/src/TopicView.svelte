@@ -540,14 +540,20 @@
     confirmReplaceId = null
     if (!id) return
     const canRestore = !targetUnavailable && pending.some((p) => p.clientMessageId === id && p.status === 'failed')
-    confirmReplaceDraftWithFailedSend(
-      id,
-      composerState.draft,
-      canRestore,
-      (draft) => tc.setDraft(draft),
-      (targetId) => tc.restore(targetId),
-      composerRef,
-    )
+    if (
+      confirmReplaceDraftWithFailedSend(
+        id,
+        composerState.draft,
+        canRestore,
+        (draft) => tc.setDraft(draft),
+        (targetId) => tc.restore(targetId),
+        null,
+      )
+    ) {
+      void tick().then(() => {
+        if (confirmReplaceId === null) focusTarget(composerRef)
+      })
+    }
   }
 
   function handleCancelReplace() {

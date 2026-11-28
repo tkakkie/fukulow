@@ -100,7 +100,7 @@ it('ReplyPanel トピックに移動 disables submit until chainVersion is ready
     await settle()
     flushSync()
 
-    const dialog = host.querySelector('[role="dialog"]')!
+    const dialog = host.querySelector('dialog:modal')!
     expect(dialog).not.toBeNull()
     expect(dialog.textContent).toContain('返信のつながりを読み込んでいます…')
     const submitBtn = () => buttonsByText(dialog, 'トピックに移動')[0]
@@ -174,7 +174,7 @@ it('ReplyPanel トピックに移動 disables submit until chainVersion is ready
     flushSync()
 
     expect(retryFn).toHaveBeenCalledTimes(1)
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(host.textContent).toContain('トピックに移動しました。')
     expect(announced).toEqual(['トピックに移動しました。'])
 
@@ -184,7 +184,7 @@ it('ReplyPanel トピックに移動 disables submit until chainVersion is ready
     await settle()
     flushSync()
 
-    const dialog2 = host.querySelector('[role="dialog"]')!
+    const dialog2 = host.querySelector('dialog:modal')!
     const newRadio = queryAll(dialog2, 'input[type="radio"]').find((r) => r.getAttribute('value') === 'new')!
     newRadio.checked = true
     newRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
@@ -216,7 +216,7 @@ it('ReplyPanel トピックに移動 disables submit until chainVersion is ready
     flushSync()
 
     expect(moveChain).toHaveBeenLastCalledWith('A', rootMsg.id, { topicName: '新規移動トピック' })
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await unmount(instance)
     rawSession.close()
@@ -319,7 +319,7 @@ it('ReplyPanel reuses the saved Move POST on form resubmit after a timeout', asy
     await settle()
     flushSync()
 
-    const dialog = host.querySelector('[role="dialog"]')!
+    const dialog = host.querySelector('dialog:modal')!
     const nameInput = dialog.querySelector('input[name="move_topic_name"]')!
     nameInput.value = 'リリース'
     nameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
@@ -370,7 +370,7 @@ it('ReplyPanel reuses the saved Move POST on form resubmit after a timeout', asy
       topic_name: 'リリース',
     })
     expect(moveChainApi.mock.calls[1][2]).toEqual(moveChainApi.mock.calls[0][2])
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await unmount(instance)
     rawSession.close()
@@ -698,7 +698,7 @@ it('ReplyPanel renders a refresh failure message and keyboard-reachable 再読�
     await settle()
     flushSync()
 
-    const dialog = host.querySelector('[role="dialog"]')!
+    const dialog = host.querySelector('dialog:modal')!
     // Make the conflict refresh GET fail
     net.replyChains[`A:${rootMsg.id}`] = { ok: false, kind: 'network' }
     buttonsByText(dialog, 'トピックに移動')[0].click()
@@ -890,7 +890,7 @@ it('ReplyPanel preserves the selected Topic and its Move retry while the Topic l
     c.moveChainApi.mockReturnValueOnce(pendingPost.promise).mockResolvedValueOnce({ ok: false, kind: 'network' })
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
     expect(dialog.querySelector('select')?.value).toBe('topic-b')
     submit.click()
@@ -942,7 +942,7 @@ it.each(['initial chain read', 'conflict refresh followed by a destination edit'
     try {
       buttonsByText(c.host, 'トピックに移動')[0].click()
       await settle()
-      const dialog = c.host.querySelector('[role="dialog"]')!
+      const dialog = c.host.querySelector('dialog:modal')!
       const submit = buttonsByText(dialog, 'トピックに移動')[0]
       if (!initialChainError) {
         c.moveChainApi.mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'version_conflict' })
@@ -974,11 +974,11 @@ it('ReplyPanel retries a failed Topic list after reopening the Move dialog', asy
     const open = buttonsByText(c.host, 'トピックに移動')[0]
     open.click()
     await settle()
-    buttonsByText(c.host.querySelector('[role="dialog"]')!, 'キャンセル')[0].click()
+    buttonsByText(c.host.querySelector('dialog:modal')!, 'キャンセル')[0].click()
     await settle()
     open.click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     expect(dialog.querySelector('[role="alert"]')?.textContent ?? '').toContain('トピックを読み込めませんでした')
     expect(c.listTopics).toHaveBeenCalledTimes(1)
 
@@ -1010,7 +1010,7 @@ it('ReplyPanel keeps a timed-out Move destination for retry after refresh remove
       .mockResolvedValueOnce({ ok: false, kind: 'network' })
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
     const select = dialog.querySelector('select')!
     expect(select.value).toBe('topic-b')
@@ -1055,7 +1055,7 @@ it('ReplyPanel keeps 再読み込み available after another failed chain read i
       .mockResolvedValueOnce(c.chainPage(12))
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
     submit.click()
     await settle()
@@ -1086,7 +1086,7 @@ it('ReplyPanel Move dialog loads a second page after 50 Topics, keeps focus, and
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     expect(select.options).toHaveLength(50)
 
@@ -1145,7 +1145,7 @@ it('ReplyPanel Move dialog hides load-more when hasMore is false', async () => {
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     expect(buttonsByText(dialog, '以前のトピックを読み込む')).toHaveLength(0)
   } finally {
     await c.close()
@@ -1157,7 +1157,7 @@ it('ReplyPanel Move dialog shows Skeleton/aria-busy while loading, keeps select 
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const loadMore = buttonsByText(dialog, '以前のトピックを読み込む')[0]
 
@@ -1217,7 +1217,7 @@ it('ReplyPanel Move dialog preserves selected Topic and pending Move retry after
       }))
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     select.value = 'topic-c'
     select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
@@ -1244,7 +1244,7 @@ it('ReplyPanel Move dialog preserves selected Topic and pending Move retry after
     await settle()
     expect(c.moveChainApi).toHaveBeenCalledTimes(2)
     expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
-    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await c.close()
   }
@@ -1261,7 +1261,7 @@ it('ReplyPanel Move dialog pins a page-two Topic and preserves Move retry across
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
 
     c.listTopics.mockResolvedValueOnce(ok({
@@ -1304,7 +1304,7 @@ it('ReplyPanel Move dialog pins a page-two Topic and preserves Move retry across
     await settle()
     expect(c.moveChainApi).toHaveBeenCalledTimes(2)
     expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
-    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await c.close()
   }
@@ -1315,7 +1315,7 @@ it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape while pa
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    let dialog = c.host.querySelector('[role="dialog"]')!
+    let dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const loadMore = buttonsByText(dialog, '以前のトピックを読み込む')[0]
 
@@ -1337,12 +1337,12 @@ it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape while pa
     esc.key = 'Escape'
     ;(dom.doc.activeElement as MiniElement).dispatchEvent(esc)
     await settle()
-    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.host.querySelector('dialog:modal')).toBeNull()
 
     // Reopen dialog before the previous opening's request resolves; completion must not hijack focus.
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    dialog = c.host.querySelector('[role="dialog"]')!
+    dialog = c.host.querySelector('dialog:modal')!
     const newRadio = queryAll(dialog, 'input[type="radio"]').find(r => r.value === 'new')!
     newRadio.focus()
     pendingPage.resolve({ ok: false, kind: 'network' })
@@ -1369,7 +1369,7 @@ it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape while pa
     esc2.key = 'Escape'
     ;(dom.doc.activeElement as MiniElement).dispatchEvent(esc2)
     await settle()
-    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.host.querySelector('dialog:modal')).toBeNull()
 
     pendingRetry.resolve({ ok: false, kind: 'network' })
     await settle()
@@ -1383,7 +1383,7 @@ it('ReplyPanel Move dialog gives distinct accessible names to pagination and Mov
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
 
     c.listTopics.mockResolvedValueOnce({ ok: false, kind: 'network' })
     buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
@@ -1417,7 +1417,7 @@ it('ReplyPanel Move dialog gives distinct accessible names to pagination and Mov
       operation_version: 11, move_seq: 11,
     }))
     await settle()
-    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await c.close()
   }
@@ -1428,7 +1428,7 @@ it('ReplyPanel Move dialog disables fresh Move and shows alert when selected Top
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
     expect(select.value).toBe('topic-b')
@@ -1487,7 +1487,7 @@ it('ReplyPanel Move dialog retries an unknown-outcome Move with the identical op
       }))
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
     expect(select.value).toBe('topic-b')
@@ -1514,7 +1514,7 @@ it('ReplyPanel Move dialog retries an unknown-outcome Move with the identical op
     await settle()
     expect(c.moveChainApi).toHaveBeenCalledTimes(2)
     expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
-    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await c.close()
   }
@@ -1531,7 +1531,7 @@ it('ReplyPanel Move dialog keeps selected Topic and allows fresh Move when it is
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
 
@@ -1567,7 +1567,7 @@ it('ReplyPanel Move dialog keeps selected Topic and allows fresh Move when it is
     await settle()
     expect(c.moveChainApi).toHaveBeenCalledTimes(1)
     expect(c.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-51')
-    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(c.host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await c.close()
   }
@@ -1579,7 +1579,7 @@ it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape during f
   try {
     buttonsByText(cNew.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = cNew.host.querySelector('[role="dialog"]')!
+    const dialog = cNew.host.querySelector('dialog:modal')!
     const newRadio = queryAll(dialog, 'input[type="radio"]').find(r => r.value === 'new')!
     newRadio.checked = true
     newRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
@@ -1608,7 +1608,7 @@ it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape during f
     esc.key = 'Escape'
     ;(dom.doc.activeElement as MiniElement).dispatchEvent(esc)
     await settle()
-    expect(cNew.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(cNew.host.querySelector('dialog:modal')).toBeNull()
 
     pendingNewRetry.resolve({ ok: false, kind: 'network' })
     await settle()
@@ -1621,7 +1621,7 @@ it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape during f
   try {
     buttonsByText(cExisting.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = cExisting.host.querySelector('[role="dialog"]')!
+    const dialog = cExisting.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
 
     cExisting.listTopics
@@ -1651,7 +1651,7 @@ it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape during f
     esc.key = 'Escape'
     ;(dom.doc.activeElement as MiniElement).dispatchEvent(esc)
     await settle()
-    expect(cExisting.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(cExisting.host.querySelector('dialog:modal')).toBeNull()
 
     pendingExistingRetry.resolve({ ok: false, kind: 'network' })
     await settle()
@@ -1665,7 +1665,7 @@ it('ReplyPanel Move dialog does not steal focus from the still-focused select wh
   try {
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = c.host.querySelector('[role="dialog"]')!
+    const dialog = c.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const loadMore = buttonsByText(dialog, '以前のトピックを読み込む')[0]
 
@@ -1695,7 +1695,7 @@ it('ReplyPanel Move dialog treats a Topic missing from a partial list as unavail
   try {
     buttonsByText(cFresh.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = cFresh.host.querySelector('[role="dialog"]')!
+    const dialog = cFresh.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
     expect(select.value).toBe('topic-b')
@@ -1749,7 +1749,7 @@ it('ReplyPanel Move dialog treats a Topic missing from a partial list as unavail
     await settle()
     expect(cFresh.moveChainApi).toHaveBeenCalledTimes(1)
     expect(cFresh.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-c')
-    expect(cFresh.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(cFresh.host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await cFresh.close()
   }
@@ -1766,7 +1766,7 @@ it('ReplyPanel Move dialog treats a Topic missing from a partial list as unavail
       }))
     buttonsByText(cRetry.host, 'トピックに移動')[0].click()
     await settle()
-    const dialog = cRetry.host.querySelector('[role="dialog"]')!
+    const dialog = cRetry.host.querySelector('dialog:modal')!
     const select = dialog.querySelector('select')!
     const submit = buttonsByText(dialog, 'トピックに移動')[0]
     expect(select.value).toBe('topic-b')
@@ -1803,7 +1803,7 @@ it('ReplyPanel Move dialog treats a Topic missing from a partial list as unavail
     await settle()
     expect(cRetry.moveChainApi).toHaveBeenCalledTimes(2)
     expect(cRetry.moveChainApi.mock.calls[1]).toEqual(cRetry.moveChainApi.mock.calls[0])
-    expect(cRetry.host.querySelector('[role="dialog"]')).toBeNull()
+    expect(cRetry.host.querySelector('dialog:modal')).toBeNull()
   } finally {
     await cRetry.close()
   }

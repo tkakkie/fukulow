@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import type { Member, OutstandingInvite } from './api'
   import type { invitesAdapter } from './invites.svelte'
   import { roleNames } from './members'
@@ -46,7 +47,7 @@
   description={`${target?.email ?? ''}への招待リンクは使えなくなります。この操作は元に戻せません。`}
   confirmLabel="招待を取り消す" returnFocusFallback={heading}
   oncancel={() => target = null}
-  onconfirm={() => { const invite = target; if (invite) void model.revoke(invite.id).then(ok => { target = null; if (ok) heading?.focus() }) }} />
+  onconfirm={() => { const invite = target; if (invite) void model.revoke(invite.id).then(async ok => { target = null; if (ok) { await tick(); heading?.focus() } }) }} />
 
 <style>
   .invites { min-width: 0; }
