@@ -95,7 +95,22 @@ function decode(encoded: Float64Array): ActivityReadEffect[] {
       case EffectCode.PrepareAccept:
       case EffectCode.Accept: effects.push({ type, covered: !!encoded[i++] }); break
       case EffectCode.Backoff: effects.push({ type, cap: encoded[i++], retryAfter: encoded[i++] }); break
-      default: effects.push({ type })
+      case EffectCode.Run:
+      case EffectCode.Join:
+      case EffectCode.CheckCanLoad:
+      case EffectCode.CancelTimer:
+      case EffectCode.Abort:
+      case EffectCode.InvalidateForReady:
+      case EffectCode.ReadyCovered:
+      case EffectCode.ClearFailure:
+      case EffectCode.CheckCoverage:
+      case EffectCode.Error:
+      case EffectCode.CheckTerminal:
+      case EffectCode.Return:
+      case EffectCode.ReturnIfCurrent:
+        effects.push({ type })
+        break
+      default: throw new Error(`Unknown activity read effect code: ${type}`)
     }
   }
   return effects

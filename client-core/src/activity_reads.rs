@@ -280,8 +280,8 @@ impl ActivityReads {
                 });
             }
             Input::Deadline { generation } => {
-                self.due = None;
                 if !self.closed && self.is_current(generation) {
+                    self.due = None;
                     self.retry = false;
                     effects.push(Effect::Run);
                 }

@@ -289,6 +289,46 @@ fn fence_rearms_the_remaining_delay_and_rejects_the_old_deadline() {
 }
 
 #[test]
+fn stale_deadline_preserves_the_current_timer() {
+    let mut core = ActivityReads::default();
+    assert_eq!(
+        drive(&mut core, Input::Demand { delay: 200.0 }),
+        [
+            Effect::ClearFailure,
+            Effect::Schedule {
+                generation: 0,
+                delay: 200.0,
+            },
+        ]
+    );
+    assert_eq!(
+        drive(&mut core, Input::Suspend),
+        [Effect::CancelTimer, Effect::Abort]
+    );
+    assert_eq!(
+        core.step(Input::Demand { delay: 200.0 }, 100.0),
+        [
+            Effect::ClearFailure,
+            Effect::Schedule {
+                generation: 1,
+                delay: 200.0,
+            },
+        ]
+    );
+
+    assert_eq!(core.due, Some(300.0));
+    assert!(
+        core.step(Input::Deadline { generation: 0 }, 200.0)
+            .is_empty()
+    );
+    assert_eq!(core.due, Some(300.0));
+    assert_eq!(
+        core.step(Input::FlushQueued, 200.0),
+        [Effect::CancelTimer, Effect::Run]
+    );
+}
+
+#[test]
 fn access_fence_denies_stale_success_until_a_fresh_read_covers() {
     let mut core = ActivityReads::default();
     drive(&mut core, Input::Ensure);
