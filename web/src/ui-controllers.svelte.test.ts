@@ -351,7 +351,12 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     expect(appSrc).toContain('<InviteAccept')
 
     const timelineSrc = readFileSync(join(webDir, 'src/Timeline.svelte'), 'utf8')
-    expect(timelineSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?<OrganizationUnavailableBanner \{onrecheckmembership\}[\s\S]*?\{:else if s\.status === 'unavailable'\}/)
+    expect(timelineSrc).toContain('<TimelineFrame')
+    expect(timelineSrc).toContain('{organizationUnavailable}')
+    expect(timelineSrc).toContain("channelUnavailable={s.status === 'unavailable'}")
+
+    const timelineFrameSrc = readFileSync(join(webDir, 'src/TimelineFrame.svelte'), 'utf8')
+    expect(timelineFrameSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?<OrganizationUnavailableBanner \{onrecheckmembership\}[\s\S]*?\{:else if channelUnavailable\}/)
 
     const workspaceSrc = readFileSync(join(webDir, 'src/Workspace.svelte'), 'utf8')
     expect(workspaceSrc).toContain('session.sync.hasUnsavedChanges()')

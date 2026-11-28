@@ -125,7 +125,9 @@ describe('ChannelUnavailableBanner (#835)', () => {
   it('keeps the reply panel detail copy unchanged', async () => {
     // The Reply Panel must keep passing the variant; the copy below is only reached through it.
     const replyPanelSrc = readFileSync(join(import.meta.dirname, 'ReplyPanel.svelte'), 'utf8')
-    expect(replyPanelSrc).toMatch(/<ChannelUnavailableBanner [^>]*variant="replyPanel"/)
+    expect(replyPanelSrc).toMatch(/<TimelineFrame[\s\S]*?channelUnavailableVariant="replyPanel"/)
+    const timelineFrameSrc = readFileSync(join(import.meta.dirname, 'TimelineFrame.svelte'), 'utf8')
+    expect(timelineFrameSrc).toMatch(/<ChannelUnavailableBanner [^>]*variant=\{channelUnavailableVariant\}/)
     const host = dom.doc.createElement('div')
     dom.doc.body.appendChild(host)
 

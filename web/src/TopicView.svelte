@@ -7,14 +7,10 @@
   import { resolveRovingMessageId } from './composer-keys'
   import Composer from './Composer.svelte'
   import VirtualRows from './ui/VirtualRows.svelte'
-  import {
-    confirmReplaceDraftWithFailedSend,
-    decideEditAndResend,
-    discardAndFocusComposer,
-    focusTarget,
-  } from './focus-management'
+  import { focusTarget } from './focus-management'
   import { type RepliesAdapter } from './replies.svelte'
   import { foldTopicName, type ChannelSync } from './sync.svelte'
+  import { createTimelineDraftController } from './timeline-draft'
   import {
     applyTimelineScrollAction,
     createTimelineScrollController,
@@ -28,16 +24,13 @@
   import type { TopicsAdapter } from './topics.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
   import type { UnreadAdapter } from './unread.svelte'
+  import TimelineFrame from './TimelineFrame.svelte'
   import SearchAnchorStatus from './ui/SearchAnchorStatus.svelte'
   import Button from './ui/Button.svelte'
-  import ChannelUnavailableBanner from './ui/ChannelUnavailableBanner.svelte'
-  import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
-  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import ReadMarker from './ui/ReadMarker.svelte'
   import Skeleton from './ui/Skeleton.svelte'
-  import StatusBanner from './ui/StatusBanner.svelte'
 
   // Renders one Topic's filtered history window and own Composer without owning I/O or sync state.
   // Leaves row/header room for future Unread badges (#143) and Reply chains (#140).
@@ -487,45 +480,37 @@
   })
 
 
-  function handleDiscard(clientMessageId: string) {
-    discardAndFocusComposer(clientMessageId, (id) => channel.discard(id), composerRef)
-  }
+  const {
+    handleDiscard,
+    handleRestoreRequest,
+    handleConfirmReplace,
+    handleCancelReplace,
+  } = createTimelineDraftController({
+    getDraft: () => composerState.draft,
+    setDraft: (draft) => tc.setDraft(draft),
+    discard: (id) => channel.discard(id),
+    restore: (id) => tc.restore(id),
+    canRestore: (id) =>
+      !targetUnavailable && pending.some((p) => p.clientMessageId === id && p.status === 'failed'),
+    getComposerRef: () => composerRef,
+    getConfirmReplaceId: () => confirmReplaceId,
+    setConfirmReplaceId: (id) => {
+      confirmReplaceId = id
+    },
+    afterUpdate: tick,
+  })
 
-  function handleRestoreRequest(clientMessageId: string) {
-    const decision = decideEditAndResend(clientMessageId, composerState.draft)
-    if (decision.action === 'restore_now') {
-      if (tc.restore(clientMessageId)) {
-        focusTarget(composerRef)
-      }
-    } else {
-      confirmReplaceId = decision.clientMessageId
-    }
-  }
-
-  function handleConfirmReplace() {
-    const id = confirmReplaceId
-    confirmReplaceId = null
-    if (!id) return
-    const canRestore = !targetUnavailable && pending.some((p) => p.clientMessageId === id && p.status === 'failed')
-    if (
-      confirmReplaceDraftWithFailedSend(
-        id,
-        composerState.draft,
-        canRestore,
-        (draft) => tc.setDraft(draft),
-        (targetId) => tc.restore(targetId),
-        null,
-      )
-    ) {
-      void tick().then(() => {
-        if (confirmReplaceId === null) focusTarget(composerRef)
-      })
-    }
-  }
-
-  function handleCancelReplace() {
-    confirmReplaceId = null
-  }
+  const topicUnavailableEmpty = $derived(
+    topicUnavailable && view.messages.length === 0 && pending.length === 0,
+  )
+  const showInitialSkeleton = $derived(
+    !topicUnavailableEmpty &&
+      !positioning &&
+      effectiveStatus === 'loading' &&
+      !scrollView.loadingTimedOut &&
+      (awaitingInitialSenders || (view.messages.length === 0 && pending.length === 0)),
+  )
+  const showTopicBody = $derived(!topicUnavailableEmpty && !showInitialSkeleton)
 
   async function handleSubmit(): Promise<boolean> {
     if (!topicName) return false
@@ -542,79 +527,63 @@
   }
 </script>
 
-<section class="topic-view" aria-label="トピックタイムライン">
-  {#if reconnecting && !targetUnavailable && s.status === 'ready'}
-    <div class="topic-view__banner">
-      <StatusBanner tone="info" role={null} message="再接続しています…" />
-    </div>
-  {/if}
-
-  {#if organizationUnavailable}
-    <div class="topic-view__banner">
-      <OrganizationUnavailableBanner {onrecheckmembership} {onswitchorganization} />
-    </div>
-  {:else if channelUnavailable}
-    <div class="topic-view__banner">
-      <ChannelUnavailableBanner {ongoToChannelList} />
-    </div>
-  {:else if !search && !targetUnavailable && loadFailed}
-    <div class="topic-view__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-        actionLabel="再試行"
-        onaction={retryInitial}
-      />
-    </div>
-  {/if}
-
-  {#if positioning}
-    <div class="topic-view__positioning">
-      <Skeleton rows={4} label="トピックを読み込み中" />
-    </div>
-  {/if}
-  <div
-    class="topic-view__scroll"
-    class:topic-view__scroll--positioning={positioning}
-    aria-busy={positioning ? 'true' : undefined}
-    inert={positioning}
-    bind:this={scrollEl}
-    onscroll={handleScroll}
-  >
-    {#if topicUnavailable && view.messages.length === 0 && pending.length === 0}
+<TimelineFrame
+  ariaLabel="トピックタイムライン"
+  classes={{
+    root: 'topic-view',
+    banner: 'topic-view__banner',
+    positioning: 'topic-view__positioning',
+    scroll: 'topic-view__scroll',
+    scrollPositioning: 'topic-view__scroll--positioning',
+    older: 'topic-view__older',
+    newBelow: 'topic-view__new-below',
+    composer: 'topic-view__composer',
+  }}
+  reconnecting={reconnecting && !targetUnavailable && s.status === 'ready'}
+  {organizationUnavailable}
+  {channelUnavailable}
+  loadErrorMessage={!search && !targetUnavailable && loadFailed
+    ? 'トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。'
+    : null}
+  onretry={retryInitial}
+  {ongoToChannelList}
+  {onrecheckmembership}
+  {onswitchorganization}
+  {positioning}
+  positioningLabel="トピックを読み込み中"
+  bind:scrollEl
+  onscroll={handleScroll}
+  showOlder={showTopicBody && view.initialized && view.hasMore && !targetUnavailable}
+  olderDisabled={view.loading}
+  olderError={view.error}
+  onloadolder={loadOlderWithAnchor}
+  pinned={scrollView.pinned}
+  newerCount={Math.max(scrollView.belowCount, view.newerCount ?? 0)}
+  onjumptobottom={() => void jumpToBottom().catch(console.error)}
+  {confirmReplaceId}
+  returnFocusFallback={composerRef}
+  onconfirmreplace={handleConfirmReplace}
+  oncancelreplace={handleCancelReplace}
+>
+  {#snippet beforeOlder()}
+    {#if topicUnavailableEmpty}
       <EmptyState
         title="このトピックは利用できません。"
         description="削除されたか、URLが正しくない可能性があります。"
       />
-    {:else if !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (view.messages.length === 0 && pending.length === 0))}
+    {:else if showInitialSkeleton}
       <Skeleton rows={4} label="トピックを読み込み中" />
-    {:else}
-      {#if topicUnavailable}
-        <EmptyState
-          title="このトピックは利用できません。"
-          description="削除されたか、URLが正しくない可能性があります。"
-        />
-      {/if}
-      {#if view.initialized && view.hasMore && !targetUnavailable}
-        <div class="topic-view__older">
-          <Button variant="secondary" disabled={view.loading} onclick={loadOlderWithAnchor}>
-            以前のメッセージを読み込む
-          </Button>
-          {#if view.error}
-            <StatusBanner
-              tone="danger"
-              role="alert"
-              message="以前のメッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-              actionLabel="再試行"
-              onaction={loadOlderWithAnchor}
-            />
-          {/if}
-        </div>
-      {/if}
+    {:else if topicUnavailable}
+      <EmptyState
+        title="このトピックは利用できません。"
+        description="削除されたか、URLが正しくない可能性があります。"
+      />
+    {/if}
+  {/snippet}
 
-          {#if view.messages.length > 0 || pending.length > 0}
-        <VirtualRows
+  {#if showTopicBody}
+    {#if view.messages.length > 0 || pending.length > 0}
+      <VirtualRows
         class="topic-view__list"
         bind:this={rowWindow}
         items={view.messages}
@@ -633,31 +602,29 @@
         onfocuslost={() => focusTarget(composerRef)}
       >
         {#snippet children(m)}
-
-              {#if firstUnreadMessageId === m.id}
-                <ReadMarker />
-              {/if}
-              <MessageRow
-                senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
-                createdAt={m.created_at}
-                searchMatch={searchId === m.id}
-                body={m.body ?? ''}
-                mentions={m.mentions}
-                {resolveMentionName}
-                {selfId}
-                replyCount={replyCounts[m.reply_root_id ?? m.id] ?? null}
-                focusable
-                rovingTabindex={rovingRowId === m.id ? 0 : -1}
-                onopenreplies={onopenreplies && !targetUnavailable
-                  ? (opener) => onopenreplies(m, opener)
-                  : undefined}
-                onrowfocus={() => {
-                  activeRowId = m.id
-                }}
-                onrowkeydown={handleRowKeydown}
-              />
-
-          {/snippet}
+          {#if firstUnreadMessageId === m.id}
+            <ReadMarker />
+          {/if}
+          <MessageRow
+            senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
+            createdAt={m.created_at}
+            searchMatch={searchId === m.id}
+            body={m.body ?? ''}
+            mentions={m.mentions}
+            {resolveMentionName}
+            {selfId}
+            replyCount={replyCounts[m.reply_root_id ?? m.id] ?? null}
+            focusable
+            rovingTabindex={rovingRowId === m.id ? 0 : -1}
+            onopenreplies={onopenreplies && !targetUnavailable
+              ? (opener) => onopenreplies(m, opener)
+              : undefined}
+            onrowfocus={() => {
+              activeRowId = m.id
+            }}
+            onrowkeydown={handleRowKeydown}
+          />
+        {/snippet}
         {#snippet pendingRow(p)}
           <MessageRow
             body={p.body}
@@ -670,32 +637,23 @@
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
         {/snippet}
-        </VirtualRows>
-      {:else if !search && effectiveStatus === 'ready'}
-        <EmptyState
-          title="まだメッセージがありません。"
-          description="下の入力欄からメッセージを送信できます。"
-        />
-      {/if}
+      </VirtualRows>
+    {:else if !search && effectiveStatus === 'ready'}
+      <EmptyState
+        title="まだメッセージがありません。"
+        description="下の入力欄からメッセージを送信できます。"
+      />
     {/if}
-      {#if view.hasNewer && !targetUnavailable}
-      <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
-    {/if}
-
-    {#if search && !targetUnavailable}
-      <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
-    {/if}
-  </div>
-
-  {#if !scrollView.pinned && (scrollView.belowCount > 0 || (view.newerCount ?? 0) > 0)}
-    <div class="topic-view__new-below">
-      <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
-        新着 {Math.max(scrollView.belowCount, view.newerCount ?? 0)}件 ↓
-      </Button>
-    </div>
+  {/if}
+  {#if view.hasNewer && !targetUnavailable}
+    <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
   {/if}
 
-  <div class="topic-view__composer">
+  {#if search && !targetUnavailable}
+    <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
+  {/if}
+
+  {#snippet composer()}
     <Composer
       {members}
       {onmentionrequest}
@@ -709,77 +667,5 @@
       onsubmit={handleSubmit}
       onarrowupempty={() => void focusMessage(focusableMessageIds.at(-1)).catch(console.error)}
     />
-  </div>
-
-  <ReplaceDraftDialog
-    pendingId={confirmReplaceId}
-    description="入力中の下書きを破棄して、送信できなかったメッセージを入力欄に戻します。"
-    returnFocusFallback={composerRef}
-    onconfirm={handleConfirmReplace}
-    oncancel={handleCancelReplace}
-  />
-</section>
-
-<style>
-  .topic-view {
-    position: relative;
-    display: grid;
-    grid-template-rows: auto 1fr auto;
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-    gap: var(--space-8);
-  }
-
-  .topic-view__banner {
-    padding: 0 var(--space-16);
-    min-width: 0;
-  }
-
-  .topic-view__scroll {
-    /* Explicit column: the positioning overlay shares this cell, and auto-placement would move this into an implicit column. */
-    grid-row: 2;
-    grid-column: 1;
-    overflow-y: auto;
-    overflow-anchor: none;
-    padding: var(--space-8) var(--space-16);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-8);
-    min-height: 0;
-    min-width: 0;
-  }
-
-  .topic-view__scroll--positioning {
-    visibility: hidden;
-  }
-
-  .topic-view__positioning {
-    grid-row: 2;
-    grid-column: 1;
-    padding: var(--space-8) var(--space-16);
-    overflow: hidden;
-    min-width: 0;
-  }
-
-  .topic-view__older {
-    display: grid;
-    justify-items: start;
-    gap: var(--space-8);
-    min-width: 0;
-  }
-
-  .topic-view__new-below {
-    position: absolute;
-    bottom: calc(var(--space-24) * 4);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 10;
-  }
-
-  .topic-view__composer {
-    grid-row: 3;
-    padding: 0 var(--space-12) var(--space-12);
-    min-width: 0;
-  }
-</style>
+  {/snippet}
+</TimelineFrame>
