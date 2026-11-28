@@ -857,7 +857,7 @@
 
   function handleWindowKeydown(e: KeyboardEvent) {
     // A modal dialog is the topmost layer and handles its own Escape / Tab (docs/ui.md §9).
-    if (typeof document !== 'undefined' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
+    if (typeof document !== 'undefined' && document.querySelector('dialog:modal')) {
       return
     }
     if (shouldTogglePanelShortcut(e)) {

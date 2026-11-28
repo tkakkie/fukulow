@@ -245,10 +245,10 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     // Click grant on 佐藤 花子 -> opens confirm Dialog, then click キャンセル -> sends nothing
     findButton('チャンネル管理者にする')!.click()
     flushSync()
-    expect(host.querySelector('[role="dialog"]')?.textContent).toContain('チャンネル管理者を付与しますか？')
+    expect(host.querySelector('dialog:modal')?.textContent).toContain('チャンネル管理者を付与しますか？')
     findButton('キャンセル')!.click()
     flushSync()
-    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.querySelector('dialog:modal')).toBeNull()
     expect(deps.changeChannelManager).not.toHaveBeenCalled()
 
     // Click grant on 佐藤 花子 again -> confirm in Dialog -> holds pending (disables buttons against double click) -> resolves 204 -> refreshes list and capabilities
