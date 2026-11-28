@@ -47,6 +47,7 @@ export async function sends(resources: Names, images: Images, args: Options, bod
   const result = await withSession(resources.client, db, false, async sql => {
     const smoke = args.mode === 'smoke';
     const stop = new AbortController();
+    const abort = (error: unknown) => stop.abort(error);
     let start: number | undefined;
     let sampling: Promise<void> | undefined;
     let baseline: Promise<Tick> | undefined;
@@ -58,7 +59,7 @@ export async function sends(resources: Names, images: Images, args: Options, bod
           save(`${args.out}/w1-k6-placement.json`, lanePlacement(resources.k6, 'client'));
           return point;
         });
-        void baseline.catch(() => stop.abort());
+        void baseline.catch(abort);
       } else if (mark === 'started') {
         start = Date.now();
         const clock = performance.now();
@@ -67,14 +68,14 @@ export async function sends(resources: Names, images: Images, args: Options, bod
           record(await baseline);
           await sampleWindow(full.sendSeconds, clock, async second => record(await tick(sql, second)), stop.signal);
         })();
-        void sampling.catch(() => stop.abort());
+        void sampling.catch(abort);
       } else {
         end = (async () => {
           assert.ok(sampling, 'W1 workload start marker is missing');
           await sampling;
           return tick(sql, full.sendSeconds);
         })();
-        void end.catch(() => stop.abort());
+        void end.catch(abort);
       }
     }, stop.signal);
     try {

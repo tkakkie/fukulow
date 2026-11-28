@@ -55,7 +55,7 @@ export async function send(resources: Names, images: Images, args: Options,
     onBoundary(status);
   });
   const code = await new Promise<number | null>((resolve, reject) => {
-    child.once('error', reject);
+    child.once('error', error => reject((error as NodeJS.ErrnoException).code === 'ABORT_ERR' ? signal.reason : error));
     child.once('close', resolve);
   });
   await logs;

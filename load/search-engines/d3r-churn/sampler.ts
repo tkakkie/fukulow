@@ -14,8 +14,8 @@ export const sampleSql = `SELECT jsonb_build_object('at', clock_timestamp(), 'ls
   'bytes', jsonb_build_object(${Object.entries(relations).map(([key, name]) => `'${key}', pg_relation_size('${name}')`).join(', ')}),
   'dbBytes', pg_database_size(current_database()),
   'terms', ${stats(heap)}, 'messages', ${stats('public.messages')},
-  'vacuum', (SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY pid), '[]') FROM pg_stat_progress_vacuum v
-    WHERE datname = current_database()),
+  'vacuum', (SELECT coalesce(jsonb_agg(to_jsonb(v) || jsonb_build_object('relid', v.relid::bigint) ORDER BY pid), '[]')
+    FROM pg_stat_progress_vacuum v WHERE datname = current_database()),
   'dbStatsReset', (SELECT stats_reset FROM pg_stat_database WHERE datname = current_database()),
   'checkpointer', (SELECT to_jsonb(c) FROM pg_stat_checkpointer c));`;
 

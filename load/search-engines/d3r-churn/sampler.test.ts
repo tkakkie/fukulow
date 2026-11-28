@@ -25,6 +25,15 @@ test('periodic samples preserve physical sizes, vacuum counters, progress and ch
   for (const source of ['pgstattuple', 'pgstatindex', 'pg_visibility_map_summary']) assert.ok(!sampleSql.includes(source));
 });
 
+test('the sampler SQL converts the vacuum relation OID from a JSON string to a number', () => {
+  const raw = sample();
+  const postgresRow = {...raw.vacuum[0], relid: '100'};
+  assert.throws(() => parseSample(JSON.stringify({...raw, vacuum: [postgresRow]})), /Missing vacuum progress/);
+  assert.match(sampleSql, /to_jsonb\(v\) \|\| jsonb_build_object\('relid', v\.relid::bigint\)/);
+  const projected = {...postgresRow, relid: Number(postgresRow.relid)};
+  assert.deepEqual(parseSample(JSON.stringify({...raw, vacuum: [projected]})).vacuum, raw.vacuum);
+});
+
 test('missing or malformed periodic data is rejected while no active vacuum is valid', () => {
   const raw = sample();
   for (const broken of [

@@ -8,7 +8,7 @@ import { readSource } from '../d3r/path.ts';
 import { hash } from '../manifest.ts';
 import { appSettings, base, full, k6Reference, queries, sampleSeconds, sessionOverrides, sourceCommit } from './design.ts';
 
-export const manifestFile = 'load/search-engines/manifest-d3r-churn-v20.json';
+export const manifestFile = 'load/search-engines/manifest-d3r-churn-v21.json';
 const directory = 'load/search-engines/d3r-churn';
 const buildInputs = ['Dockerfile', '.dockerignore', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
   'about.toml', 'deny.toml', 'LICENSE-MIT', 'LICENSE-APACHE', 'scripts/third-party-notices.ts',
@@ -33,7 +33,7 @@ function sourceFiles() {
 }
 
 export function snapshot() {
-  return {version: 20, experiment: '#689 item 4c Phase A', sourceCommit, node: base.node,
+  return {version: 21, experiment: '#689 item 4c Phase A', sourceCommit, node: base.node,
     postgres: {image: base.image, serverVersion: '180006', settings: {}, required: {
       autovacuum: 'on', fsync: 'on', synchronous_commit: 'on', wal_level: 'replica', shared_preload_libraries: '',
     }}, sessionOverrides, appSettings, k6: k6Reference,

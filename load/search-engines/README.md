@@ -24,7 +24,7 @@ For V, each arm's fixture record contains SHA-256 fingerprints of the complete M
 
 Phase A reports the growth of `message_search_terms` under real Sends and the effect of **W2 MODEL** Edit and Delete transactions on the disposable fixture. A W1 term mismatch is a defect. A W2 mismatch invalidates the MODEL. Phase A has no item 4c verdict.
 
-1. Prepare the harness PR with the independent `manifest-d3r-churn-v20.json`. Have an independent reviewer compare the implementation, tests and refusal paths with the approved [pre-registration](https://github.com/tkakkie/fukulow/issues/689#issuecomment-7219092045) and the three maintainer decisions.
+1. Prepare the harness PR with the independent `manifest-d3r-churn-v21.json`. Have an independent reviewer compare the implementation, tests and refusal paths with the approved [pre-registration](https://github.com/tkakkie/fukulow/issues/689#issuecomment-7219092045) and the three maintainer decisions.
 2. Build the production release image from a clean checkout of the manifest's `sourceCommit`, label it `org.opencontainers.image.revision` with that SHA, and record its immutable image ID. Make the manifest's pinned PostgreSQL and k6 images available locally. Use the pinned Node version and run from the harness checkout root.
 3. Smoke on macOS or Ubuntu with a new absolute output directory outside the checkout. Smoke uses one real Send, a small seeded MODEL, untimed Search first pages and all six snapshot transitions. It skips the rate windows, latency capture, `EXPLAIN ANALYZE` and idle wait.
 
