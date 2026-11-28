@@ -478,14 +478,11 @@
     void tick().then(() => {
       if (nav.state.revision !== revision || appliedFocusRevision === revision) return
       appliedFocusRevision = revision
+      const activeElement = document.activeElement
       if (
-        navFocusBaseline.revision === revision &&
-        typeof document !== 'undefined' &&
-        document.activeElement &&
-        document.activeElement !== document.body &&
-        document.activeElement !== document.documentElement &&
-        (document.activeElement as HTMLElement).isConnected !== false &&
-        document.activeElement !== navFocusBaseline.active
+        activeElement?.isConnected && activeElement !== document.body && activeElement !== document.documentElement &&
+        (state.focus === 'composer-if-unfocused' ||
+          (navFocusBaseline.revision === revision && activeElement !== navFocusBaseline.active))
       ) {
         focusTopicInputNext = false
         return
