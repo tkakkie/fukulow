@@ -2,7 +2,10 @@ use uuid::Uuid;
 
 use crate::{
     channels,
-    messages::{Message, MessageError, SendMessageRequest, history, mentions, message_from_row},
+    messages::{
+        Message, MessageError, SendMessageRequest, history, mentions, message_columns,
+        message_from_row,
+    },
 };
 
 /// The canonical Message for a committed `client_message_id`, or 409 for changed intent.
@@ -58,10 +61,11 @@ pub(super) async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
 ) -> Result<Option<(Message, bool)>, sqlx::Error> {
     use sqlx::Row;
     sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, \
-         send_digest = fukulow_send_digest($4, $5, lower($6 COLLATE \"C\"), $7) AS same_intent \
-         FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
+        concat!(
+            "SELECT ", message_columns!(),
+            ", send_digest = fukulow_send_digest($4, $5, lower($6 COLLATE \"C\"), $7) AS same_intent \
+             FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3"
+        ),
         "p.seq",
     ))
     .bind(organization_id)

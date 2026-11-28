@@ -3,7 +3,8 @@ pub(crate) mod handlers;
 pub use handlers::list_channel_events;
 
 use super::{
-    Message, MessageError, REPLAY_PAGE_SIZE, check_visibility, mentions, message_from_row,
+    Message, MessageError, REPLAY_PAGE_SIZE, check_visibility, mentions, message_columns,
+    message_from_row,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -154,15 +155,14 @@ fn page_sql(channel: usize, authorized: bool) -> String {
             FROM candidates ORDER BY event_seq LIMIT ${limit}
         )
         SELECT l.event_seq,l.duplicate,l.kind,l.message_id,l.source_topic_id,l.destination_topic_id,l.operation_id,
-            l.channel_id AS log_channel_id,m.id,m.channel_id,m.seq,m.version,m.deleted,m.client_message_id,m.sender,m.body,m.topic_id,
-            m.reply_to_id AS reply_to,m.reply_root_id,
-            to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
+            l.channel_id AS log_channel_id,{message_columns}
         FROM log_page l LEFT JOIN LATERAL (
             SELECT * FROM messages
             WHERE organization_id=l.organization_id AND channel_id=l.channel_id AND seq=l.event_seq AND l.kind='create'
             OFFSET 0
         ) m ON true
-        ORDER BY l.event_seq"#
+        ORDER BY l.event_seq"#,
+        message_columns = message_columns!(replay)
     )
 }
 

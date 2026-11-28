@@ -229,10 +229,10 @@ pub async fn topic_history(
                 ("<=", "DESC")
             };
             let sql = format!(
-                "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+                "SELECT {columns} \
                 FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
-                ORDER BY seq {order} LIMIT $5"
+                ORDER BY seq {order} LIMIT $5",
+                columns = message_columns!(),
             );
             let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
             let messages = sqlx::query(&sql)

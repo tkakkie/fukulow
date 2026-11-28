@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::{
     ListMessagesQuery, MessageError, MessagePage, ValidateListMessages, history, mentions,
-    message_from_row, no_store_json, page::DirectionalPage,
+    message_columns, message_from_row, no_store_json, page::DirectionalPage,
 };
 use crate::{
     AppState,
@@ -56,15 +56,17 @@ pub async fn list_messages(
         async |tx: &mut sqlx::PgConnection, history_generation, w| {
             let page = DirectionalPage::new(&query, limit);
             let sql = if page.ascending {
-                "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-                 to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-                 FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
-                 ORDER BY seq ASC LIMIT $4"
+                concat!(
+                    "SELECT ", message_columns!(),
+                    " FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
+                     ORDER BY seq ASC LIMIT $4"
+                )
             } else {
-                "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-                 to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-                 FROM messages WHERE organization_id = $1 AND channel_id = $2 \
-                   AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
+                concat!(
+                    "SELECT ", message_columns!(),
+                    " FROM messages WHERE organization_id = $1 AND channel_id = $2 \
+                       AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
+                )
             };
             let sql = mentions::page_sql(sql, if page.ascending { "p.seq ASC" } else { "p.seq DESC" });
             let messages = sqlx::query(&sql)

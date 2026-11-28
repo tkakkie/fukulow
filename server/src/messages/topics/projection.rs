@@ -101,9 +101,7 @@ SELECT access.visible, $5 AS as_of_seq, p.first_seq, p.last_seq,
     p.message_count - tail.message_count AS message_count, p.read_seq,
     CASE WHEN p.last_seq IS NOT NULL THEN GREATEST(uc.unread_count, 0) END AS unread_count,
     uc.unread_count < 0 AS count_drift, mc.mention_unread_count, p.name,
-    m.id, m.channel_id, m.seq, m.version, m.deleted, m.client_message_id,
-    m.sender, m.body, m.topic_id, m.reply_to_id AS reply_to, m.reply_root_id,
-    to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
+    {message_columns}
 FROM access LEFT JOIN page_positions p ON true
 CROSS JOIN LATERAL (
     SELECT count(*) AS message_count, count(*) FILTER (WHERE m.sender <> $2) AS unread_count
@@ -143,6 +141,7 @@ ORDER BY p.last_seq {order}
         unchanged_range = range("t.last_seq", "::bigint"),
         main_range = range("m.seq", ""),
         positioned_range = range("last_seq", ""),
+        message_columns = message_columns!(topic),
     );
     mentions::page_sql(&sql, &format!("p.last_seq {order}"))
 }
