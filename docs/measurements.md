@@ -1,11 +1,10 @@
 # Measurements
 
-Keep each scenario's latest baseline, decision or open acceptance, harness, reproduction command and limits. Summarise current evidence here and append superseded or new detailed records verbatim to `load/measurements-archive.md`. [Focused SQL rules](workflow.md#14-focused-sql-measurements) · [Writing rules](workflow.md#13-splitting-a-doc)
+Keep each scenario's latest baseline, decision or open acceptance, harness, command and limits. Append superseded or detailed records verbatim to `load/measurements-archive.md`. [SQL rules](workflow.md#14-focused-sql-measurements) · [Writing rules](workflow.md#13-splitting-a-doc)
 
-Measurements carry no performance, capacity or latency guarantee.
-Compare runs only with matching send limits and publishing Member counts.
+No performance, capacity or latency guarantee. Compare only matching send limits and publishing Member counts.
 
-Raw logs, artifacts and paths outside Git may be gone. [2026-11-18 check](../load/measurements-archive.md#raw-data-check-2026-11-18) · [Archive](../load/measurements-archive.md) · [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15)
+Raw logs, artifacts and paths outside Git may be gone. [Check](../load/measurements-archive.md#raw-data-check-2026-11-18) · [Archive](../load/measurements-archive.md) · [#442](../load/measurements-archive.md#moved-records-442-2026-11-15)
 
 ## Measurement hosts (#796)
 
@@ -134,9 +133,11 @@ Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-pl
 
 ## Rust/wasm sync core (#466, #487)
 
-2026-11-21. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466, `d2fc5ea`: throttled cold `/` Timeline p95 +16%). #487 (`c02e1a78`, 5 rounds): `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, 18.19 → 18.35 MiB; bulk INCONCLUSIVE, slope HOLD (#489). #954: preload (#962) MISSED, early list (#978) MET ([records](../load/measurements-archive.md#wasm-preload-954-2026-11-25)). #488 Map: `ff681721` `step()` p50 +20.7% MISSED; fix `3482ee02` (5 rounds) all gated metrics MET, `step()` p50 +1.0%, bulk −6 to −17%, slope HOLD as B ([record](../load/measurements-archive.md#wasm-merge-map-488-2026-11-27-mac)).
+2026-11-21. [Rust/wasm default](decisions/web.md#web-client) accepted despite throttled cold `/` Timeline p95 +16% (#466, `d2fc5ea`). #487 (`c02e1a78`, 5 rounds): `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, 18.19 → 18.35 MiB. Bulk INCONCLUSIVE, slope HOLD (#489). #954 preload (#962) MISSED, early list (#978) MET ([records](../load/measurements-archive.md#wasm-preload-954-2026-11-25)). #488 Map `ff681721` `step()` p50 +20.7% MISSED. Fix `3482ee02` (5 rounds) met all gates, `step()` p50 +1.0%, bulk −6 to −17%, slope HOLD as B ([record](../load/measurements-archive.md#wasm-merge-map-488-2026-11-27-mac)).
 
 Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
+
+#1128 release Wasm (`a878e090`): 558,619 B raw, 161,082 B gzip (level 6). macOS 27.0.1 arm64 (M5), Rust 1.100.0, wasm-bindgen 0.2.130, Node 26.13.1. From root run `(cd web && node ../scripts/build-wasm.ts)` then `node scripts/check-wasm-budget.ts web/wasm`. CI reuses `npm --prefix web run build` on `ubuntu-latest` and skips the PR delta to avoid a second build.
 
 ## Pool before and after PR #511 (#196 B)
 
@@ -170,16 +171,16 @@ Run `load/conn-setup/queue.ts`, then `load/launch.ts`. [Record](../load/measurem
 
 ## Archived only
 
-- [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
-- [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
-- [Unread Topic-count index bound under RLS (#356)](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst) — superseded by #519 A3 (guard `unread_list_counts_never_read_messages_in_any_plan_mode`).
-- [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
-- [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
-- Channel log [smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) (functional only) and [full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) (INVALID for the gate).
-- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending.
-- [Earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms) — superseded by the startup fix.
-- [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
-- [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.
-- [Reply count HTTP runs 1–3 and pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, superseded or pilot only; reasons in the record.
-- [Watermark subscription admission](../load/measurements-archive.md#watermark-subscription-admission-investigation-478-2026-11-17-jst) — investigation evidence for the [admission policy](decisions/realtime.md#admission-and-timeouts).
-- [Precompressed web assets](../load/measurements-archive.md#precompressed-web-asset-transfer-486-2026-11-17-jst) — wasm 131,573 → 103,813 bytes, evidence for [Brotli sidecars](decisions/auth.md#auth-accounts-and-tenancy).
+- [`make load` and `load/record.ts` methods](../load/measurements-archive.md#load-harness-methods-20-57) · [Load decisions](decisions/load.md#load-testing-and-measurement)
+- Mixed paging supersedes [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11).
+- #519 A3 supersedes [Unread Topic-count index bound under RLS (#356)](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst). Guard `unread_list_counts_never_read_messages_in_any_plan_mode`.
+- [DM Q4 offered work and overhead](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) (procedure, `load/dms-formal-run.ts`).
+- [DM instrumentation-overhead](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) (NOT EVALUATED, build/setup failures).
+- Channel log [functional smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) and [full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) (INVALID).
+- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) (pending).
+- Startup fix supersedes [earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms).
+- Post-#511 comparison supersedes [pool PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac).
+- HTTP and SQL evidence supersede [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17).
+- [Reply count HTTP runs 1–3 and pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) (NOT EVALUATED, superseded or pilot only).
+- [Watermark investigation](../load/measurements-archive.md#watermark-subscription-admission-investigation-478-2026-11-17-jst) supports [admission policy](decisions/realtime.md#admission-and-timeouts).
+- [Precompressed web assets](../load/measurements-archive.md#precompressed-web-asset-transfer-486-2026-11-17-jst) cut Wasm 131,573 → 103,813 B with [Brotli sidecars](decisions/auth.md#auth-accounts-and-tenancy).

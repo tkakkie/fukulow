@@ -38,6 +38,8 @@ jobs:
       - run: npm --prefix web run check
       - run: npm --prefix web test
       - run: npm --prefix web run build
+      - name: Release Wasm fits its gzip budget
+        run: node scripts/check-wasm-budget.ts web/dist
   # Linting needs no DB or real SPA: an empty web/dist satisfies rust-embed for clippy, so lint runs alongside `web`.
   lint:
     runs-on: ubuntu-latest
