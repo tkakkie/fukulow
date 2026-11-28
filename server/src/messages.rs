@@ -53,6 +53,7 @@ pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
 pub mod search;
 pub(crate) mod send;
 pub use send::send_message;
+pub mod startup;
 #[cfg(test)]
 use send::{ValidateSendMessage, committed, existing, persist};
 pub(crate) mod topics;

@@ -9,7 +9,7 @@ import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.s
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
-import { getOrganizationMe, isOrganizationUnavailable, isSessionEnded, listTimeline, type Identity, type Role } from './api'
+import { getStartup, getOrganizationMe, isOrganizationUnavailable, isSessionEnded, listTimeline, type Identity, type Role } from './api'
 import { startInitialSelection } from './initial-timeline'
 import type { Navigation } from './navigation'
 import type { createChannelMembers } from './channel-members'
@@ -56,6 +56,7 @@ export type AuthDeps = {
   setupAndSignIn: typeof setupAndSignIn
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
+  readStartup?: typeof getStartup
   readInitialChannels?: typeof startInitialChannels
   readInitialTimeline?: typeof listTimeline
   /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
@@ -66,6 +67,7 @@ export type AuthDeps = {
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
+  readStartup: getStartup,
   readInitialChannels: startInitialChannels,
   readInitialTimeline: listTimeline,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
@@ -126,10 +128,10 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
   let accountRequests = new AbortController()
   let reportAccountRejection = accountRejection(accountGeneration)
   let selectionGeneration = 0
-  let startup: ReturnType<typeof startInitialSelection> | undefined
+  let closeStartup: (() => void) | undefined
 
   function closeOrganization() {
-    startup?.close(); startup = undefined
+    closeStartup?.(); closeStartup = undefined
     stopMemberAvailability?.(); stopMemberAvailability = undefined
     stopMemberRefresh?.(); stopMemberRefresh = undefined
     stopAuthorScope?.(); stopAuthorScope = undefined
@@ -148,7 +150,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
   const route = () => navigation ? navigation.get().target
     : typeof window !== 'undefined' ? parseNavigation(window.location.href) : null
 
-  async function selectOrganization(id: string) {
+  async function selectOrganization(id: string, restoring = false) {
     if (view.screen !== 'app') return
     operations.clearError()
     closeOrganization()
@@ -165,24 +167,21 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
       else organizationStatus = 'error'
       return
     }
-    // A superseded selection's 401 can still end this Account Session.
-    const initialChannels = deps.readInitialChannels?.(id, accountRequests.signal)
-      .then(list => {
-        if (isSessionEnded(list)) reportEnded()
-        return list
-      })
     const initial = startInitialSelection({
-      organizationId: id, route, navigation, channels: initialChannels, accountSignal: accountRequests.signal,
-      load: deps.readInitialTimeline, onEnded: reportEnded,
+      organizationId: id, route, navigation, accountSignal: accountRequests.signal,
+      loadStartup: restoring ? deps.readStartup : undefined, loadChannels: deps.readInitialChannels, load: deps.readInitialTimeline,
+      onEnded: reportEnded,
       onUnavailableBeforeSession: () => { organizationStatus = 'unavailable' },
+      onAuthors: identities => members?.authors.seed(identities),
     })
-    startup = initial
-    if (deps.coreReady) {
-      try { await deps.coreReady() } catch { initial.close(); return }
+    closeStartup = initial.close
+    if (deps.coreReady || initial.startupReady) {
+      // Have the combined list ready before the socket can fence pre-Ready reads (A11).
+      try { await Promise.all([deps.coreReady?.(), initial.startupReady]) } catch { initial.close(); return }
       if (account !== accountGeneration || selection !== selectionGeneration) return
     }
     if (initial.unavailable) return
-    const { initialChannelHint, initialTimeline } = initial
+    const { initialChannelHint, initialChannels, initialTimeline } = initial
     organization = result.data
     const opened = deps.openSession(result.data.member.id, reportEnded, id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
@@ -211,7 +210,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     }, currentMembers?.onLoad)
     changes++
   }
-  async function show(next: AuthState) {
+  async function show(next: AuthState, restoring = false) {
     closeOrganization()
     security?.close(); security = null
     drafts.clear()
@@ -228,7 +227,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
       security = accountSecurityAdapter((deps.openSecurity ?? createAccountSecurity)(reportAccountRejection))
       const requested = route()?.organizationId
       const id = requested ?? next.identity.organizations[0]?.organization_id
-      if (id) await selectOrganization(id)
+      if (id) await selectOrganization(id, restoring)
     }
   }
 
@@ -256,7 +255,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     get selectedOrganizationId() { return selectedOrganizationId },
     get organizationStatus() { return session?.sync.unavailable ? 'unavailable' : organizationStatus },
     get session() { void changes; return session },
-    selectOrganization,
+    selectOrganization: (id: string) => selectOrganization(id),
     hasUnsavedChanges: () => drafts.hasDrafts() || (session?.sync.hasUnsavedChanges() ?? false),
     acceptInvitation: operations.acceptInvitation,
     signOutAndContinue: operations.signOutAndContinue,

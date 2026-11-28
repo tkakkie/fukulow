@@ -13,7 +13,7 @@ type AccountLifecycle = {
   generation(): number
   selection(): number
   loading(): void
-  show(state: AuthState): Promise<void>
+  show(state: AuthState, restoring?: boolean): Promise<void>
   ended(generation: number): void
   accepted(identity: Identity): Promise<void>
 }
@@ -46,7 +46,7 @@ export function createAuthOperations(deps: Dependencies, account: AccountLifecyc
       set({ error: '' })
       account.loading()
       const next = await deps.restore()
-      if (read === readGeneration && generation === account.generation()) await account.show(next)
+      if (read === readGeneration && generation === account.generation()) await account.show(next, true)
     },
     submitSetup: (req: Parameters<typeof setupAndSignIn>[0]) => run(false, async current => {
       const result = await deps.setupAndSignIn(req)

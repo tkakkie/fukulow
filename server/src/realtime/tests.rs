@@ -48,6 +48,7 @@ mod shared_frame;
 mod shutdown;
 mod socket_client;
 mod socket_server;
+mod startup;
 mod topics;
 mod watermark;
 

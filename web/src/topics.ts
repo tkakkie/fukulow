@@ -486,6 +486,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
           w.messages.clear(); w.mainTopics.clear(); w.baselines.clear(); w.listTopics.clear(); w.mainPositions.clear(); w.list = paging()
           w.summaryThrough.clear(); pruneActivity(w)
         }
+        early?.accept?.(result.data)
         applyMain(w, result.data, startedAt)
         if (query.as_of_seq === undefined) {
           const messages = sync.get().channels[channel]?.messages ?? []

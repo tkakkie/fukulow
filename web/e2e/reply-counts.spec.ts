@@ -71,7 +71,13 @@ test('authoritative totals survive partial history and cold child navigation and
   const child = children.at(-1)!
   // Only a child is loaded in main; the real count endpoint still returns the whole chain.
   const timeline: components['schemas']['TimelinePage'] = { history_generation: root.history_generation, as_of_seq: children.at(-1)!.created_seq, has_more: false, items: [{ kind: 'message', message: child }] }
-  await page.route(`**${base}/timeline*`, route => route.fulfill({ json: timeline }))
+  await page.route(url => url.pathname === `/api/v1/orgs/${org}/startup` &&
+    url.searchParams.get('channel_id') === channel.id, async route => {
+    const response = await secretSafe(() => route.fetch())
+    const data = await secretSafe(() => response.json()) as components['schemas']['StartupResponse']
+    data.timeline!.page = timeline
+    await route.fulfill({ response, json: data })
+  })
   await page.route(`**${base}/messages/*/chain*`, async route => {
     const url = new URL(route.request().url()); url.searchParams.set('limit', '2')
     const response = await route.fetch({ url: url.href })
