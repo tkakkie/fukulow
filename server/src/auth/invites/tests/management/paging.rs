@@ -6,7 +6,7 @@ async fn issued_admin_anchor_denies_after_invite_becomes_owner_role(pool: sqlx::
     let (_, issuer, _, _) = account(&pool, org, Role::Owner).await;
     let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
     seed(&pool, org, issuer, 101, false).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     let first = page(&app, org, &admin, None).await;
     let anchor = id(&first["invites"][99]);
     sqlx::query("UPDATE invites SET role='owner' WHERE organization_id=$1 AND id=$2")
@@ -40,7 +40,7 @@ async fn issued_admin_anchor_denies_under_another_organization(pool: sqlx::PgPoo
     let (_, other_issuer, _, other_admin) = account(&pool, other, Role::Admin).await;
     seed(&pool, org, issuer, 101, false).await;
     seed(&pool, other, other_issuer, 101, false).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     let first = page(&app, org, &admin, None).await;
     let before = snapshot(&pool).await;
     let r = req(
@@ -68,7 +68,7 @@ async fn invite_pages_reach_250_in_order_and_every_invite_can_be_revoked(pool: s
     sqlx::query("UPDATE invites SET created_at=created_at+interval '1 second' WHERE organization_id=$1 AND id=$2")
         .bind(org).bind(later).execute(&pool).await.unwrap();
     expected.push(later);
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     let mut cursor = None;
     let mut seen = vec![];
     for size in [100, 100, 50] {
@@ -104,7 +104,7 @@ async fn invite_pages_reach_250_in_order_and_every_invite_can_be_revoked(pool: s
 async fn invite_keyset_survives_earlier_later_and_anchor_lifecycle_changes(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, issuer, _, owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     for change in ["revoked_at", "accepted_at", "expires_at"] {
         sqlx::query("DELETE FROM invites WHERE organization_id=$1")
             .bind(org)
@@ -169,7 +169,7 @@ async fn admin_invite_pages_hide_owner_roles_and_cursors_are_scope_bound(pool: s
     let (_, issuer, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
     let (_, _, _, other_owner) = account(&pool, other, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     seed(&pool, org, issuer, 500, true).await;
     let expected: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM invites WHERE organization_id=$1 AND role<>'owner' ORDER BY created_at,id",

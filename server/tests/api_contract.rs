@@ -8,7 +8,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use fukulow_server::{
-    AppState, app,
+    app,
     messages::Message,
     openapi::ApiDoc,
     realtime::{
@@ -21,6 +21,9 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use utoipa::OpenApi;
 use uuid::Uuid;
+
+mod support;
+use support::app_state;
 
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
@@ -353,21 +356,9 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let state = AppState {
-        pool,
-        shutdown: Default::default(),
-        cookie_secure: true,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        ws_allowed_origins: Default::default(),
-        socket_gate: Default::default(),
-    };
+    let state = app_state(pool);
     let shutdown = state.shutdown.clone();
-    let router = app(state);
+    let router = app(state, Default::default());
     shutdown.begin();
     let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let mut requests = Vec::new();
@@ -498,19 +489,7 @@ async fn offline_app() -> Router {
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
     pool.close().await;
-    app(AppState {
-        pool,
-        shutdown: Default::default(),
-        cookie_secure: true,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        ws_allowed_origins: Default::default(),
-        socket_gate: Default::default(),
-    })
+    app(app_state(pool), Default::default())
 }
 
 #[tokio::test]
@@ -1150,19 +1129,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let router = app(AppState {
-        pool,
-        cookie_secure: true,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-        socket_gate: Default::default(),
-    });
+    let router = app(app_state(pool), Default::default());
     for (method, path) in [(
         "GET",
         "/api/v1/orgs/00000000-0000-0000-0000-000000000000/ws",

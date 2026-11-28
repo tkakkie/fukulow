@@ -15,7 +15,7 @@ async fn invite_management_http_denials_preserve_state_and_disclose_no_email(poo
         .execute(&pool)
         .await
         .unwrap();
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     let i = invite(&app, org, &owner, "hidden@example.invalid", Role::Member).await;
     for (target_org, token, status, error) in [
         (org, None, StatusCode::UNAUTHORIZED, "invalid credentials"),

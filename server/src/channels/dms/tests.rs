@@ -31,7 +31,7 @@ impl Fixture {
         let at = member(&pools.admin, org, a, "member").await;
         let bt = member(&pools.admin, org, b, role).await;
         let state = AppState::for_test(pools.app.clone()).await;
-        let app = crate::app(state.clone());
+        let app = crate::app(state.clone(), Default::default());
         Self {
             pools,
             state,

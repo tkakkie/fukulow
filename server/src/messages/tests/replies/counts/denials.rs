@@ -32,7 +32,7 @@ async fn denial(pool: PgPool, case: &str) {
     assert_eq!(updated.rows_affected(), 1);
     let state = AppState::for_test(pool.clone()).await;
     let delivery = state.message_delivery.clone();
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let dm = case.starts_with("dm_");
     let channel = if dm {
         let peer = Uuid::new_v4();

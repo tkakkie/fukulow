@@ -188,8 +188,17 @@ test('v19 records Message retention with v18 conditions', () => {
     ['load/search-engines/d3r/manifest.ts', added]);
 });
 
+function pinnedV20(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v20.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), 'a844b1b3cfd34eeb40b7eda301e4e3ad7b2fd46a0477848a29d9ec5e42ea3130');
+  const v20 = JSON.parse(text);
+  assert.equal(v20.sha256, 'b3a47b34bd6b2d587fbe2a30fd6cbcd98da0878052473b8cbabe7b7b254c0907');
+  assert.equal(v20.sha256, hash(JSON.stringify(v20.frozen)));
+  return v20;
+}
+
 test('v20 records the database context refactor with v19 conditions', () => {
-  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version, sourceHashes, ...conditions} = pinnedV20().frozen;
   const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV19().frozen;
   assert.equal(version, previousVersion + 1);
   assert.deepEqual(conditions, previousConditions);
@@ -197,6 +206,17 @@ test('v20 records the database context refactor with v19 conditions', () => {
   const before = new Map(previousSources.map(source => [source.path, source.sha256]));
   assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
     ['load/search-engines/d3r/manifest.ts', 'server/src/database/context.rs']);
+});
+
+test('v22 records the ServeOptions refactor with v20 conditions', () => {
+  const {version, sourceHashes, ...conditions} = loadManifest().frozen;
+  const {version: previousVersion, sourceHashes: previousSources, ...previousConditions} = pinnedV20().frozen;
+  assert.deepEqual([previousVersion, version], [20, 22]); // PR #905 reserves v21.
+  assert.deepEqual(conditions, previousConditions);
+  assert.deepEqual(sourceHashes.map(source => source.path), previousSources.map(source => source.path));
+  const before = new Map(previousSources.map(source => [source.path, source.sha256]));
+  assert.deepEqual(sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', 'server/src/auth.rs']);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {

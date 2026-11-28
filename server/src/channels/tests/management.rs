@@ -44,7 +44,7 @@ async fn grant_target_lock_contention_leaves_rows_and_notices_unchanged(pool: Pg
     use std::{sync::Arc, time::Duration};
 
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let org = organization(&pool).await;
     let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
     let target = Uuid::new_v4();
@@ -177,7 +177,7 @@ async fn foreign_organization_channel_member_endpoints_deny_without_changes_with
 #[fukulow_test::test]
 async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: PgPool) {
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let org = organization(&pool).await;
     let owner = Uuid::new_v4();
     let owner_token = member(&pool, org, owner, "owner").await;
@@ -354,7 +354,7 @@ async fn management_rechecks_demoted_deactivated_stale_and_removed_actors(pool: 
     for loss in ["demoted", "deactivated", "stale", "removed"] {
         for add in [true, false] {
             let state = AppState::for_test(pool.clone()).await;
-            let app = crate::app(state.clone());
+            let app = crate::app(state.clone(), Default::default());
             let org = organization(&pool).await;
             let owner = Uuid::new_v4();
             let token = member(&pool, org, owner, "owner").await;
@@ -697,7 +697,7 @@ async fn noop_grant_mutations_skip_subscription_rechecks(pool: PgPool) {
     }
     let state = AppState::for_test(pool.clone()).await;
     let count = Arc::new(Counter::default());
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     state
         .session_changes
         .set_subscription_recheck(count.clone());
@@ -719,7 +719,7 @@ async fn noop_grant_mutations_skip_subscription_rechecks(pool: PgPool) {
 async fn fast_subscription_rechecks_and_failures_are_scoped(pool: PgPool) {
     let access = super::super::access::AccessChanges::default();
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let org = organization(&pool).await;
     let owner = Uuid::new_v4();
     let other = Uuid::new_v4();

@@ -246,7 +246,7 @@ async fn archived_send_denies_before_the_limiter_without_charging(pool: PgPool) 
     state.message_delivery =
         Delivery::with_send_limit(SendLimit::configured(Some("1"), None).unwrap());
     let limiter = state.message_delivery.send_limiter.enforce();
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let fresh = input(Uuid::new_v4(), "First");
     assert_eq!(
         patch_archive(&app, &f.token, f.channel, true)

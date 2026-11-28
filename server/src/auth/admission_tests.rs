@@ -436,7 +436,7 @@ async fn unknown_email_key_exhaustion_still_allows_legitimate_sign_in(pool: sqlx
         attempt.account(format!("unknown-{n}@example.com")).unwrap();
         attempt.failed();
     }
-    let response = crate::app(state)
+    let response = crate::app(state, Default::default())
         .oneshot(request(
             "/api/v1/session",
             "owner@example.com",

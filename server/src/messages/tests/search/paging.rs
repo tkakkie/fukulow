@@ -82,9 +82,12 @@ async fn search_cursor_expires_when_the_search_engine_restarts(pool: PgPool) {
         1
     );
 
-    let restarted = crate::app_with_search(
+    let restarted = crate::app(
         AppState::with_test_pool(f.pools.app.clone()),
-        SearchEngine::configured(Some("d3r")).unwrap(),
+        crate::ServeOptions {
+            search_engine: SearchEngine::configured(Some("d3r")).unwrap(),
+            ..Default::default()
+        },
     );
     error(
         get(

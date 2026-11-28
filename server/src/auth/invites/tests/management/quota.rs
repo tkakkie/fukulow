@@ -80,7 +80,7 @@ async fn invite_quota_separates_roles_and_organizations(pool: sqlx::PgPool) {
     let (_, admin_id, _, admin) = account(&pool, org, Role::Admin).await;
     let (_, other_issuer, _, other_owner) = account(&pool, other, Role::Owner).await;
     let (_, _, _, other_admin) = account(&pool, other, Role::Admin).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     seed_role(&pool, org, owner_id, Role::Member, 97).await;
     seed_role(&pool, org, owner_id, Role::Guest, 1).await;
     seed_role(&pool, org, admin_id, Role::Admin, 1).await;
@@ -154,7 +154,7 @@ async fn invite_quota_separates_roles_and_organizations(pool: sqlx::PgPool) {
 async fn invite_quota_reuses_capacity_after_acceptance_revocation_and_expiry(pool: sqlx::PgPool) {
     let other = org(&pool).await;
     let (_, _, email, recipient) = account(&pool, other, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     for (role, cap) in [(Role::Member, 100), (Role::Owner, 10)] {
         let org = org(&pool).await;
         let (_, issuer, _, owner) = account(&pool, org, Role::Owner).await;
@@ -202,7 +202,7 @@ async fn organization_with_full_pools(pool: &sqlx::PgPool) -> Uuid {
 async fn assert_role_denial(pool: sqlx::PgPool, actor: Role, target: Role) {
     let org = organization_with_full_pools(&pool).await;
     let (_, _, _, token) = account(&pool, org, actor).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     let before = snapshot(&pool).await;
     denied(
         &pool,
@@ -300,7 +300,7 @@ async fn concurrent_creators_share_the_last_invite_slot_in_each_pool(pool: sqlx:
     let (_, issuer, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, _, _, admin) = account(&pool, org, Role::Admin).await;
     let (_, _, _, other_owner) = account(&pool, org, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     for (role, cap, second_issuer) in [(Role::Member, 100, admin), (Role::Owner, 10, other_owner)] {
         seed_role(&pool, org, issuer, role, cap - 1).await;
         let mut blocker = pool.begin().await.unwrap();
@@ -349,7 +349,7 @@ async fn concurrent_creators_share_the_last_invite_slot_in_each_pool(pool: sqlx:
 async fn above_cap_invites_stay_manageable_until_each_pool_drains(pool: sqlx::PgPool) {
     let other = org(&pool).await;
     let (_, _, email, recipient) = account(&pool, other, Role::Owner).await;
-    let app = crate::app(AppState::for_test(pool.clone()).await);
+    let app = crate::app(AppState::for_test(pool.clone()).await, Default::default());
     for (role, cap) in [(Role::Member, 100), (Role::Owner, 10)] {
         let org = org(&pool).await;
         let (_, issuer, _, owner) = account(&pool, org, Role::Owner).await;

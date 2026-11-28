@@ -112,7 +112,7 @@ async fn nul_channel_name_keeps_authentication_precedence() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
-    let app = crate::app(AppState::with_test_pool(pool.clone()));
+    let app = crate::app(AppState::with_test_pool(pool.clone()), Default::default());
     pool.close().await;
     for credential in [None, Some("invalid")] {
         let mut request = Request::post(format!("/api/v1/orgs/{}/channels", Uuid::new_v4()))

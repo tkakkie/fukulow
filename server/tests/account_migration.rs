@@ -11,8 +11,10 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+mod support;
 #[path = "support/pools.rs"]
 mod test_support;
+use support::app_state;
 
 const MIGRATION: &str = include_str!("../migrations/202611100146_account_members.sql");
 const PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$gy5SuVm5Z7Vw7keB9se9p87QGcomaseB/S2U1OhTsM0";
@@ -100,19 +102,13 @@ async fn account_migration_preserves_single_organization_and_requires_new_sign_i
     );
     let preserved:(Uuid,Uuid)=sqlx::query_as("SELECT m.sender,cm.member_id FROM messages m JOIN channel_members cm USING (organization_id,channel_id) WHERE m.id=$1").bind(message).fetch_one(&pools.admin).await.unwrap();
     assert_eq!(preserved, (member, member));
-    let app = app(AppState {
-        pool: pools.app,
-        cookie_secure: false,
-        setup_token: "setup-token-test-only".into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-        socket_gate: Default::default(),
-    });
+    let app = app(
+        AppState {
+            cookie_secure: false,
+            ..app_state(pools.app)
+        },
+        Default::default(),
+    );
     let response = app
         .clone()
         .oneshot(

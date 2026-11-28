@@ -202,9 +202,12 @@ async fn search_migration_backfills_live_messages_in_each_organization_and_force
     ).fetch_one(&pool).await.unwrap();
     assert_eq!(rls, (true, true));
     let pools = TestPools::new(pool).await;
-    let app = crate::app_with_search(
+    let app = crate::app(
         AppState::with_test_pool(pools.app.clone()),
-        SearchEngine::configured(Some("d3r")).unwrap(),
+        crate::ServeOptions {
+            search_engine: SearchEngine::configured(Some("d3r")).unwrap(),
+            ..Default::default()
+        },
     );
     for (org, token, text, live) in orgs {
         let response = get(&app, org, &token, Some(text), None, None).await;

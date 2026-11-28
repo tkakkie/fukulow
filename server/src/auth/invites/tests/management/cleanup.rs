@@ -190,7 +190,7 @@ async fn cleanup_racing_acceptance_keeps_member_changes_atomic(pool: sqlx::PgPoo
     let (_, _, _, owner) = account(&pool, org, Role::Owner).await;
     let (recipient, _, email, token) = account(&pool, other, Role::Member).await;
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let url = format!("{}/accept", path(org));
     let membership = || {
         sqlx::query_scalar::<_, Value>(
@@ -281,7 +281,7 @@ async fn cleanup_preserves_owner_and_admin_pages_through_expired_and_revoked_anc
     pool: sqlx::PgPool,
 ) {
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     for role in [Role::Owner, Role::Admin] {
         for column in ["expires_at", "revoked_at"] {
             let org = org(&pool).await;
@@ -325,7 +325,7 @@ async fn tombstone_cursors_keep_uniform_organization_and_role_denials(pool: sqlx
     let (_, _, _, foreign_owner) = account(&pool, other, Role::Owner).await;
     let (_, _, _, foreign_admin) = account(&pool, other, Role::Admin).await;
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     seed(&pool, org, issuer, 101, false).await;
     let owner_page = page(&app, org, &owner, None).await;
     let admin_page = page(&app, org, &admin, None).await;
@@ -408,7 +408,7 @@ async fn failed_cleanup_rolls_back_logs_and_retries_without_blocking_invite_writ
          CREATE TRIGGER fail_cleanup AFTER DELETE ON invites FOR EACH ROW EXECUTE FUNCTION reject_invite_cleanup();"
     )).execute(&pool).await.unwrap();
     let state = AppState::for_test(pool.clone()).await;
-    let app = crate::app(state.clone());
+    let app = crate::app(state.clone(), Default::default());
     let output = Capture::default();
     let (stop, cancelled) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(
