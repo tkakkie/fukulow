@@ -4,7 +4,7 @@
   import { tick } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
-  import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
+  import { resolveRovingMessageId } from './composer-keys'
   import Composer from './Composer.svelte'
   import VirtualRows from './ui/VirtualRows.svelte'
   import {
@@ -17,13 +17,10 @@
   import { type RepliesAdapter } from './replies.svelte'
   import { topicNameError, type ChannelSync } from './sync.svelte'
   import {
-    applyTimelineScrollAction,
     createTimelineScrollController,
     handleTimelineContainerScroll,
-    measureTimelineItems,
-    type ScrollAction,
-    type ScrollAnchor,
   } from './timeline-scroll'
+  import { createTimelineViewController, type TimelineRowWindow } from './timeline-view'
   import type { TopicsAdapter } from './topics.svelte'
   import Button from './ui/Button.svelte'
   import ChannelUnavailableBanner from './ui/ChannelUnavailableBanner.svelte'
@@ -507,7 +504,7 @@
           : 'ready',
   )
 
-  let rowWindow = $state<{ reveal(id: string, focus?: boolean, align?: 'start' | 'end'): Promise<void> } | null>(null)
+  let rowWindow = $state<TimelineRowWindow | null>(null)
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
@@ -515,41 +512,30 @@
   let mountedIds = $state<string[]>([])
   const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds.filter(id => mountedIds.includes(id)), activeRowId))
 
-  async function focusMessage(id: string | undefined) {
-    if (!id) return
-    activeRowId = id
-    await rowWindow?.reveal(id, true)
-  }
-  function handleRowKeydown(e: KeyboardEvent) {
-    const id = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-message-id]')?.getAttribute('data-message-id')
-    const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
-    if (next === null) return
-    e.preventDefault()
-    void focusMessage(focusableMessageIds[next]).catch(console.error)
-  }
-  async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
-    const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
-    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
-  }
-
-  function captureCurrentAnchor() {
-    if (!scrollEl) return
-    scrollController.captureAnchor(measureTimelineItems(scrollEl))
-  }
+  // ReplyPanel omits `getPresentation` so reply chains never report read positions (`docs/ui.md` §8).
+  const {
+    focusMessage,
+    handleRowKeydown,
+    captureCurrentAnchor,
+    applyScrollAction,
+    jumpToBottom,
+  } = createTimelineViewController({
+    scrollController,
+    getScrollEl: () => scrollEl,
+    getRowWindow: () => rowWindow,
+    getFocusableMessageIds: () => focusableMessageIds,
+    setActiveRowId: (id) => {
+      activeRowId = id
+    },
+    afterUpdate: tick,
+    revealBeforeApply: false,
+    hasNewer: () => rState.hasNewer,
+    loadLatest: () => replies.loadLatest(),
+  })
 
   function handleScroll() {
     handleTimelineContainerScroll(scrollEl, scrollController)
     replies.setPinned(scrollController.get().pinned)
-  }
-
-  function applyScrollAction(action: ScrollAction, anchor: ScrollAnchor | null) {
-    applyTimelineScrollAction(scrollEl, scrollController, action, anchor)
-  }
-
-  async function jumpToBottom() {
-    if (rState.hasNewer) { await replies.loadLatest(); await tick() }
-    const action = scrollController.jumpToBottom()
-    applyScrollAction(action, null)
   }
 
   $effect(() => {

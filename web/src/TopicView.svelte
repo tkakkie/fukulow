@@ -4,7 +4,7 @@
   import { onMount, tick, untrack } from 'svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import type { Message } from './api'
-  import { resolveRovingMessageId, stepMessageRowIndex } from './composer-keys'
+  import { resolveRovingMessageId } from './composer-keys'
   import Composer from './Composer.svelte'
   import VirtualRows from './ui/VirtualRows.svelte'
   import {
@@ -20,11 +20,14 @@
     createTimelineScrollController,
     handleTimelineContainerScroll,
     isTimelineDisplayed,
-    measureTimelineItems,
-    measureVisibleConfirmedSeqs,
     type ScrollAction,
     type ScrollAnchor,
   } from './timeline-scroll'
+  import {
+    createTimelineViewController,
+    isDocumentVisible,
+    type TimelineRowWindow,
+  } from './timeline-view'
   import type { TopicsAdapter } from './topics.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
   import type { UnreadAdapter } from './unread.svelte'
@@ -183,7 +186,7 @@
     return scrollController.get()
   })
 
-  let rowWindow = $state<{ reveal(id: string, focus?: boolean, align?: 'start' | 'end'): Promise<void> } | null>(null)
+  let rowWindow = $state<TimelineRowWindow | null>(null)
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
@@ -199,97 +202,66 @@
   let mountedIds = $state<string[]>([])
   const rovingRowId = $derived(resolveRovingMessageId(focusableMessageIds.filter(id => mountedIds.includes(id)), activeRowId))
 
-  function isDocumentVisible(): boolean {
-    if (typeof document === 'undefined') return true
-    return (document.visibilityState ?? 'visible') === 'visible'
-  }
-
-  function reportPresented() {
-    if (awaitingInitialSenders || !unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
-    if (!isDocumentVisible()) return
-    const currentEntry = uState?.entry
-    if (!currentEntry || currentEntry.scope.topicId !== topicId) return
-    if (search) {
-      if (!initialScrollApplied || search.view?.status !== 'ready') return
-    } else if (!skipUnreadVisit) {
-      if (currentEntry.boundary === null || needsOlderUnreadPage) return
-      // A visit that opened at the bottom without a marker presents what is visible, as with no Unread.
-      if ((currentEntry.unreadAtEntry ?? 0) > 0 && !entryPositionAbandoned) {
-        if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
-      } else if (!initialScrollApplied) {
-        return
-      }
-    }
-    const seqs = measureVisibleConfirmedSeqs(scrollEl!)
-    if (seqs.length > 0) {
-      unread.presented(currentEntry.id, seqs)
-    }
-  }
-
-  async function focusMessage(id: string | undefined) {
-    // Hidden rows cannot take focus, and revealing one would scroll the list positioning still owns.
-    if (!id || positioning) return
-    activeRowId = id
-    await rowWindow?.reveal(id, true)
-  }
-  function handleRowKeydown(e: KeyboardEvent) {
-    const id = (e.currentTarget as HTMLElement).closest<HTMLElement>('[data-message-id]')?.getAttribute('data-message-id')
-    const next = stepMessageRowIndex(focusableMessageIds.indexOf(id ?? ''), focusableMessageIds.length, e)
-    if (next === null) return
-    e.preventDefault()
-    void focusMessage(focusableMessageIds[next]).catch(console.error)
-  }
-  async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
-    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
-    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
-  }
-
-  function captureCurrentAnchor() {
-    if (!scrollEl) return
-    scrollController.captureAnchor(measureTimelineItems(scrollEl))
-  }
+  const {
+    reportPresented,
+    focusMessage,
+    handleRowKeydown,
+    revealScrollTarget,
+    captureCurrentAnchor,
+    applyScrollAction,
+    jumpToBottom,
+    loadOlderWithAnchor,
+  } = createTimelineViewController({
+    scrollController,
+    getScrollEl: () => scrollEl,
+    getRowWindow: () => rowWindow,
+    getFocusableMessageIds: () => focusableMessageIds,
+    setActiveRowId: (id) => {
+      activeRowId = id
+    },
+    afterUpdate: tick,
+    isPositioning: () => positioning,
+    getPresentation: () =>
+      unread
+        ? {
+            awaitingInitialSenders,
+            viewSelected,
+            targetUnavailable,
+            expectedTopicId: topicId,
+            entry: uState?.entry ?? null,
+            searchActive: Boolean(search),
+            searchReady: search?.view?.status === 'ready',
+            initialScrollApplied,
+            skipUnreadVisit,
+            needsOlderUnreadPage,
+            entryPositionAbandoned,
+            firstUnreadMessageId,
+            scrolledFirstUnreadId,
+            onPresented: (visitId, seqs) => unread.presented(visitId, seqs),
+          }
+        : null,
+    search: {
+      isActive: () => Boolean(search),
+      jumpToLatest: () => {
+        skipUnreadVisit = true
+        search?.latest()
+      },
+      loadOlder: () => {
+        void search?.loadOlder()
+      },
+    },
+    hasNewer: () => Boolean(view.hasNewer),
+    loadLatest: () => topics.loadTopicLatest(topicId),
+    loadOlder: () => {
+      void topics.loadTopic(topicId).catch(console.error)
+    },
+  })
 
   function handleScroll() {
     if (awaitingInitialSenders) return
     handleTimelineContainerScroll(scrollEl, scrollController)
     topics.setTopicPinned(topicId, scrollController.get().pinned)
     reportPresented()
-  }
-
-  function applyScrollAction(
-    action: ScrollAction,
-    anchor: ScrollAnchor | null,
-    firstUnreadId?: string | null,
-  ) {
-    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
-    if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) {
-      void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
-        applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
-        reportPresented()
-      }).catch(console.error)
-    } else applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
-  }
-
-  async function jumpToBottom() {
-    if (search) {
-      skipUnreadVisit = true
-      search.latest()
-      await tick()
-      if (search) return
-      await topics.loadTopicLatest(topicId)
-      await tick()
-      if (search) return
-    }
-    if (view.hasNewer) { await topics.loadTopicLatest(topicId); await tick() }
-    const action = scrollController.jumpToBottom()
-    applyScrollAction(action, null)
-    reportPresented()
-  }
-
-  function loadOlderWithAnchor() {
-    captureCurrentAnchor()
-    if (search) void search.loadOlder()
-    else void topics.loadTopic(topicId).catch(console.error)
   }
 
   function retryInitial() {
