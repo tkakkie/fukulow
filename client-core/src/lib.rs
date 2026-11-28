@@ -5,6 +5,7 @@ mod engine;
 mod merge;
 pub mod reply_counts;
 mod responses;
+mod retention;
 mod sends;
 #[cfg(test)]
 mod test_support;
