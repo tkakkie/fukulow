@@ -110,13 +110,14 @@ export function createSession(options: SessionOptions) {
   const activity = createActivity({
     kind: id => isDm(id) ? 'dm' : channels.isOrdinary(id) ? 'channel' : undefined,
     watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
-    covered: (notice, target) => {
-      if (notice.type === 'channel_activity') return (unread.get(notice.channel_id).asOfSeq ?? -1) >= notice.seq
-      if (notice.type !== 'read_position_changed') return false
-      if ((target === 'channels' || target === 'dms')) return notice.topic_id === null && unread.activityMainCoverage(notice.channel_id) >= notice.read_seq
-      if (notice.topic_id !== null) return unread.activityTopicCoverage(notice.channel_id, notice.topic_id) >= notice.read_seq
-      return false
-    },
+    connectionEpoch: () => sync.get().connection,
+    lifetime: accessLifetime,
+    watermark: id => unread.activityWatermark(id),
+    mainReadSeq: id => unread.activityMainCoverage(id),
+    topicReadSeq: (id, topic) => unread.activityTopicCoverage(id, topic),
+    // Subscribe rechecks Channel access (C9) and Organization Membership (C10) after the startup snapshot.
+    ready: () => { dms?.ready(); sections.ready() },
+    read: notice => unread.activityRead(notice.channel_id, notice.topic_id, notice.read_seq, true),
     revoke: id => {
       options.initialTimeline?.discard(id)
       sections.hideChannel(id); dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable()
@@ -313,14 +314,7 @@ export function createSession(options: SessionOptions) {
     channels.selectHint(id)
     if (same && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
   }, random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs })
-  const stopActivity = sync.onActivity(notice => {
-    // Subscribe rechecks Channel access (C9) and Organization Membership (C10) after the startup snapshot.
-    if (notice.type === 'activity_ready') { dms?.ready(); sections.ready() }
-    if (notice.type === 'read_position_changed') {
-      unread.activityRead(notice.channel_id, notice.topic_id, notice.read_seq, true)
-    }
-    activity.notice(notice)
-  })
+  const stopActivity = sync.onActivity(activity.notice)
   function retireOrganization() {
     if (closed || unavailable) return false
     unavailable = true
