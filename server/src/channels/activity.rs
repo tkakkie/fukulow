@@ -1,10 +1,10 @@
 //! Organization notices are invalidations, never Message delivery or authorization grants.
 use super::*;
+use crate::lock_ignoring_poison;
 use crate::observability::{notice_permits::NoticeCaller, revocation_trace};
-use crate::{get_mut_ignoring_poison, lock_ignoring_poison};
 use auth::activity::ChangeScope;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
@@ -15,16 +15,23 @@ use tokio::{
     sync::{Notify, Semaphore},
     time::Instant,
 };
+mod buffer;
 mod dms;
 mod fallback_trace;
 mod holds;
 mod notice_budget;
 mod revocations;
+#[cfg(test)]
+mod test_hooks;
+use buffer::{Buffer, Epoch, InFlight, Pending, Proof, QueryToken, Recovery, enqueue};
 pub(crate) use dms::DmPublication;
-use holds::Holds;
 pub(crate) use holds::revocation_hold_counts;
 use notice_budget::{NoticeBudget, NoticePermit, notice_query_slot};
 use revocations::{Capture, Check, Revocations};
+#[cfg(test)]
+use test_hooks::test_fault;
+#[cfg(test)]
+pub(crate) use test_hooks::{TestFault, fail, pause, pause_member, test_pause};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -93,155 +100,10 @@ impl Notice {
         )
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Proof {
-    role: Role,
-    grant: Option<Uuid>,
-}
-#[derive(Default)]
-struct Recovery {
-    state: Mutex<RecoveryState>,
-}
-#[derive(Default)]
-struct RecoveryState {
-    live: usize,
-    settled: bool,
-}
-impl Recovery {
-    fn valid(&self) -> bool {
-        let state = lock_ignoring_poison(&self.state);
-        state.settled || state.live != 0
-    }
-}
-struct QueryToken {
-    valid: AtomicBool,
-    recovery: Mutex<Option<Arc<Recovery>>>,
-}
-impl QueryToken {
-    fn new() -> Self {
-        Self {
-            valid: AtomicBool::new(true),
-            recovery: Mutex::new(None),
-        }
-    }
-    fn valid(&self) -> bool {
-        self.valid.load(Ordering::Relaxed)
-    }
-    fn contribute(&self, recovery: &Arc<Recovery>) {
-        // Each recipient query enqueues one contribution. Coalescing attaches its
-        // token once; subsequent merges keep the same recovery accumulator.
-        let mut contribution = lock_ignoring_poison(&self.recovery);
-        if contribution.is_none() && self.valid() {
-            lock_ignoring_poison(&recovery.state).live += 1;
-            *contribution = Some(recovery.clone());
-        }
-    }
-    fn retire(&self) {
-        let contribution = lock_ignoring_poison(&self.recovery);
-        if self.valid.swap(false, Ordering::Relaxed)
-            && let Some(recovery) = contribution.as_ref()
-        {
-            lock_ignoring_poison(&recovery.state).live -= 1;
-        }
-    }
-}
-impl Drop for QueryToken {
-    fn drop(&mut self) {
-        if self.valid()
-            && let Some(recovery) = get_mut_ignoring_poison(&mut self.recovery).as_ref()
-        {
-            // No query guard, fallback snapshot or frame can fence this token
-            // after its last owner drops. Retain its reset authority as one bit,
-            // rather than retaining a growing list of completed query tokens.
-            let mut state = lock_ignoring_poison(&recovery.state);
-            state.settled = true;
-            state.live -= 1;
-        }
-    }
-}
-#[derive(Clone)]
-enum Epoch {
-    Notice(u64),
-    Revocation(Arc<Capture>),
-}
-impl Epoch {
-    fn retained(&self, b: &Buffer) -> bool {
-        match self {
-            Self::Notice(epoch) => b.epoch == *epoch,
-            Self::Revocation(capture) => capture.check().is_some(),
-        }
-    }
-}
-#[cfg_attr(test, derive(Clone))]
-struct Pending {
-    notice: Notice,
-    // Payload-free DM invalidations still retain the causing access lifetime.
-    channel: Option<Uuid>,
-    epoch: Epoch,
-    directory_epoch: Option<u64>,
-    proof: Option<Proof>,
-    valid: Arc<QueryToken>,
-    recovery: Option<Arc<Recovery>>,
-}
-impl Pending {
-    fn recoverable(&self) -> bool {
-        self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid())
-    }
-}
-struct InFlight {
-    channel: Option<Uuid>,
-    proof: Option<Proof>,
-    valid: Arc<QueryToken>,
-}
-#[derive(Default)]
-struct Buffer {
-    epoch: u64,
-    revocations: Revocations,
-    holds: Holds,
-    directory_epoch: u64,
-    pending: VecDeque<Pending>,
-    reset: bool,
-    proofs: HashMap<Option<Uuid>, Proof>,
-    in_flight: HashMap<Uuid, InFlight>,
-}
 enum Retirement<'a> {
     Notices,
     Mutation(&'a HashMap<Uuid, Capture>),
     MembershipLost(i64),
-}
-impl Buffer {
-    fn retire_notices(&mut self) {
-        self.holds.prune(&self.revocations, Instant::now());
-        self.epoch = self.epoch.wrapping_add(1);
-        let mut pending = std::mem::take(&mut self.pending);
-        pending.retain(|p| p.epoch.retained(self));
-        self.pending = pending;
-        self.in_flight.clear();
-        self.proofs.clear();
-        self.reset &= !self.pending.is_empty();
-    }
-
-    fn apply_revocation(&mut self, check: Check, identity: Option<&Proof>, access: Option<bool>) {
-        // A fallback or publication can still fence a hold. Only its scheduled
-        // handoff recheck can supply authority to deliver it.
-        let access =
-            access.filter(|&accessible| accessible || self.holds.deadline(check.id).is_none());
-        self.apply_revocation_proof(check, identity, access);
-    }
-
-    fn apply_revocation_proof(
-        &mut self,
-        check: Check,
-        identity: Option<&Proof>,
-        access: Option<bool>,
-    ) {
-        if self
-            .revocations
-            .apply(check, identity.map(|proof| proof.role), access)
-        {
-            self.retire_notices();
-        }
-    }
 }
 struct Authorization {
     entry: Arc<Entry>,
@@ -397,19 +259,6 @@ impl Drop for Registration {
     }
 }
 impl Activity {
-    #[cfg(test)]
-    pub(crate) async fn drained(&self) {
-        self.drained_except(0).await;
-    }
-    #[cfg(test)]
-    pub(crate) async fn drained_except(&self, active: u32) {
-        let _permits = self
-            .capacity
-            .clone()
-            .acquire_many_owned(40 - active)
-            .await
-            .unwrap();
-    }
     pub(crate) fn register(&self, auth: &Auth) -> Registration {
         let id = Uuid::new_v4();
         let entry = Arc::new(Entry {
@@ -802,96 +651,7 @@ impl SectionsPublication {
         );
     }
 }
-fn enqueue(entry: &Entry, mut pending: Pending) {
-    let mut b = lock_ignoring_poison(&entry.buffer);
-    if !pending.valid.valid()
-        || !pending.epoch.retained(&b)
-        || pending
-            .directory_epoch
-            .is_some_and(|epoch| b.directory_epoch != epoch)
-    {
-        return;
-    }
-    b.pending.retain(Pending::recoverable);
-    if b.pending.is_empty() {
-        b.reset = false;
-    }
-    let channel = pending.channel;
-    if let Some(proof) = &pending.proof {
-        let conflict = b.proofs.get(&channel).is_some_and(|old| old != proof);
-        let identity_changed = channel.is_none() && b.revocations.observe_identity(proof.role);
-        if conflict
-            || identity_changed
-            || (b.proofs.len() == 256 && !b.proofs.contains_key(&channel))
-        {
-            b.retire_notices();
-            return;
-        }
-        b.proofs.insert(channel, proof.clone());
-    }
-    if matches!(
-        pending.notice,
-        Notice::ChannelAccessGained { .. } | Notice::ChannelAccessRevoked { .. }
-    ) && let Some(index) = b
-        .pending
-        .iter()
-        .position(|p| p.notice.key() == pending.notice.key())
-    {
-        b.pending.remove(index);
-        b.pending.push_back(pending);
-        entry.wake.notify_one();
-        return;
-    }
-    if let Some(old) = b.pending.iter_mut().find(|p| {
-        p.notice.key() == pending.notice.key()
-            && (!matches!(pending.notice, Notice::ChannelListChanged) || p.channel == channel)
-    }) {
-        let recovery = old.recovery.get_or_insert_with(Default::default).clone();
-        old.valid.contribute(&recovery);
-        pending.valid.contribute(&recovery);
-        pending.recovery = Some(recovery);
-        match (&mut old.notice, &pending.notice) {
-            (Notice::ChannelActivity { seq, .. }, Notice::ChannelActivity { seq: new, .. })
-                if *seq >= *new => {}
-            (
-                Notice::ReadPositionChanged { read_seq, .. },
-                Notice::ReadPositionChanged { read_seq: new, .. },
-            ) if *read_seq >= *new => {}
-            (
-                Notice::SectionsChanged { generation },
-                Notice::SectionsChanged { generation: new },
-            ) if *generation >= *new => {}
-            _ => *old = pending,
-        }
-    } else if b.pending.len() == 256 {
-        // Retain one proven contribution. Its lifetime is rechecked before reset handoff.
-        b.pending.clear();
-        b.reset = true;
-        b.pending.push_back(pending);
-    } else if !b.reset {
-        b.pending.push_back(pending);
-    }
-    entry.wake.notify_one();
-}
 impl Registration {
-    #[cfg(test)]
-    pub(crate) fn isolate_revocation_metrics(
-        &self,
-    ) -> Arc<crate::observability::RevocationMetrics> {
-        self.entry.buffer.lock().unwrap().holds.isolate_metrics()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn buffered(&self, notice: &Notice) -> bool {
-        let b = self.entry.buffer.lock().unwrap();
-        b.pending.iter().any(|pending| &pending.notice == notice)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn revocation_tracking(&self) -> (usize, usize) {
-        self.entry.buffer.lock().unwrap().revocations.counts()
-    }
-
     pub(crate) async fn next(&self) -> Option<NoticeFrame> {
         loop {
             let notified = self.entry.wake.notified();
@@ -1944,41 +1704,6 @@ impl Drop for BatchLease {
 }
 
 #[cfg(test)]
-use crate::test_support::{Gate, Gates};
-
-#[cfg(test)]
-type ActivityGateKey = (Uuid, Uuid, &'static str, Option<Uuid>);
-#[cfg(test)]
-static TEST_GATES: Gates<ActivityGateKey> = Gates::new();
-#[cfg(test)]
-pub(crate) fn pause(organization: Uuid, channel: Uuid, phase: &'static str) -> Arc<Gate> {
-    pause_member(organization, channel, phase, None)
-}
-#[cfg(test)]
-pub(crate) fn pause_member(
-    organization: Uuid,
-    channel: Uuid,
-    phase: &'static str,
-    member: Option<Uuid>,
-) -> Arc<Gate> {
-    TEST_GATES.register((organization, channel, phase, member))
-}
-#[cfg(test)]
-pub(crate) async fn test_pause(
-    organization: Uuid,
-    channel: Uuid,
-    phase: &'static str,
-    member: Option<Uuid>,
-) {
-    // Independent socket gates must not replace each other at the same boundary.
-    TEST_GATES
-        .pause_with_fallback(
-            (organization, channel, phase, member),
-            (organization, channel, phase, None),
-        )
-        .await;
-}
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2695,11 +2420,10 @@ mod tests {
             assert_eq!(buffer.proofs.len(), 1);
             let pending = buffer.pending.front().unwrap();
             let recovery = pending.recovery.as_ref().unwrap();
-            let state = recovery.state.lock().unwrap();
-            assert!(state.settled);
-            assert_eq!(state.live, 1);
+            let (live, settled) = recovery.snapshot();
+            assert!(settled);
+            assert_eq!(live, 1);
             assert_eq!(Arc::strong_count(recovery), 2);
-            drop(state);
             pending.valid.retire();
         }
         // A later smaller value must not hide recovery for an earlier valid
@@ -2740,46 +2464,5 @@ mod tests {
             assert_eq!(senders.eligible(third), Some(3));
             assert!(senders.senders.len() <= 2);
         }
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy)]
-pub(crate) enum TestFault {
-    Database,
-    Panic,
-}
-#[cfg(test)]
-static TEST_FAULTS: std::sync::LazyLock<Mutex<HashMap<(Uuid, Uuid), TestFault>>> =
-    std::sync::LazyLock::new(Mutex::default);
-#[cfg(test)]
-pub(crate) fn fail(organization: Uuid, channel: Uuid, fault: TestFault) {
-    TEST_FAULTS
-        .lock()
-        .unwrap()
-        .insert((organization, channel), fault);
-}
-#[cfg(test)]
-fn test_fault(organization: Uuid, channel: Uuid) -> Result<(), sqlx::Error> {
-    let fault = TEST_FAULTS.lock().unwrap().remove(&(organization, channel));
-    match fault {
-        Some(TestFault::Database) => Err(sqlx::Error::PoolClosed),
-        Some(TestFault::Panic) => panic!("injected notice publisher panic"),
-        None => Ok(()),
-    }
-}
-#[cfg(test)]
-impl Activity {
-    pub(crate) async fn saturate(&self) -> tokio::sync::OwnedSemaphorePermit {
-        self.capacity.clone().acquire_many_owned(40).await.unwrap()
-    }
-    // One abort handle per key: this aborts the most recent spawn for (organization, channel).
-    pub(crate) fn cancel(&self, organization: Uuid, channel: Uuid) {
-        self.tasks
-            .lock()
-            .unwrap()
-            .remove(&(organization, channel))
-            .unwrap()
-            .abort();
     }
 }
