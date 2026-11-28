@@ -85,7 +85,8 @@ const safe = <T>(f: () => T) => { try { return f(); } catch { return null; } };
 const signalled = new AbortController();
 const result = await launch(queue, {
   platform: currentPlatform(), exec, spawn: run, captureLogs,
-  exists: existsSync, claim, remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
+  exists: existsSync, read: p => safe(() => readFileSync(p, 'utf8')), claim,
+  remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
   freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
   nodeVersion: process.version, pid: process.pid, sessionId: randomUUID, now: () => new Date(), mono: () => performance.now(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
   pause: ms => sleep(ms),
