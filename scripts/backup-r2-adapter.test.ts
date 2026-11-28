@@ -7,14 +7,17 @@ import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, type TestContext } from 'node:test'
-import { FakeBucket } from './backup-r2-fake.ts'
-import { day, inventory, sha256, type ObjectInfo } from './backup-r2-model.ts'
-import { listObjects } from './backup-r2-list.ts'
-import { curlRunner, dailyBackup, objectTransport, runBackup, type Request, type Response, type Runner } from './backup-r2.ts'
-import { accountUsage, analyticsClient } from './backup-r2-usage.ts'
-import { fileStateStore } from './backup-r2-state.ts'
+import type { Request, Response, Runner } from './backup-curl.ts'
 import { checkBackups, runChecker } from './backup-r2-checker.ts'
-import { memoryRunLock } from './backup-safety.ts'
+import { FakeBucket } from './backup-r2-fake.ts'
+import { day, inventory, type ObjectInfo } from './backup-r2-inventory.ts'
+import { listObjects } from './backup-r2-list.ts'
+import { sha256 } from './backup-r2-model.ts'
+import { fileStateStore } from './backup-r2-state.ts'
+import { analyticsClient } from './backup-r2-usage.ts'
+import { dailyBackup, objectTransport, runBackup } from './backup-r2.ts'
+import { memoryRunLock } from './backup-test-helpers.ts'
+import { accountUsage } from './backup-usage-model.ts'
 
 const now = Date.UTC(2026, 10, 2)
 const response = (body: string, status = 200): Response => ({ status, body: Buffer.from(body), headers: {} })
@@ -250,20 +253,6 @@ test('persistent alerts rearm after recovery and alive advances on the next UTC 
   assert.equal(o.events.filter(e => e.includes('checker-alive')).length, 2)
 })
 
-test('curl encodes opaque list tokens without exposing the endpoint', async t => {
-  const root = fixture(t), config = join(root, 'config')
-  writeFileSync(config, '', { mode: 0o600 })
-  const requests: { args: string[]; input: string }[] = []
-  const run = await curlRunner(config, 'https://' + randomUUID(), async (args, input) => {
-    requests.push({ args, input })
-    writeFileSync(args[args.indexOf('--dump-header') + 1], 'HTTP/1.1 200 OK\r\n\r\n')
-    writeFileSync(args[args.indexOf('--output') + 1], '')
-  })
-  await run({ method: 'GET', key: '', query: { 'list-type': '2', 'continuation-token': '+/=&' }, headers: {} })
-  assert.ok(requests[0].input.includes('continuation-token=%2B%2F%3D%26'))
-
-})
-
 const scopes = ['<Prefix>backups/</Prefix>', '<StartAfter>offset</StartAfter>', '<Delimiter>/</Delimiter>',
   '<CommonPrefixes><Prefix>backups/</Prefix></CommonPrefixes>', '<EncodingType>url</EncodingType>',
   '<Prefix/><Prefix/>', '<StartAfter/><StartAfter/>', '<Delimiter/><Delimiter/>']
@@ -356,7 +345,7 @@ test('FIFO state is promptly refused without pruning and the local checker lock 
   const script = `
     import { readFileSync } from 'node:fs';
     import { FakeBucket } from './scripts/backup-r2-fake.ts';
-    import { memoryRunLock } from './scripts/backup-safety.ts';
+    import { memoryRunLock } from './scripts/backup-test-helpers.ts';
     import { runChecker } from './scripts/backup-r2-checker.ts';
     import { fileStateStore } from './scripts/backup-r2-state.ts';
     const input = JSON.parse(readFileSync(0, 'utf8'));

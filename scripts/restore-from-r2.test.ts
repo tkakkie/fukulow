@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fakeS3 } from './backup-r2-fake.ts'
-import { sha256, inventory } from './backup-r2-model.ts'
-import { objectTransport, publish } from './backup-r2.ts'
+import { inventory } from './backup-r2-inventory.ts'
+import { sha256 } from './backup-r2-model.ts'
+import { publish } from './backup-r2-publish.ts'
+import { objectTransport } from './backup-r2.ts'
 import { restoreFromR2 } from './restore-from-r2.ts'
 
 const now = Date.now()

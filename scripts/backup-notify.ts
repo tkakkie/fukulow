@@ -2,10 +2,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
-import { executeCurl, readPrivateFile } from './backup-r2.ts'
+import { executeCurl, readPrivateFile } from './backup-curl.ts'
 import { notificationText } from './backup-notification-text.ts'
 import { defaultRetryDelayMs, discordAttempts, discordOutcome, retryAfterDelayMs } from './backup-discord-retry.ts'
-export { notificationText } from './backup-notification-text.ts'
 
 export async function discordNotifier(configFile: string, execute = executeCurl,
   pause: (ms: number) => Promise<unknown> = setTimeout) {

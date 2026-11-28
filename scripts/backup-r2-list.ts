@@ -1,5 +1,5 @@
-import type { ObjectInfo } from './backup-r2-model.ts'
-import type { Runner } from './backup-r2.ts'
+import type { Runner } from './backup-curl.ts'
+import type { ObjectInfo } from './backup-r2-inventory.ts'
 
 interface Element { name: string; text: string; children: Element[] }
 function xml(body: Buffer): Element {

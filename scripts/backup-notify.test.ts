@@ -3,8 +3,9 @@ import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, type TestContext } from 'node:test'
-import { discordNotifier, notificationText } from './backup-notify.ts'
-import { checkerAlerts } from './backup-r2-state.ts'
+import { checkerAlerts } from './backup-checker-state.ts'
+import { notificationText } from './backup-notification-text.ts'
+import { discordNotifier } from './backup-notify.ts'
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'notify-test-')), config = join(root, 'config')
