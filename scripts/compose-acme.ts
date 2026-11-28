@@ -4,7 +4,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { checkServerIdentity, connect } from 'node:tls'
 import { fileURLToPath } from 'node:url'
-import { setTimeout } from 'node:timers/promises'
+import { nodeImage, poll } from './compose-harness.ts'
+
+export { nodeImage, poll } from './compose-harness.ts'
 
 export const pebbleImage = 'ghcr.io/letsencrypt/pebble:2.8.0@sha256:d9080f68f6cb6af8d82134ab26de0aaaf312ac9cba42aecc6d3aede6cb63007b'
 export const testDomain = 'fukulow.test'
@@ -19,21 +21,6 @@ export function buildRenewalPebble(directory: string, run: (args: string[]) => s
     '-f', fileURLToPath(new URL('./compose-acme-pebble.Dockerfile', import.meta.url)), context])
   return renewalPebbleImage
 }
-export const nodeImage = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8').match(/^FROM (node:\S+) AS web$/m)?.[1] ?? ''
-assert.match(nodeImage, /^node:\d+\.\d+\.\d+-slim@sha256:[a-f0-9]{64}$/, 'reuse the pinned Node toolchain image')
-
-// Only transient connection failures are polled. Assertions/configuration failures
-// propagate immediately. The interval bounds observation load, not assertions.
-export async function poll<T>(label: string, observe: () => Promise<T> | T, accept: (value: T) => boolean, milliseconds = 120_000): Promise<T> {
-  const deadline = Date.now() + milliseconds
-  while (Date.now() < deadline) {
-    const value = await observe()
-    if (accept(value)) return value
-    await setTimeout(250)
-  }
-  throw new Error(`${label}: observable state did not converge within ${milliseconds}ms`)
-}
-
 // `proxies` adds every listed proxy's fixture block; `profile` owns the ACME directory.
 export function acmeFixture(directory: string, profile: string, run: (args: string[]) => string,
   { proxies = [profile], validity = 600, ca = pebbleImage }: { proxies?: string[], validity?: number, ca?: string } = {}): string {
