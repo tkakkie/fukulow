@@ -1,5 +1,6 @@
 //! Thin binding over the typed sync boundary.
 use crate::{boundary_delta::Boundary, *};
+use serde::{Deserialize, de::value::StrDeserializer};
 use wasm_bindgen::prelude::*;
 
 fn error(error: impl std::fmt::Display) -> JsValue {
@@ -25,6 +26,13 @@ impl WasmCore {
     }
     pub fn timer(&self, id: f64) -> Result<String, JsValue> {
         serde_json::to_string(&self.0.core.timer(id as i64)).map_err(error)
+    }
+    #[wasm_bindgen(js_name = syncDelay)]
+    pub fn sync_delay(purpose: &str, attempt: f64, draw_or_ms: f64) -> Result<f64, JsValue> {
+        let purpose =
+            Purpose::deserialize(StrDeserializer::<serde::de::value::Error>::new(purpose))
+                .map_err(error)?;
+        Ok(sync_delay(purpose, attempt as u64, draw_or_ms))
     }
     #[wasm_bindgen(js_name = hasPending)]
     pub fn has_pending(&self) -> bool {
