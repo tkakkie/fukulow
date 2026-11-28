@@ -12,6 +12,9 @@ const DEBOUNCE_MS: u16 = 200;
 pub enum ActivityChannelKind {
     Channel,
     Dm,
+    // An unrecognised kind still counts as a present value.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -36,13 +39,18 @@ pub enum ActivityNotice {
     ActivityReset,
     SectionsChanged,
     ChannelActivity(i64),
-    ReadPositionChanged { read_seq: i64, topic: bool },
+    ReadPositionChanged {
+        read_seq: i64,
+        topic: bool,
+    },
     ChannelAccessRevoked,
     ChannelAccessGained,
     DmListChanged,
     ChannelListChanged,
     ChannelMembersChanged,
     MembersChanged,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +283,7 @@ impl ActivityRouting {
             ActivityNotice::MembersChanged => {
                 effects.extend([invalidate(Capabilities, Access, None), member_lists()]);
             }
+            ActivityNotice::Other => {}
         }
         effects
     }

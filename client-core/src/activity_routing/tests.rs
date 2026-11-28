@@ -85,6 +85,15 @@ fn tick(generation: Token) -> ActivityInput {
 }
 
 #[test]
+fn unrecognised_notice_type_has_no_effects() {
+    let input = serde_json::from_str(
+        r#"{"notice":{"event":"future_notice","connection":7,"current_connection":7}}"#,
+    )
+    .unwrap();
+    assert!(route(input).is_empty());
+}
+
+#[test]
 fn stale_socket_epoch_cannot_route_notices_or_ticks() {
     let denied = ActivityInput::Notice {
         event: ActivityNotice::ChannelAccessRevoked,

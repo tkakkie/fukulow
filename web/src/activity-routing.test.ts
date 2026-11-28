@@ -73,6 +73,13 @@ it('matches the pre-Slice F TypeScript routes across kind, watch and per-target 
   }
 })
 
+it('ignores an unrecognised notice type', () => {
+  const notice = { type: 'future_notice', channel_id: 'c' } as unknown as ActivityNotice
+  const run = (activity: ReturnType<typeof createActivityReference>) => activity.notice(notice)
+  const options = { watched: () => false }
+  expect(observe(createActivity, options, run)).toEqual(observe(createActivityReference, options, run))
+})
+
 it('matches the old Ready, reset, and periodic ordering and timing through disconnect and close', () => {
   const run = (activity: ReturnType<typeof createActivityReference>) => {
     activity.notice({ type: 'activity_ready' })
